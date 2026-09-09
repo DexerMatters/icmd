@@ -1,8 +1,7 @@
 use crossbeam_channel::{Receiver, Sender, bounded};
 use std::thread;
 
-/// A typed, threaded element of a pipeline.
-pub trait Component: Send + 'static {
+pub trait PipelineComponent: Send + 'static {
     type Input: Send + 'static;
     type Output: Send + 'static;
 
@@ -23,7 +22,6 @@ pub trait Component: Send + 'static {
     }
 }
 
-/// The input and output ends of one component or connected pipeline.
 pub struct Endpoint<I: Send + 'static, O: Send + 'static> {
     input: Sender<I>,
     output: Receiver<O>,
@@ -43,13 +41,10 @@ impl<I: Send + 'static, O: Send + 'static> Endpoint<I, O> {
     }
 }
 
-#[doc(hidden)]
 pub struct End;
 
-#[doc(hidden)]
 pub struct Chain<Head, Tail>(Head, Tail);
 
-#[doc(hidden)]
 pub trait Append<Next> {
     type Output;
     fn append(self, next: Next) -> Self::Output;
@@ -75,7 +70,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait StartChain {
     type Input: Send + 'static;
     type Output: Send + 'static;
@@ -85,7 +79,7 @@ pub trait StartChain {
 
 impl<C> StartChain for Chain<C, End>
 where
-    C: Component,
+    C: PipelineComponent,
 {
     type Input = C::Input;
     type Output = C::Output;
@@ -98,7 +92,7 @@ where
 
 impl<Head, Tail> StartChain for Chain<Head, Tail>
 where
-    Head: Component,
+    Head: PipelineComponent,
     Tail: StartChain<Input = Head::Output>,
 {
     type Input = Head::Input;
@@ -136,7 +130,6 @@ where
     }
 }
 
-/// Describes and starts a typed component pipeline.
 pub struct Runtime<C> {
     chain: C,
     capacity: usize,
@@ -144,7 +137,7 @@ pub struct Runtime<C> {
 
 impl<C> Runtime<Chain<C, End>>
 where
-    C: Component,
+    C: PipelineComponent,
 {
     pub fn new(component: C) -> Self {
         Self {
@@ -165,7 +158,7 @@ impl<C> Runtime<C> {
     pub fn then<Next>(self, next: Next) -> Runtime<<C as Append<Next>>::Output>
     where
         C: Append<Next>,
-        Next: Component,
+        Next: PipelineComponent,
     {
         Runtime {
             chain: self.chain.append(next),

@@ -1,11 +1,16 @@
 use crossterm::style::{Attributes, Color};
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-/// A position in terminal coordinates. Positions may be negative so that an
-/// image can be moved partially outside the viewport.
+/// Maximum number of terminal cells in one retained surface.
+pub const MAX_SURFACE_CELLS: usize = 1_048_576;
+
+/// Maximum UTF-8 size of one terminal grapheme emitted as a cell.
+pub const MAX_GLYPH_BYTES: usize = 256;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord)]
 pub struct ScreenPosition {
     pub line: i32,
@@ -18,7 +23,6 @@ impl ScreenPosition {
     }
 }
 
-/// A position in an image, measured in terminal columns and rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord)]
 pub struct ImagePosition {
     pub line: usize,
@@ -100,7 +104,7 @@ pub struct Cell {
     pub(crate) foreground: Color,
     pub(crate) background: Color,
     pub(crate) attributes: Attributes,
-    pub(crate) symbol: String,
+    pub(crate) symbol: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +112,7 @@ pub enum CellError {
     Empty,
     MultipleGraphemes,
     ControlCharacter,
+    SymbolTooLong(usize),
     UnsupportedWidth(usize),
 }
 
@@ -117,6 +122,12 @@ impl fmt::Display for CellError {
             Self::Empty => write!(f, "cell symbol is empty"),
             Self::MultipleGraphemes => write!(f, "cell symbol must contain one grapheme"),
             Self::ControlCharacter => write!(f, "cell symbol contains a control character"),
+            Self::SymbolTooLong(bytes) => {
+                write!(
+                    f,
+                    "cell symbol is {bytes} bytes; maximum is {MAX_GLYPH_BYTES}"
+                )
+            }
             Self::UnsupportedWidth(width) => {
                 write!(f, "cell display width {width} is not supported")
             }
@@ -149,6 +160,9 @@ impl Cell {
         if symbol.is_empty() {
             return Err(CellError::Empty);
         }
+        if symbol.len() > MAX_GLYPH_BYTES {
+            return Err(CellError::SymbolTooLong(symbol.len()));
+        }
         if symbol.graphemes(true).count() != 1 {
             return Err(CellError::MultipleGraphemes);
         }
@@ -163,7 +177,7 @@ impl Cell {
             foreground,
             background,
             attributes,
-            symbol,
+            symbol: Arc::from(symbol),
         })
     }
     pub fn blank() -> Self {
@@ -171,11 +185,11 @@ impl Cell {
             foreground: Color::Reset,
             background: Color::Reset,
             attributes: Attributes::default(),
-            symbol: " ".into(),
+            symbol: Arc::from(" "),
         }
     }
     pub fn width(&self) -> usize {
-        UnicodeWidthStr::width(self.symbol.as_str())
+        UnicodeWidthStr::width(self.symbol.as_ref())
     }
     pub fn symbol(&self) -> &str {
         &self.symbol
@@ -194,7 +208,7 @@ impl Cell {
             foreground: self.foreground,
             background: self.background,
             attributes: self.attributes,
-            symbol: " ".into(),
+            symbol: Arc::from(" "),
         }
     }
 }
@@ -231,12 +245,35 @@ pub enum ImageError {
     UnequalRowWidths,
     OutOfBounds,
     RowWidthMismatch,
+    RowWidthOverflow,
     WideCellAtEdge,
+    SurfaceTooLarge {
+        width: usize,
+        height: usize,
+        cells: usize,
+    },
+    AllocationFailed {
+        cells: usize,
+    },
 }
 
 impl fmt::Display for ImageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "image error: {:?}", self)
+        match self {
+            Self::SurfaceTooLarge {
+                width,
+                height,
+                cells,
+            } => write!(
+                f,
+                "image surface {width}x{height} requests {cells} cells; maximum is {MAX_SURFACE_CELLS}"
+            ),
+            Self::AllocationFailed { cells } => {
+                write!(f, "image allocation failed for {cells} cells")
+            }
+            Self::RowWidthOverflow => write!(f, "image row width overflowed while validating"),
+            other => write!(f, "image error: {other:?}"),
+        }
     }
 }
 impl Error for ImageError {}
@@ -250,13 +287,32 @@ impl Image {
         if width == 0 || height == 0 {
             return Err(ImageError::Empty);
         }
+        let count = width
+            .checked_mul(height)
+            .ok_or(ImageError::SurfaceTooLarge {
+                width,
+                height,
+                cells: usize::MAX,
+            })?;
+        if count > MAX_SURFACE_CELLS {
+            return Err(ImageError::SurfaceTooLarge {
+                width,
+                height,
+                cells: count,
+            });
+        }
         if fill.width() != 1 {
             return Err(ImageError::WideCellAtEdge);
         }
+        let mut cells = Vec::new();
+        cells
+            .try_reserve_exact(count)
+            .map_err(|_| ImageError::AllocationFailed { cells: count })?;
+        cells.resize(count, CellSlot::Lead(fill));
         Ok(Self {
             width,
             height,
-            cells: vec![CellSlot::Lead(fill); width * height],
+            cells,
         })
     }
 
@@ -265,13 +321,45 @@ impl Image {
             return Err(ImageError::Empty);
         }
         let height = rows.len();
-        let width = rows[0].iter().map(Cell::width).sum::<usize>();
+        let width = rows[0]
+            .iter()
+            .try_fold(0usize, |sum, cell| sum.checked_add(cell.width()))
+            .ok_or(ImageError::SurfaceTooLarge {
+                width: usize::MAX,
+                height,
+                cells: usize::MAX,
+            })?;
         if width == 0 {
             return Err(ImageError::Empty);
         }
-        let mut cells = Vec::with_capacity(width * height);
+        let count = width
+            .checked_mul(height)
+            .ok_or(ImageError::SurfaceTooLarge {
+                width,
+                height,
+                cells: usize::MAX,
+            })?;
+        if count > MAX_SURFACE_CELLS {
+            return Err(ImageError::SurfaceTooLarge {
+                width,
+                height,
+                cells: count,
+            });
+        }
+        let mut cells = Vec::new();
+        cells
+            .try_reserve_exact(count)
+            .map_err(|_| ImageError::AllocationFailed { cells: count })?;
         for row in rows {
-            if row.iter().map(Cell::width).sum::<usize>() != width {
+            let row_width = row
+                .iter()
+                .try_fold(0usize, |sum, cell| sum.checked_add(cell.width()))
+                .ok_or(ImageError::SurfaceTooLarge {
+                    width,
+                    height,
+                    cells: usize::MAX,
+                })?;
+            if row_width != width {
                 return Err(ImageError::UnequalRowWidths);
             }
             for cell in row {
@@ -297,18 +385,18 @@ impl Image {
     }
 
     pub(crate) fn validate_rect(&self, rect: Rect, rows: &[Vec<Cell>]) -> Result<(), ImageError> {
-        if rect.width == 0
-            || rect.height == 0
-            || rect.right() > self.width
-            || rect.bottom() > self.height
-        {
-            return Err(ImageError::OutOfBounds);
-        }
+        self.validate_bounds(rect)?;
         if rows.len() != rect.height {
             return Err(ImageError::WrongCellCount);
         }
         for row in rows {
-            if row.iter().map(Cell::width).sum::<usize>() != rect.width {
+            let Some(row_width) = row
+                .iter()
+                .try_fold(0usize, |sum, cell| sum.checked_add(cell.width()))
+            else {
+                return Err(ImageError::RowWidthOverflow);
+            };
+            if row_width != rect.width {
                 return Err(ImageError::RowWidthMismatch);
             }
         }
@@ -320,7 +408,7 @@ impl Image {
             if edit.position.column >= self.width || edit.position.line >= self.height {
                 return Err(ImageError::OutOfBounds);
             }
-            if edit.cell.width() == 2 && edit.position.column + 1 >= self.width {
+            if edit.cell.width() == 2 && edit.position.column.saturating_add(1) >= self.width {
                 return Err(ImageError::WideCellAtEdge);
             }
         }
@@ -348,9 +436,16 @@ impl Image {
     }
 
     fn clear_span(&mut self, start: usize, end: usize) {
-        for cell in &mut self.cells[start..end] {
-            *cell = CellSlot::Lead(Cell::blank());
-        }
+        self.cells[start..end].fill(CellSlot::Lead(Cell::blank()));
+    }
+
+    fn validate_bounds(&self, rect: Rect) -> Result<(), ImageError> {
+        (rect.width > 0
+            && rect.height > 0
+            && rect.right() <= self.width
+            && rect.bottom() <= self.height)
+            .then_some(())
+            .ok_or(ImageError::OutOfBounds)
     }
 
     pub(crate) fn patch_rect(
@@ -424,6 +519,38 @@ impl Image {
     pub(crate) fn cell_at(&self, line: usize, column: usize) -> &CellSlot {
         &self.cells[line * self.width + column]
     }
+
+    pub(crate) fn crop(&self, rect: Rect) -> Result<Self, ImageError> {
+        self.validate_bounds(rect)?;
+        let mut rows = Vec::with_capacity(rect.height);
+        for line in rect.line..rect.bottom() {
+            let mut row = Vec::with_capacity(rect.width);
+            let mut column = rect.column;
+            while column < rect.right() {
+                match self.cell_at(line, column) {
+                    CellSlot::Lead(cell) if cell.width() == 2 => {
+                        if column + 1 < rect.right() {
+                            row.push(cell.clone());
+                            column += 2;
+                        } else {
+                            row.push(cell.as_blank());
+                            column += 1;
+                        }
+                    }
+                    CellSlot::Lead(cell) => {
+                        row.push(cell.clone());
+                        column += 1;
+                    }
+                    CellSlot::Continuation(cell) => {
+                        row.push(cell.as_blank());
+                        column += 1;
+                    }
+                }
+            }
+            rows.push(row);
+        }
+        Self::from_rows(rows)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,7 +613,6 @@ pub enum Operation {
         id: ImageId,
         level: i32,
     },
-    /// Changes the tie-break order between images at the same level.
     SetOrder {
         id: ImageId,
         order: u64,

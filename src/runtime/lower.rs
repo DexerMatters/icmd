@@ -8,90 +8,69 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded};
 use slotmap::SlotMap;
 
-use crate::basic::{DomId, DomNode, DomProps, Key, Node, common::NodeKind, context::Context};
-
-slotmap::new_key_type! {
-    pub(crate) struct FiberId;
-}
-
-pub(crate) type Cleanup = Box<dyn FnOnce() + Send>;
-pub(crate) type EffectCallback = Box<dyn FnOnce() -> Option<Cleanup> + Send>;
-pub(crate) type StateUpdateCallback = Box<dyn FnOnce(&mut (dyn Any + Send)) + Send>;
-pub(crate) type UpdateQueue = Arc<Mutex<VecDeque<StateUpdate>>>;
-
-pub(crate) enum HookSlot {
-    State(Box<dyn Any + Send>),
-    Ref(Box<dyn Any + Send>),
-    Memo {
-        dependencies: Box<dyn Any + Send>,
-        value: Box<dyn Any + Send>,
-    },
-    Effect {
-        dependencies: Box<dyn Any + Send>,
-        cleanup: Option<Cleanup>,
-        pending: Option<EffectCallback>,
-    },
-}
-
-impl HookSlot {
-    pub(crate) fn cleanup(self) {
-        if let Self::Effect {
-            cleanup: Some(cleanup),
-            ..
-        } = self
-        {
-            cleanup();
-        }
-    }
-}
-
-pub(crate) struct StateUpdate {
-    pub fiber: FiberId,
-    pub hook: usize,
-    pub apply: StateUpdateCallback,
-}
+use super::hooks::{FiberId, HookSlot, UpdateQueue};
+use crate::basic::{
+    DomId, DomNode, DomProps, Key, Node,
+    common::{NodeKind, RenderFn},
+    context::{Context, ContextValues},
+};
 
 type FiberArena = SlotMap<FiberId, Fiber>;
 
 enum FiberKind {
     Root,
-    Image(crate::Image),
+    Image {
+        id: DomId,
+        image: crate::Image,
+    },
+    Text {
+        id: DomId,
+        text: Box<crate::Text>,
+    },
+    Element {
+        id: DomId,
+        props: Box<DomProps>,
+    },
+    Provider {
+        context: u64,
+    },
     Function {
         type_id: TypeId,
-        render_fn: fn(&mut Context, &dyn Any) -> Node,
+        props_type_id: TypeId,
+        render_fn: RenderFn,
     },
     Fragment,
-    Empty,
 }
 
 struct Fiber {
+    parent: Option<FiberId>,
     key: Option<Key>,
     kind: FiberKind,
-    dom_id: Option<DomId>,
-    dom_props: Option<DomProps>,
     children: Vec<FiberId>,
     props: Option<Arc<dyn Any + Send + Sync>>,
     hooks: Vec<HookSlot>,
+    provided_context: ContextValues,
 }
 
 impl Fiber {
     fn root() -> Self {
         Self {
+            parent: None,
             key: None,
             kind: FiberKind::Root,
-            dom_id: None,
-            dom_props: None,
             children: Vec::new(),
             props: None,
             hooks: Vec::new(),
+            provided_context: ContextValues::default(),
         }
     }
 }
 
-/// Stateful reactive lowering from function components to a host-only DOM tree.
+/// Reconciles logical fibers and emits a host-only DOM tree.
 ///
-/// `Lower` owns fiber identity and hooks. It deliberately knows nothing about
-/// renderer operations; a later DOM commit stage can consume its output.
+/// Function components, providers, and fragments are logical fibers and are
+/// flattened during lowering. Empty and multi-host roots receive an internal
+/// wrapper element so the commit stage always receives one host root.
 pub struct Lower {
     fibers: FiberArena,
     root: FiberId,
@@ -125,12 +104,18 @@ impl Lower {
     }
 
     fn lower(&mut self, node: Node) -> DomNode {
-        assert!(
-            matches!(&node.kind, NodeKind::Component { .. }),
-            "Lower requires a component as its root input"
-        );
         self.apply_updates();
         self.root_node = Some(node.clone());
+        self.reconcile_children(self.root, vec![node]);
+        self.commit_effects();
+        self.root_dom()
+    }
+
+    fn rerender(&mut self) -> DomNode {
+        let node = self
+            .root_node
+            .clone()
+            .expect("root component is not mounted");
         self.reconcile_children(self.root, vec![node]);
         self.commit_effects();
         self.root_dom()
@@ -148,38 +133,54 @@ impl Lower {
             .children
             .first()
             .copied()
-            .expect("root component was not mounted");
-        self.build_dom(root)
-            .into_iter()
-            .next()
-            .expect("a root component must lower to one DOM element")
+            .expect("root node was not mounted");
+        let mut roots = self.build_dom(root);
+        match roots.len() {
+            1 => roots.pop().expect("root DOM node disappeared"),
+            _ => DomNode::Element {
+                id: DomId(0),
+                props: DomProps::default(),
+                children: roots,
+            },
+        }
     }
 
     fn build_dom(&self, fiber: FiberId) -> Vec<DomNode> {
         let current = &self.fibers[fiber];
         match &current.kind {
-            FiberKind::Function { .. } => vec![DomNode::Element {
-                id: current.dom_id.expect("component DOM id missing"),
-                props: current
-                    .dom_props
-                    .clone()
-                    .expect("component DOM props missing"),
+            FiberKind::Element { id, props } => vec![DomNode::Element {
+                id: *id,
+                props: (**props).clone(),
                 children: current
                     .children
                     .iter()
                     .flat_map(|child| self.build_dom(*child))
                     .collect(),
             }],
-            FiberKind::Image(image) => vec![DomNode::Image {
-                id: current.dom_id.expect("image DOM id missing"),
+            FiberKind::Function { .. } => current
+                .children
+                .iter()
+                .flat_map(|child| self.build_dom(*child))
+                .collect(),
+            FiberKind::Provider { .. } => current
+                .children
+                .iter()
+                .flat_map(|child| self.build_dom(*child))
+                .collect(),
+            FiberKind::Image { id, image } => vec![DomNode::Image {
+                id: *id,
                 image: image.clone(),
+            }],
+            FiberKind::Text { id, text } => vec![DomNode::Text {
+                id: *id,
+                text: text.as_ref().clone(),
             }],
             FiberKind::Fragment => current
                 .children
                 .iter()
                 .flat_map(|child| self.build_dom(*child))
                 .collect(),
-            FiberKind::Empty | FiberKind::Root => Vec::new(),
+            FiberKind::Root => Vec::new(),
         }
     }
 
@@ -234,7 +235,7 @@ impl Lower {
                 self.reconcile_node(fiber, node);
                 fiber
             } else {
-                self.mount_node(node)
+                self.mount_node(parent, node)
             };
             children.push(child);
         }
@@ -248,55 +249,97 @@ impl Lower {
 
     fn compatible(&self, fiber: FiberId, node: &Node) -> bool {
         match (&self.fibers[fiber].kind, &node.kind) {
-            (FiberKind::Image(_), NodeKind::Image(_))
-            | (FiberKind::Fragment, NodeKind::Fragment(_))
-            | (FiberKind::Empty, NodeKind::Empty) => true,
-            (FiberKind::Function { type_id, .. }, NodeKind::Component { type_id: next, .. }) => {
-                type_id == next
-            }
+            (FiberKind::Image { .. }, NodeKind::Image(_))
+            | (FiberKind::Text { .. }, NodeKind::Text(_))
+            | (FiberKind::Element { .. }, NodeKind::Element { .. })
+            | (FiberKind::Fragment, NodeKind::Fragment(_)) => true,
+            (
+                FiberKind::Provider { context: current },
+                NodeKind::Provider { context: next, .. },
+            ) => current == next,
+            (
+                FiberKind::Function {
+                    type_id,
+                    props_type_id,
+                    ..
+                },
+                NodeKind::Component {
+                    type_id: next,
+                    props_type_id: next_props,
+                    ..
+                },
+            ) => type_id == next && props_type_id == next_props,
             _ => false,
         }
     }
 
-    fn mount_node(&mut self, node: Node) -> FiberId {
+    fn mount_node(&mut self, parent: FiberId, node: Node) -> FiberId {
         let key = node.node_key().cloned();
-        let (kind, dom_id, dom_props, props) = match &node.kind {
+        let (kind, props, provided_context) = match &node.kind {
             NodeKind::Image(image) => (
-                FiberKind::Image(image.clone()),
-                Some(self.allocate_dom_id()),
+                FiberKind::Image {
+                    id: self.allocate_dom_id(),
+                    image: image.clone(),
+                },
                 None,
-                None,
+                ContextValues::default(),
             ),
+            NodeKind::Text(text) => (
+                FiberKind::Text {
+                    id: self.allocate_dom_id(),
+                    text: Box::new(text.clone()),
+                },
+                None,
+                ContextValues::default(),
+            ),
+            NodeKind::Element { dom, .. } => (
+                FiberKind::Element {
+                    id: self.allocate_dom_id(),
+                    props: Box::new(dom.clone()),
+                },
+                None,
+                ContextValues::default(),
+            ),
+            NodeKind::Provider { context, value, .. } => {
+                let mut provided_context = ContextValues::default();
+                provided_context.insert_erased(*context, value.clone());
+                (
+                    FiberKind::Provider { context: *context },
+                    None,
+                    provided_context,
+                )
+            }
             NodeKind::Component {
                 type_id,
+                props_type_id,
                 render_fn,
-                dom,
                 props,
             } => (
                 FiberKind::Function {
                     type_id: *type_id,
-                    render_fn: *render_fn,
+                    props_type_id: *props_type_id,
+                    render_fn: render_fn.clone(),
                 },
-                Some(self.allocate_dom_id()),
-                Some(dom.clone()),
                 Some(props.clone()),
+                ContextValues::default(),
             ),
-            NodeKind::Fragment(_) => (FiberKind::Fragment, None, None, None),
-            NodeKind::Empty => (FiberKind::Empty, None, None, None),
+            NodeKind::Fragment(_) => (FiberKind::Fragment, None, ContextValues::default()),
         };
         let fiber = self.fibers.insert(Fiber {
+            parent: Some(parent),
             key,
             kind,
-            dom_id,
-            dom_props,
             children: Vec::new(),
             props,
             hooks: Vec::new(),
+            provided_context,
         });
         match node.kind {
             NodeKind::Component { .. } => self.render_component(fiber),
+            NodeKind::Element { children, .. } => self.reconcile_children(fiber, children),
+            NodeKind::Provider { children, .. } => self.reconcile_children(fiber, children),
             NodeKind::Fragment(children) => self.reconcile_children(fiber, children),
-            NodeKind::Image(_) | NodeKind::Empty => {}
+            NodeKind::Image(_) | NodeKind::Text(_) => {}
         }
         fiber
     }
@@ -304,25 +347,77 @@ impl Lower {
     fn reconcile_node(&mut self, fiber: FiberId, node: Node) {
         self.fibers[fiber].key = node.node_key().cloned();
         match node.kind {
-            NodeKind::Image(image) => self.fibers[fiber].kind = FiberKind::Image(image),
-            NodeKind::Component { dom, props, .. } => {
-                self.fibers[fiber].dom_props = Some(dom);
+            NodeKind::Image(image) => {
+                let FiberKind::Image { image: current, .. } = &mut self.fibers[fiber].kind else {
+                    unreachable!()
+                };
+                *current = image;
+            }
+            NodeKind::Text(text) => {
+                let FiberKind::Text { text: current, .. } = &mut self.fibers[fiber].kind else {
+                    unreachable!()
+                };
+                **current = text;
+            }
+            NodeKind::Element { dom, children } => {
+                let FiberKind::Element { props, .. } = &mut self.fibers[fiber].kind else {
+                    unreachable!()
+                };
+                **props = dom;
+                self.reconcile_children(fiber, children);
+            }
+            NodeKind::Component {
+                type_id,
+                props_type_id,
+                render_fn,
+                props,
+            } => {
+                self.fibers[fiber].kind = FiberKind::Function {
+                    type_id,
+                    props_type_id,
+                    render_fn,
+                };
                 self.fibers[fiber].props = Some(props);
                 self.render_component(fiber);
             }
+            NodeKind::Provider {
+                context,
+                value,
+                children,
+            } => {
+                self.fibers[fiber].kind = FiberKind::Provider { context };
+                let mut provided_context = ContextValues::default();
+                provided_context.insert_erased(context, value);
+                self.fibers[fiber].provided_context = provided_context;
+                self.reconcile_children(fiber, children);
+            }
             NodeKind::Fragment(children) => self.reconcile_children(fiber, children),
-            NodeKind::Empty => {}
         }
+    }
+
+    fn inherited_context(&self, fiber: FiberId) -> ContextValues {
+        let mut ancestors = Vec::new();
+        let mut current = self.fibers[fiber].parent;
+        while let Some(parent) = current {
+            ancestors.push(parent);
+            current = self.fibers[parent].parent;
+        }
+
+        let mut inherited = ContextValues::default();
+        for ancestor in ancestors.into_iter().rev() {
+            inherited.extend(&self.fibers[ancestor].provided_context);
+        }
+        inherited
     }
 
     fn render_component(&mut self, fiber: FiberId) {
         let (render, props, hooks) = {
             let current = &mut self.fibers[fiber];
-            let FiberKind::Function { render_fn, .. } = current.kind else {
+            let FiberKind::Function { ref render_fn, .. } = current.kind else {
                 unreachable!()
             };
             (
-                render_fn,
+                render_fn.clone(),
                 current
                     .props
                     .as_ref()
@@ -331,9 +426,18 @@ impl Lower {
                 mem::take(&mut current.hooks),
             )
         };
-        let mut context = Context::new(fiber, hooks, self.updates.clone(), self.wake_tx.clone());
+        let inherited_context = self.inherited_context(fiber);
+        let mut context = Context::new(
+            fiber,
+            hooks,
+            self.updates.clone(),
+            self.wake_tx.clone(),
+            inherited_context,
+        );
         let child = render(&mut context, props.as_ref());
-        self.fibers[fiber].hooks = context.finish();
+        let (hooks, provided_context) = context.finish();
+        self.fibers[fiber].hooks = hooks;
+        self.fibers[fiber].provided_context = provided_context;
         self.reconcile_children(fiber, vec![child]);
     }
 
@@ -386,7 +490,7 @@ impl Drop for Lower {
     }
 }
 
-impl super::pipeline::Component for Lower {
+impl super::pipeline::PipelineComponent for Lower {
     type Input = Node;
     type Output = DomNode;
 
@@ -399,11 +503,10 @@ impl super::pipeline::Component for Lower {
                     if output.send(self.lower(node)).is_err() { break; }
                 }
                 recv(wake) -> _ => {
-                    if self.apply_updates() {
-                        let Some(node) = self.root_node.clone() else { continue; };
-                        self.reconcile_children(self.root, vec![node]);
-                        self.commit_effects();
-                        if output.send(self.root_dom()).is_err() { break; }
+                    if self.apply_updates() && self.root_node.is_some()
+                        && output.send(self.rerender()).is_err()
+                    {
+                        break;
                     }
                 }
             }

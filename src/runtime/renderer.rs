@@ -1,6 +1,7 @@
-use crate::Component;
+use super::pipeline::PipelineComponent;
 use crate::data::{
-    Cell, CellSlot, Frame, Image, ImageError, ImageId, Operation, Rect, ScreenPosition, Size,
+    Cell, CellSlot, Frame, Image, ImageError, ImageId, MAX_SURFACE_CELLS, Operation, Rect,
+    ScreenPosition, Size,
 };
 use crossbeam_channel::{Receiver, Sender};
 use crossterm::cursor::{MoveTo, RestorePosition, SavePosition};
@@ -17,7 +18,18 @@ use std::fmt::Write as _;
 pub enum FrameError {
     DuplicateImage(ImageId),
     UnknownImage(ImageId),
-    InvalidPatch { image: ImageId, error: ImageError },
+    InvalidPatch {
+        image: ImageId,
+        error: ImageError,
+    },
+    SurfaceTooLarge {
+        width: u16,
+        height: u16,
+        cells: usize,
+    },
+    AllocationFailed {
+        cells: usize,
+    },
 }
 
 impl fmt::Display for FrameError {
@@ -27,6 +39,17 @@ impl fmt::Display for FrameError {
             Self::UnknownImage(id) => write!(f, "image {id:?} does not exist"),
             Self::InvalidPatch { image, error } => {
                 write!(f, "invalid patch for {image:?}: {error}")
+            }
+            Self::SurfaceTooLarge {
+                width,
+                height,
+                cells,
+            } => write!(
+                f,
+                "viewport {width}x{height} requests {cells} cells; maximum is {MAX_SURFACE_CELLS}"
+            ),
+            Self::AllocationFailed { cells } => {
+                write!(f, "renderer allocation failed for {cells} cells")
             }
         }
     }
@@ -39,6 +62,7 @@ struct ImageNode {
     position: ScreenPosition,
     level: i32,
     order: u64,
+    mutation: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,8 +85,14 @@ impl Damage {
     fn union(self, other: Self) -> Self {
         let left = self.column.min(other.column);
         let top = self.line.min(other.line);
-        let right = (self.column + self.width).max(other.column + other.width);
-        let bottom = (self.line + self.height).max(other.line + other.height);
+        let right = self
+            .column
+            .saturating_add(self.width)
+            .max(other.column.saturating_add(other.width));
+        let bottom = self
+            .line
+            .saturating_add(self.height)
+            .max(other.line.saturating_add(other.height));
         Self {
             line: top,
             column: left,
@@ -72,28 +102,37 @@ impl Damage {
     }
 }
 
-/// The retained scene and deterministic incremental renderer.
 pub struct Renderer {
     viewport: Size,
     images: HashMap<ImageId, ImageNode>,
     next_order: u64,
+    next_mutation: u64,
     last: Vec<CellSlot>,
     damage: Vec<Damage>,
     full_redraw: bool,
 }
 
 impl Renderer {
+    /// Construct a renderer. This compatibility constructor panics with a
+    /// fixed message when the viewport is outside the bounded surface budget
+    /// or allocation fails; use [`Self::try_new`] when the caller needs
+    /// recovery.
     pub fn new(viewport: Size) -> Self {
-        let cells =
-            vec![CellSlot::Lead(Cell::blank()); viewport.width as usize * viewport.height as usize];
-        Self {
+        Self::try_new(viewport).expect("renderer viewport exceeds the supported surface limit")
+    }
+
+    /// Fallible renderer construction that never mutates state on failure.
+    pub fn try_new(viewport: Size) -> Result<Self, FrameError> {
+        let cells = blank_cells(viewport)?;
+        Ok(Self {
             viewport,
             images: HashMap::new(),
             next_order: 0,
+            next_mutation: 0,
             last: cells,
             damage: Vec::new(),
             full_redraw: true,
-        }
+        })
     }
 
     pub fn viewport(&self) -> Size {
@@ -105,11 +144,9 @@ impl Renderer {
         if let Some(viewport) = frame.viewport
             && viewport != self.viewport
         {
+            let cells = blank_cells(viewport)?;
             self.viewport = viewport;
-            self.last = vec![
-                CellSlot::Lead(Cell::blank());
-                viewport.width as usize * viewport.height as usize
-            ];
+            self.last = cells;
             self.damage.clear();
             self.full_redraw = true;
         }
@@ -125,11 +162,12 @@ impl Renderer {
                     position,
                     level,
                 } => {
-                    self.add_damage(self.node_damage(&ImageNode {
+                    self.add_damage(Self::node_damage_for(&ImageNode {
                         image: image.clone(),
                         position,
                         level,
                         order: self.next_order,
+                        mutation: self.next_mutation,
                     }));
                     self.images.insert(
                         id,
@@ -138,13 +176,15 @@ impl Renderer {
                             position,
                             level,
                             order: self.next_order,
+                            mutation: self.next_mutation,
                         },
                     );
-                    self.next_order = self.next_order.wrapping_add(1);
+                    self.next_order = self.next_order.saturating_add(1);
+                    self.next_mutation = self.next_mutation.saturating_add(1);
                 }
                 Operation::Remove { id } => {
                     if let Some(node) = self.images.remove(&id) {
-                        self.add_damage(self.node_damage(&node));
+                        self.add_damage(Self::node_damage_for(&node));
                     }
                 }
                 Operation::Move { id, position } => {
@@ -166,12 +206,15 @@ impl Renderer {
                     }
                 }
                 Operation::SetOrder { id, order } => {
+                    let mutation = self.next_mutation;
                     let damage = self.images.get_mut(&id).map(|node| {
                         let damage = Self::node_damage_for(node);
                         node.order = order;
+                        node.mutation = mutation;
                         damage
                     });
                     self.next_order = self.next_order.max(order.saturating_add(1));
+                    self.next_mutation = self.next_mutation.saturating_add(1);
                     if let Some(damage) = damage {
                         self.add_damage(damage);
                     }
@@ -214,6 +257,9 @@ impl Renderer {
     }
 
     fn validate_frame(&self, frame: &Frame) -> Result<(), FrameError> {
+        if let Some(viewport) = frame.viewport {
+            validate_viewport(viewport)?;
+        }
         let mut dimensions: HashMap<ImageId, (usize, usize)> = self
             .images
             .iter()
@@ -251,19 +297,29 @@ impl Renderer {
                     let Some((width, height)) = dimensions.get(id) else {
                         return Err(FrameError::UnknownImage(*id));
                     };
-                    if rect.width == 0
+                    let row_width_error = rows.iter().find_map(|row| {
+                        let width = row
+                            .iter()
+                            .try_fold(0usize, |sum, cell| sum.checked_add(cell.width()));
+                        (width != Some(rect.width)).then_some(if width.is_none() {
+                            ImageError::RowWidthOverflow
+                        } else {
+                            ImageError::RowWidthMismatch
+                        })
+                    });
+                    let error = if rect.width == 0
                         || rect.height == 0
                         || rect.right() > *width
                         || rect.bottom() > *height
-                        || rows.len() != rect.height
-                        || rows
-                            .iter()
-                            .any(|row| row.iter().map(Cell::width).sum::<usize>() != rect.width)
                     {
-                        return Err(FrameError::InvalidPatch {
-                            image: *id,
-                            error: ImageError::RowWidthMismatch,
-                        });
+                        Some(ImageError::OutOfBounds)
+                    } else if rows.len() != rect.height {
+                        Some(ImageError::WrongCellCount)
+                    } else {
+                        row_width_error
+                    };
+                    if let Some(error) = error {
+                        return Err(FrameError::InvalidPatch { image: *id, error });
                     }
                 }
                 Operation::PatchCells { id, edits } => {
@@ -273,7 +329,8 @@ impl Renderer {
                     if edits.iter().any(|edit| {
                         edit.position.column >= *width
                             || edit.position.line >= *height
-                            || (edit.cell.width() == 2 && edit.position.column + 1 >= *width)
+                            || (edit.cell.width() == 2
+                                && edit.position.column.saturating_add(1) >= *width)
                     }) {
                         return Err(FrameError::InvalidPatch {
                             image: *id,
@@ -294,9 +351,6 @@ impl Renderer {
             node.image.height(),
         )
     }
-    fn node_damage(&self, node: &ImageNode) -> Damage {
-        Self::node_damage_for(node)
-    }
     fn node_damage_for_rect(node: &ImageNode, rect: Rect) -> Damage {
         Damage::new(
             node.position.line as i64 + rect.line as i64,
@@ -307,7 +361,12 @@ impl Renderer {
     }
     fn add_damage(&mut self, damage: Damage) {
         if damage.width > 0 && damage.height > 0 {
-            self.damage.push(damage);
+            if self.damage.len() >= 4096 {
+                self.damage.clear();
+                self.full_redraw = true;
+            } else {
+                self.damage.push(damage);
+            }
         }
     }
 
@@ -323,8 +382,9 @@ impl Renderer {
             {
                 continue;
             }
-            let better = winner.as_ref().is_none_or(|(_, current)| {
-                (node.level, node.order) > (current.level, current.order)
+            let better = winner.as_ref().is_none_or(|(current_id, current)| {
+                (node.level, node.order, node.mutation, id.0)
+                    > (current.level, current.order, current.mutation, current_id.0)
             });
             if better {
                 winner = Some((*id, node));
@@ -337,11 +397,7 @@ impl Renderer {
             (line as i64 - node.position.line as i64) as usize,
             (column as i64 - node.position.column as i64) as usize,
         );
-        let screen = match slot {
-            CellSlot::Lead(cell) => CellSlot::Lead(cell.clone()),
-            CellSlot::Continuation(cell) => CellSlot::Continuation(cell.clone()),
-        };
-        (Some(id), screen)
+        (Some(id), slot.clone())
     }
 
     fn composed_at(&self, line: usize, column: usize) -> CellSlot {
@@ -368,13 +424,28 @@ impl Renderer {
         cell
     }
 
+    /// Render the pending damage. This compatibility wrapper panics
+    /// deterministically if the bounded diff allocation cannot be reserved;
+    /// use [`Self::try_render_diff`] for a fallible path.
     pub fn render_diff(&mut self) -> Option<String> {
+        self.try_render_diff()
+            .expect("renderer diff allocation failed")
+    }
+
+    /// Render the pending damage without committing it when allocation fails.
+    pub fn try_render_diff(&mut self) -> Result<Option<String>, FrameError> {
         if !self.full_redraw && self.damage.is_empty() {
-            return None;
+            return Ok(None);
         }
         let width = self.viewport.width as usize;
         let height = self.viewport.height as usize;
-        let mut desired = self.last.clone();
+        let mut desired = Vec::new();
+        desired
+            .try_reserve_exact(self.last.len())
+            .map_err(|_| FrameError::AllocationFailed {
+                cells: self.last.len(),
+            })?;
+        desired.extend_from_slice(&self.last);
         if self.full_redraw {
             for line in 0..height {
                 for column in 0..width {
@@ -394,12 +465,41 @@ impl Renderer {
                 }
             }
         }
-        let ansi = encode_diff(&self.last, &desired, self.viewport, self.full_redraw);
+        let ansi = encode_diff(&self.last, &desired, self.viewport, self.full_redraw)?;
         self.last = desired;
         self.damage.clear();
         self.full_redraw = false;
-        ansi
+        Ok(ansi)
     }
+}
+
+fn validate_viewport(viewport: Size) -> Result<(), FrameError> {
+    let cells = usize::from(viewport.width)
+        .checked_mul(usize::from(viewport.height))
+        .ok_or(FrameError::SurfaceTooLarge {
+            width: viewport.width,
+            height: viewport.height,
+            cells: usize::MAX,
+        })?;
+    if cells > MAX_SURFACE_CELLS {
+        return Err(FrameError::SurfaceTooLarge {
+            width: viewport.width,
+            height: viewport.height,
+            cells,
+        });
+    }
+    Ok(())
+}
+
+fn blank_cells(viewport: Size) -> Result<Vec<CellSlot>, FrameError> {
+    validate_viewport(viewport)?;
+    let count = usize::from(viewport.width) * usize::from(viewport.height);
+    let mut cells = Vec::new();
+    cells
+        .try_reserve_exact(count)
+        .map_err(|_| FrameError::AllocationFailed { cells: count })?;
+    cells.resize(count, CellSlot::Lead(Cell::blank()));
+    Ok(cells)
 }
 
 fn mark_footprint(changed: &mut [bool], index: usize, cell: &CellSlot) {
@@ -423,10 +523,16 @@ fn encode_diff(
     desired: &[CellSlot],
     viewport: Size,
     full: bool,
-) -> Option<String> {
+) -> Result<Option<String>, FrameError> {
     let width = viewport.width as usize;
     let height = viewport.height as usize;
-    let mut changed = vec![full; desired.len()];
+    let mut changed = Vec::new();
+    changed
+        .try_reserve_exact(desired.len())
+        .map_err(|_| FrameError::AllocationFailed {
+            cells: desired.len(),
+        })?;
+    changed.resize(desired.len(), full);
     if !full {
         for index in 0..desired.len() {
             if old[index] != desired[index] {
@@ -436,9 +542,14 @@ fn encode_diff(
         }
     }
     if !full && !changed.iter().any(|value| *value) {
-        return None;
+        return Ok(None);
     }
     let mut output = String::new();
+    output
+        .try_reserve(desired.len().saturating_mul(8))
+        .map_err(|_| FrameError::AllocationFailed {
+            cells: desired.len(),
+        })?;
     write!(
         output,
         "{}{}{}{}",
@@ -516,10 +627,10 @@ fn encode_diff(
         RestorePosition
     )
     .unwrap();
-    Some(output)
+    Ok(Some(output))
 }
 
-impl Component for Renderer {
+impl PipelineComponent for Renderer {
     type Input = Frame;
     type Output = Result<String, FrameError>;
 
@@ -540,15 +651,29 @@ impl Component for Renderer {
                     return;
                 }
             }
-            if let Some(diff) = self.render_diff()
-                && output.send(Ok(diff)).is_err()
-            {
-                return;
+            match self.try_render_diff() {
+                Ok(Some(diff)) => {
+                    if output.send(Ok(diff)).is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if output.send(Err(error)).is_err() {
+                        return;
+                    }
+                }
             }
         }
 
-        if let Some(diff) = self.render_diff() {
-            let _ = output.send(Ok(diff));
+        match self.try_render_diff() {
+            Ok(Some(diff)) => {
+                let _ = output.send(Ok(diff));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = output.send(Err(error));
+            }
         }
     }
 }

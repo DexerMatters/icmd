@@ -1,0 +1,7 @@
+error: ui!: malformed opening tag
+  --> tests/ui/fail/path.rs:10:13
+   |
+10 |     let _ = ui! { <widgets::status /> };
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::ui` which comes from the expansion of the macro `ui` (in Nightly builds, run with -Z macro-backtrace for more info)
