@@ -1,11 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
+use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::style::Color;
 use icmd::{
     AlertProps, Attr, BadgeProps, CheckboxProps, Commit, Component, ComponentContext, Dimension,
     DomProps, Fill, Layout, Lower, Node, Percent, Props, RadioProps, Renderer, Runtime,
-    ScrollbarProps, Size, SkeletonProps, SpinnerProps, Style, SwitchProps, canvas, empty, fragment,
-    progress_bar, style_patch, text,
+    ScrollEvent, ScrollbarProps, Size, SkeletonProps, SpinnerProps, Style, SwitchProps, canvas,
+    empty, fragment, progress_bar, scrollbar, style_patch, text,
     theme::{Theme, ThemeMode, ThemePreset, theme},
     theme_provider, ui, vbox, view,
 };
@@ -254,6 +255,8 @@ fn widget_props_are_unset_until_extra_modifies_them() {
     assert!(!scroll.viewport_len.is_set());
     assert!(!scroll.length.is_set());
     assert!(!scroll.orientation.is_set());
+    assert!(!scroll.enable_mouse.is_set());
+    assert!(!scroll.enable_wheel.is_set());
 
     let spinner: SpinnerProps = Default::default();
     assert!(!spinner.frame.is_set());
@@ -274,4 +277,80 @@ fn widget_props_are_unset_until_extra_modifies_them() {
     assert!(!canvas.width.is_set());
     assert!(!canvas.height.is_set());
     assert!(!canvas.draw.is_set());
+}
+
+#[test]
+fn standalone_scrollbar_handles_wheel_track_clicks_and_thumb_dragging() {
+    let scroll_events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let events = scroll_events.clone();
+    let node = scrollbar
+        .props(ScrollbarProps {
+            content_len: Attr::Set(10),
+            viewport_len: Attr::Set(3),
+            length: Attr::Set(4),
+            ..ScrollbarProps::default()
+        })
+        .events(move |handlers| {
+            handlers.scroll /= move |_event: ScrollEvent| {
+                events.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            };
+        })
+        .node();
+    let viewport = Size::new(1, 4);
+    let (commit, _, dispatcher) = Commit::new_with_events(viewport);
+    let (input, output) = Runtime::new(Lower::default())
+        .then(commit)
+        .then(Renderer::new(viewport))
+        .start();
+    input.send(node).unwrap();
+    let first = output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+
+    for _ in 0..4 {
+        dispatcher.dispatch(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        }));
+    }
+    let wheeled = output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert_ne!(first, wheeled);
+
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 0,
+        row: 3,
+        modifiers: KeyModifiers::empty(),
+    }));
+    let clicked = output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert_ne!(wheeled, clicked);
+
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 0,
+        row: 3,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 0,
+        row: 3,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 0,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(scroll_events.load(std::sync::atomic::Ordering::SeqCst) >= 3);
 }

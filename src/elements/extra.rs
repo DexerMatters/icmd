@@ -5,8 +5,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     Attr, Cell, CellEdit, CellError, DomProps, Edges, Image, ImageError, ImagePosition, Layout,
-    Node, Props, Span, Text,
-    basic::{ComponentContext, view},
+    Node, PointerButton, PointerEvent, Props, ScrollEvent, Span, Text, WheelEvent,
+    basic::{ComponentContext, EventListener, Ref, StateSetter, view},
     theme::Theme,
     ui,
 };
@@ -57,38 +57,161 @@ pub enum ScrollbarOrientation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScrollbarProps {
+    /// Current scroll offset. When set, update it from `on_scroll` to keep the thumb controlled.
     pub offset: Attr<u64>,
     pub content_len: Attr<u64>,
     pub viewport_len: Attr<u64>,
     pub length: Attr<u16>,
     pub orientation: Attr<ScrollbarOrientation>,
+    pub enable_mouse: Attr<bool>,
+    pub enable_wheel: Attr<bool>,
 }
 
 pub fn scrollbar(cx: &mut ComponentContext, props: &Props<ScrollbarProps>) -> Node {
     let theme = cx.use_theme();
     let length = usize::from(props.length | 8);
-    if length == 0 {
-        return ui! { <view dom={props.dom.clone()}>{Text::new("")}</view> };
-    }
-
+    let orientation = props.orientation | ScrollbarOrientation::Vertical;
+    let vertical = orientation == ScrollbarOrientation::Vertical;
     let content_len = (props.content_len | 1).max(1);
     let viewport_len = (props.viewport_len | 1).min(content_len);
+    let max_offset = content_len.saturating_sub(viewport_len);
+    let controlled_offset = props.offset.as_ref().copied();
+    let (internal_offset, set_internal_offset) =
+        cx.use_state(|| controlled_offset.unwrap_or_default().min(max_offset));
+    let offset_ref = cx.use_ref(|| controlled_offset.unwrap_or(internal_offset).min(max_offset));
+    let drag_grab = cx.use_ref(|| None::<i32>);
+    let current_offset = controlled_offset.unwrap_or(internal_offset).min(max_offset);
+    *offset_ref.lock().expect("scrollbar offset ref poisoned") = current_offset;
+
     let thumb_len = if viewport_len >= content_len {
         length
     } else {
         (viewport_len as u128 * length as u128).div_ceil(content_len as u128) as usize
     }
-    .clamp(1, length);
-    let max_offset = content_len.saturating_sub(viewport_len);
-    let max_start = length - thumb_len;
+    .clamp(1, length.max(1));
+    let max_start = length.saturating_sub(thumb_len);
     let thumb_start = if max_offset == 0 {
         0
     } else {
-        (((props.offset | 0).min(max_offset) as u128 * max_start as u128 + max_offset as u128 / 2)
-            / max_offset as u128) as usize
+        ((current_offset * max_start as u64) + max_offset / 2)
+            .checked_div(max_offset)
+            .unwrap_or_default() as usize
     };
+    let enable_mouse = props.enable_mouse | true;
+    let wheel_enabled = props.enable_wheel | true;
 
-    let (track, thumb, separator) = match props.orientation | ScrollbarOrientation::Vertical {
+    let mut dom = props.dom.clone();
+    let scroll_listener = props.dom.events.scroll.clone();
+    let user_pointer_down = props.dom.events.pointer_down.clone();
+    let drag_grab_down = drag_grab.clone();
+    let setter_down = set_internal_offset.clone();
+    let offset_ref_down = offset_ref.clone();
+    let scroll_down = scroll_listener.clone();
+    dom.events.pointer_down /= EventListener::new(move |event: PointerEvent| {
+        if enable_mouse && event.is_primary_button() {
+            let coordinate = scrollbar_coordinate(event.local_position, vertical);
+            if coordinate >= thumb_start as i32
+                && coordinate < thumb_start.saturating_add(thumb_len) as i32
+            {
+                *drag_grab_down.lock().expect("scrollbar drag ref poisoned") =
+                    Some(coordinate.saturating_sub(thumb_start as i32));
+            } else {
+                *drag_grab_down.lock().expect("scrollbar drag ref poisoned") = None;
+                let next = scrollbar_offset_from_track(coordinate, length, thumb_len, max_offset);
+                update_scrollbar_offset(
+                    &setter_down,
+                    &offset_ref_down,
+                    &scroll_down,
+                    next,
+                    max_offset,
+                    vertical,
+                );
+            }
+        }
+        call_listener(&user_pointer_down, event);
+    });
+
+    let user_pointer_move = props.dom.events.pointer_move.clone();
+    let drag_grab_move = drag_grab.clone();
+    let setter_move = set_internal_offset.clone();
+    let offset_ref_move = offset_ref.clone();
+    let scroll_move = scroll_listener.clone();
+    dom.events.pointer_move /= EventListener::new(move |event: PointerEvent| {
+        if enable_mouse
+            && event.buttons & PointerButton::Primary.bit() != 0
+            && let Some(grab) = *drag_grab_move.lock().expect("scrollbar drag ref poisoned")
+        {
+            let coordinate = scrollbar_coordinate(event.local_position, vertical);
+            let travel = length.saturating_sub(thumb_len) as i32;
+            if travel > 0 && max_offset > 0 {
+                let start = coordinate.saturating_sub(grab).clamp(0, travel);
+                let next = (start as u64 * max_offset + travel as u64 / 2)
+                    .checked_div(travel as u64)
+                    .unwrap_or_default();
+                update_scrollbar_offset(
+                    &setter_move,
+                    &offset_ref_move,
+                    &scroll_move,
+                    next,
+                    max_offset,
+                    vertical,
+                );
+            }
+        }
+        call_listener(&user_pointer_move, event);
+    });
+
+    let user_pointer_up = props.dom.events.pointer_up.clone();
+    let drag_grab_up = drag_grab.clone();
+    dom.events.pointer_up /= EventListener::new(move |event: PointerEvent| {
+        *drag_grab_up.lock().expect("scrollbar drag ref poisoned") = None;
+        call_listener(&user_pointer_up, event);
+    });
+    let user_pointer_cancel = props.dom.events.pointer_cancel.clone();
+    let drag_grab_cancel = drag_grab.clone();
+    dom.events.pointer_cancel /= EventListener::new(move |event: PointerEvent| {
+        *drag_grab_cancel
+            .lock()
+            .expect("scrollbar drag ref poisoned") = None;
+        call_listener(&user_pointer_cancel, event);
+    });
+
+    let user_wheel = props.dom.events.wheel.clone();
+    let setter_wheel = set_internal_offset.clone();
+    let offset_ref_wheel = offset_ref.clone();
+    let scroll_wheel = scroll_listener.clone();
+    dom.events.wheel /= EventListener::new(move |event: WheelEvent| {
+        if enable_mouse && wheel_enabled {
+            let delta = if vertical {
+                i32::from(event.delta_y)
+            } else if event.delta_x != 0 {
+                i32::from(event.delta_x)
+            } else {
+                i32::from(event.delta_y)
+            };
+            let current = *offset_ref_wheel
+                .lock()
+                .expect("scrollbar offset ref poisoned");
+            let next = current
+                .saturating_add_signed(i64::from(delta))
+                .clamp(0, max_offset);
+            update_scrollbar_offset(
+                &setter_wheel,
+                &offset_ref_wheel,
+                &scroll_wheel,
+                next,
+                max_offset,
+                vertical,
+            );
+        }
+        call_listener(&user_wheel, event);
+    });
+
+    if length == 0 {
+        return ui! { <view dom={dom}>{Text::new("")}</view> };
+    }
+
+    let (track, thumb, separator) = match orientation {
         ScrollbarOrientation::Vertical => ("│", "┃", "\n"),
         ScrollbarOrientation::Horizontal => ("─", "━", ""),
     };
@@ -106,7 +229,79 @@ pub fn scrollbar(cx: &mut ComponentContext, props: &Props<ScrollbarProps>) -> No
             spans.push(Span::new(separator));
         }
     }
-    ui! { <view dom={props.dom.clone()}>{Text::from_spans(spans)}</view> }
+    ui! { <view dom={dom}>{Text::from_spans(spans)}</view> }
+}
+
+fn scrollbar_coordinate(position: crate::ScreenPosition, vertical: bool) -> i32 {
+    if vertical {
+        position.line
+    } else {
+        position.column
+    }
+}
+
+fn scrollbar_offset_from_track(
+    coordinate: i32,
+    length: usize,
+    thumb_len: usize,
+    max_offset: u64,
+) -> u64 {
+    let travel = length.saturating_sub(thumb_len) as i32;
+    if travel <= 0 || max_offset == 0 {
+        return 0;
+    }
+    let start = coordinate
+        .saturating_sub(thumb_len as i32 / 2)
+        .clamp(0, travel);
+    ((start as u64 * max_offset + travel as u64 / 2) / travel as u64).min(max_offset)
+}
+
+fn update_scrollbar_offset(
+    setter: &StateSetter<u64>,
+    offset_ref: &Ref<u64>,
+    listener: &Attr<EventListener<ScrollEvent>>,
+    next: u64,
+    max_offset: u64,
+    vertical: bool,
+) {
+    let next = next.min(max_offset);
+    let mut current = offset_ref.lock().expect("scrollbar offset ref poisoned");
+    if *current == next {
+        return;
+    }
+    let before = *current;
+    *current = next;
+    setter.set(next);
+    let offset = i32::try_from(next).unwrap_or(i32::MAX);
+    let max = i32::try_from(max_offset).unwrap_or(i32::MAX);
+    let delta = i32::try_from(next).unwrap_or(i32::MAX) - i32::try_from(before).unwrap_or(i32::MAX);
+    let event = if vertical {
+        ScrollEvent {
+            offset_x: 0,
+            offset_y: offset,
+            max_x: 0,
+            max_y: max,
+            delta_x: 0,
+            delta_y: delta,
+        }
+    } else {
+        ScrollEvent {
+            offset_x: offset,
+            offset_y: 0,
+            max_x: max,
+            max_y: 0,
+            delta_x: delta,
+            delta_y: 0,
+        }
+    };
+    call_listener(listener, event);
+}
+
+fn call_listener<T: Clone>(slot: &Attr<EventListener<T>>, event: T) {
+    let listener: Option<EventListener<T>> = slot.clone().into();
+    if let Some(listener) = listener {
+        listener.call(event);
+    }
 }
 
 pub type ScrollBarProps = ScrollbarProps;

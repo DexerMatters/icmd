@@ -4,7 +4,7 @@ use crossterm::style::Color;
 
 use crate::{BorderKind, Cell, DomId, DomNode, Fill, Image, Overflow, Rect, ScreenPosition};
 
-use super::super::event::{EventRect, EventRegion, ScrollOffset, ScrollRegion};
+use super::super::event::{EventRect, EventRegion, ScrollOffset, ScrollRegion, scrollbar_region};
 use super::Commit;
 use super::geometry::RectI;
 use super::style::{content_insets, scroll_spec};
@@ -138,15 +138,53 @@ impl Commit {
                 );
                 let inner = rect.inset(style.border.insets());
                 let base_content = inner.inset(style.padding);
-                let spec = scroll_spec(&style.overflow);
+                let spec = scroll_spec(&style);
                 let (content, bar_vertical, bar_horizontal, children_layouts, extent) =
                     self.layout_scroll_content(children, base_content, &style, spec.as_ref());
+                let max_x = extent.0.saturating_sub(content.width).max(0);
+                let max_y = extent.1.saturating_sub(content.height).max(0);
+                let offset = if spec.is_some() {
+                    let mut offsets = self.scroll_offsets.lock().expect("scroll mutex poisoned");
+                    let offset = offsets.entry(*id).or_default();
+                    offset.x = offset.x.clamp(0, max_x);
+                    offset.y = offset.y.clamp(0, max_y);
+                    *offset
+                } else {
+                    ScrollOffset::default()
+                };
                 let scroll_region = spec.as_ref().map(|spec| ScrollRegion {
-                    max_x: extent.0.saturating_sub(content.width).max(0),
-                    max_y: extent.1.saturating_sub(content.height).max(0),
+                    max_x,
+                    max_y,
                     viewport_height: content.height,
-                    axes: spec.axes,
+                    horizontal: spec.horizontal,
+                    vertical: spec.vertical,
                     wheel_step: spec.wheel_step,
+                    wheel: spec.wheel,
+                    enable_mouse: spec.enable_mouse,
+                    vertical_bar: bar_vertical
+                        .then(|| {
+                            scrollbar_region(
+                                content.line,
+                                content.right(),
+                                content.height,
+                                extent.1,
+                                offset.y,
+                                true,
+                            )
+                        })
+                        .flatten(),
+                    horizontal_bar: bar_horizontal
+                        .then(|| {
+                            scrollbar_region(
+                                content.bottom(),
+                                content.column,
+                                content.width,
+                                extent.0,
+                                offset.x,
+                                false,
+                            )
+                        })
+                        .flatten(),
                 });
 
                 if *id != DomId(0)
@@ -172,21 +210,12 @@ impl Commit {
                 }
 
                 let child_clip = match spec {
-                    Some(_) => clip.restrict(content),
-                    None => match &style.overflow {
-                        Overflow::Clip => clip.restrict(inner),
-                        Overflow::Visible => clip,
-                        Overflow::Scroll(_) | Overflow::Auto(_) => unreachable!(),
-                    },
-                };
-                let offset = if let Some(scroll) = scroll_region {
-                    let mut offsets = self.scroll_offsets.lock().expect("scroll mutex poisoned");
-                    let offset = offsets.entry(*id).or_default();
-                    offset.x = offset.x.clamp(0, scroll.max_x.max(0));
-                    offset.y = offset.y.clamp(0, scroll.max_y.max(0));
-                    *offset
-                } else {
-                    ScrollOffset::default()
+                    Some(ref spec) => clip.restrict_axes(content, spec.horizontal, spec.vertical),
+                    None => clip.restrict_axes(
+                        inner,
+                        style.overflow_x == Overflow::Clip,
+                        style.overflow_y == Overflow::Clip,
+                    ),
                 };
                 for (child, mut child_rect) in children_layouts {
                     if spec.is_some() {

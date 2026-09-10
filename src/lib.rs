@@ -19,16 +19,15 @@ pub use elements::{
 };
 
 pub use basic::{
-    __ui_apply, __ui_events, __ui_tag_names_equal, Align, Attr, Attributes, AutoProps,
-    AxisPosition, BorderKind, BorderStyle, Component, ComponentContext, Context, ContextKey,
-    Dimension, DomId, DomNode, DomProps, Edges, EffectResult, ElementComponent, ElementContext,
-    EventHandlers, EventListener, Fill, FillError, FocusEvent, Forward, Justify, Key,
-    KeyboardEvent, Layout, Node, Overflow, OverflowScrollbarStyle, PasteEvent, Percent,
-    PercentBasis, Point, PointerButton, PointerEvent, PointerEventKind, PointerId, PointerType,
-    Props, PropsTransform, ProviderProps, Ref as ElementRef, ResizeEvent, ScrollAxes, ScrollProps,
-    Span, StateSetter, Style, StylePatch, Text, TextAlign, TextOverflow, TextStyle, TextWrap,
-    Visibility, WheelEvent, create_context, empty, fragment, provider, style, style_patch, text,
-    view,
+    __ui_apply, __ui_events, __ui_tag_names_equal, Align, Attr, Attributes, AxisPosition,
+    BorderKind, BorderStyle, Component, ComponentContext, Context, ContextKey, Dimension, DomId,
+    DomNode, DomProps, Edges, EffectResult, ElementComponent, ElementContext, EventHandlers,
+    EventListener, Fill, FillError, FocusEvent, Forward, Justify, Key, KeyboardEvent, Layout, Node,
+    Overflow, OverflowScrollbarStyle, PasteEvent, Percent, PercentBasis, Point, PointerButton,
+    PointerEvent, PointerEventKind, PointerId, PointerType, Props, PropsTransform, ProviderProps,
+    Ref as ElementRef, ResizeEvent, ScrollEvent, ScrollStyle, Span, StateSetter, Style, StylePatch,
+    Text, TextAlign, TextOverflow, TextStyle, TextWrap, Visibility, WheelEvent, create_context,
+    empty, fragment, provider, style, style_patch, text, view,
 };
 pub use data::{
     Cell, CellEdit, CellError, Frame, Image, ImageError, ImageId, ImagePosition, MAX_GLYPH_BYTES,

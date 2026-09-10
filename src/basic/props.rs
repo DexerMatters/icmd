@@ -147,21 +147,17 @@ pub enum Align {
     Stretch,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Overflow {
     #[default]
+    /// Paint content outside the element when the parent clip allows it.
     Visible,
+    /// Clip content at the element's content edge without scrolling.
     Clip,
-    Scroll(ScrollProps),
-    Auto(AutoProps),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum ScrollAxes {
-    #[default]
-    Both,
-    Vertical,
-    Horizontal,
+    /// Clip and scroll only when content exceeds the available extent.
+    Auto,
+    /// Clip and create a scrolling surface, reserving scrollbars when enabled.
+    Scroll,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,42 +183,15 @@ impl Default for OverflowScrollbarStyle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScrollProps {
-    pub axes: ScrollAxes,
-    pub draw_scrollbar: bool,
-    pub wheel_step: u16,
-    pub scrollbar: OverflowScrollbarStyle,
-}
-
-impl Default for ScrollProps {
-    fn default() -> Self {
-        Self {
-            axes: ScrollAxes::Both,
-            draw_scrollbar: true,
-            wheel_step: 1,
-            scrollbar: OverflowScrollbarStyle::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AutoProps {
-    pub axes: ScrollAxes,
-    pub draw_scrollbar: bool,
-    pub wheel_step: u16,
-    pub scrollbar: OverflowScrollbarStyle,
-}
-
-impl Default for AutoProps {
-    fn default() -> Self {
-        Self {
-            axes: ScrollAxes::Both,
-            draw_scrollbar: true,
-            wheel_step: 1,
-            scrollbar: OverflowScrollbarStyle::default(),
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScrollStyle {
+    /// Whether wheel input scrolls eligible containers. Defaults to `true`.
+    pub enable_wheel: Attr<bool>,
+    /// Whether mouse input can wheel, click tracks, or drag scrollbar thumbs. Defaults to `true`.
+    pub enable_mouse: Attr<bool>,
+    pub wheel_step: Attr<u16>,
+    pub draw_scrollbar: Attr<bool>,
+    pub scrollbar: Attr<OverflowScrollbarStyle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -526,7 +495,14 @@ pub struct Style {
     pub gap: Attr<u16>,
     pub justify: Attr<Justify>,
     pub align: Attr<Align>,
+    /// Shorthand applied to both axes unless an axis-specific value is set.
     pub overflow: Attr<Overflow>,
+    /// Horizontal overflow behavior.
+    pub overflow_x: Attr<Overflow>,
+    /// Vertical overflow behavior.
+    pub overflow_y: Attr<Overflow>,
+    /// Input and scrollbar settings for scrollable overflow surfaces.
+    pub scroll: ScrollStyle,
     pub visibility: Attr<Visibility>,
     pub z_index: Attr<i32>,
     pub background: Attr<Color>,
@@ -619,8 +595,9 @@ impl Style {
         }
         merge!(
             layout, width, height, line, column, margin, padding, gap, justify, align, overflow,
-            visibility, z_index, background, fill,
+            overflow_x, overflow_y, visibility, z_index, background, fill,
         );
+        self.scroll = self.scroll.with_overrides(&overrides.scroll);
         self.border = self.border.with_overrides(&overrides.border);
         self.text = self.text.with_overrides(&overrides.text);
         self
@@ -629,6 +606,17 @@ impl Style {
     #[deprecated(note = "use `with_overrides` to make precedence explicit")]
     pub fn merge(self, overrides: &Self) -> Self {
         self.with_overrides(overrides)
+    }
+}
+
+impl ScrollStyle {
+    pub fn with_overrides(mut self, overrides: &Self) -> Self {
+        self.enable_wheel.overlay(&overrides.enable_wheel);
+        self.enable_mouse.overlay(&overrides.enable_mouse);
+        self.wheel_step.overlay(&overrides.wheel_step);
+        self.draw_scrollbar.overlay(&overrides.draw_scrollbar);
+        self.scrollbar.overlay(&overrides.scrollbar);
+        self
     }
 }
 

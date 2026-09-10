@@ -26,8 +26,8 @@
 ///
 /// `dom={...}` forwards a complete [`crate::DomProps`] value, while
 /// `style={|style| ...}` and `events={|events| ...}` mutate the DOM props;
-/// `on_click`, `on_key_down`, and the other `EventHandlers` fields install a
-/// single listener. `key` is applied to the resulting node. Ordinary
+/// `on_click`, `on_scroll`, `on_key_down`, and the other `EventHandlers` fields
+/// install a single listener. `key` is applied to the resulting node. Ordinary
 /// attributes assign to fields on the component's user-defined props.
 #[macro_export]
 macro_rules! ui {
@@ -192,6 +192,7 @@ macro_rules! ui {
     (@set_attr $props:ident $key:ident on_lost_pointer_capture { $value:expr }) => { $props.dom.events.lost_pointer_capture /= $value; };
     (@set_attr $props:ident $key:ident on_click { $value:expr }) => { $props.dom.events.click /= $value; };
     (@set_attr $props:ident $key:ident on_wheel { $value:expr }) => { $props.dom.events.wheel /= $value; };
+    (@set_attr $props:ident $key:ident on_scroll { $value:expr }) => { $props.dom.events.scroll /= $value; };
     (@set_attr $props:ident $key:ident on_key_down { $value:expr }) => { $props.dom.events.key_down /= $value; };
     (@set_attr $props:ident $key:ident on_key_up { $value:expr }) => { $props.dom.events.key_up /= $value; };
     (@set_attr $props:ident $key:ident on_keyboard_event { $value:expr }) => { $props.dom.events.keyboard_event /= $value; };

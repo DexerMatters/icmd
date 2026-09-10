@@ -13,8 +13,8 @@ use std::{
 use crossterm::event::KeyCode;
 use icmd::theme::{Theme, ThemeMode, ThemePreset};
 use icmd::{
-    AlertVariant, Align, AutoProps, BadgeVariant, Component, ComponentContext, Dimension, Edges,
-    Justify, KeyboardEvent, Layout, Node, Overflow, Percent, Props, RuntimeConfig, ScrollAxes,
+    AlertVariant, Align, BadgeVariant, Component, ComponentContext, Dimension, Edges, Justify,
+    KeyboardEvent, Layout, Node, Overflow, Percent, Props, RuntimeConfig, ScrollEvent,
     ScrollbarOrientation, StateSetter, Text, TextOverflow, TextWrap, render, theme_provider, ui,
     view,
 };
@@ -192,15 +192,19 @@ fn components_page(
     }
 }
 
-fn data_page(theme: &Theme) -> Node {
+fn data_page(
+    theme: &Theme,
+    vertical_offset: u64,
+    set_vertical_offset: &StateSetter<u64>,
+    horizontal_offset: u64,
+    set_horizontal_offset: &StateSetter<u64>,
+) -> Node {
     let stream = ui! {
         <card style={|style| {
             style.width /= Dimension::Max;
             style.height /= Dimension::Cells(13);
-            style.overflow /= Overflow::Auto(AutoProps {
-                axes: ScrollAxes::Vertical,
-                ..AutoProps::default()
-            });
+            style.overflow /= Overflow::Clip;
+            style.overflow_y /= Overflow::Auto;
         }}>
             {(0..24).map(|index| ui! {
                 <view style={|style| {
@@ -225,16 +229,29 @@ fn data_page(theme: &Theme) -> Node {
             }).collect::<Node>()}
         </card>
     };
+    let vertical_setter = set_vertical_offset.clone();
     let vertical = ui! {
-        <scrollbar length={9} content_len={24} viewport_len={9} offset={6} />
+        <scrollbar
+            length={9}
+            content_len={24}
+            viewport_len={9}
+            offset={vertical_offset}
+            on_scroll={move |event: ScrollEvent| {
+                vertical_setter.set(event.offset_y.max(0) as u64);
+            }}
+        />
     };
+    let horizontal_setter = set_horizontal_offset.clone();
     let horizontal = ui! {
         <scrollbar
             length={20}
             content_len={72}
             viewport_len={20}
-            offset={18}
+            offset={horizontal_offset}
             orientation={ScrollbarOrientation::Horizontal}
+            on_scroll={move |event: ScrollEvent| {
+                horizontal_setter.set(event.offset_x.max(0) as u64);
+            }}
         />
     };
     let inspector = ui! {
@@ -243,7 +260,7 @@ fn data_page(theme: &Theme) -> Node {
             {vertical}
             {horizontal}
             <divider />
-            <hbox>"x:18"<spacer />"y:06"</hbox>
+            <hbox>{format!("x:{horizontal_offset:02}")}<spacer />{format!("y:{vertical_offset:02}")}</hbox>
             <vbox><muted>"wheel"</muted><muted>"arrows / pgup / pgdn"</muted></vbox>
         </card>
     };
@@ -370,6 +387,8 @@ fn app(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     let (completed, set_completed) = cx.use_state(|| true);
     let (notifications, set_notifications) = cx.use_state(|| true);
     let (tick, set_tick) = cx.use_state(|| 0usize);
+    let (vertical_offset, set_vertical_offset) = cx.use_state(|| 6_u64);
+    let (horizontal_offset, set_horizontal_offset) = cx.use_state(|| 18_u64);
 
     cx.use_effect((), move || {
         let alive = Arc::new(AtomicBool::new(true));
@@ -471,17 +490,21 @@ fn app(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     let page = match tab {
         0 => overview(&theme, tick),
         1 => components_page(completed, &set_completed, notifications, &set_notifications),
-        2 => data_page(&theme),
+        2 => data_page(
+            &theme,
+            vertical_offset,
+            &set_vertical_offset,
+            horizontal_offset,
+            &set_horizontal_offset,
+        ),
         _ => theme_page(&theme, dark, preset_index, &set_dark, &set_preset),
     };
     let body = ui! {
         <view style={|style| {
             style.width /= Dimension::Max;
             style.height /= Dimension::Max;
-            style.overflow /= Overflow::Auto(AutoProps {
-                axes: ScrollAxes::Vertical,
-                ..AutoProps::default()
-            });
+            style.overflow /= Overflow::Clip;
+            style.overflow_y /= Overflow::Auto;
         }}>{page}</view>
     };
     let status = ui! {

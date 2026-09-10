@@ -140,7 +140,6 @@ pub fn divider(cx: &mut ComponentContext, props: &Props<()>) -> Node {
             left: false,
         };
         style.border.foreground /= theme.colors.border;
-        style.border.background /= theme.colors.background;
     })
 }
 

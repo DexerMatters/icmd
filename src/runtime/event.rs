@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::{
-    DomId, ScreenPosition, ScrollAxes, Size,
+    DomId, ScreenPosition, Size,
     basic::{
         EventHandlers, EventListener, FocusEvent, KeyboardEvent, PasteEvent, PointerButton,
-        PointerEvent, PointerEventKind, ResizeEvent, WheelEvent, common::Attr,
+        PointerEvent, PointerEventKind, ResizeEvent, ScrollEvent, WheelEvent, common::Attr,
         events::mouse_details,
     },
 };
@@ -58,8 +58,109 @@ pub(crate) struct ScrollRegion {
     pub(crate) max_x: i32,
     pub(crate) max_y: i32,
     pub(crate) viewport_height: i32,
-    pub(crate) axes: ScrollAxes,
+    pub(crate) horizontal: bool,
+    pub(crate) vertical: bool,
     pub(crate) wheel_step: u16,
+    pub(crate) wheel: bool,
+    pub(crate) enable_mouse: bool,
+    pub(crate) vertical_bar: Option<ScrollbarRegion>,
+    pub(crate) horizontal_bar: Option<ScrollbarRegion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScrollbarRegion {
+    pub(crate) line: i32,
+    pub(crate) column: i32,
+    pub(crate) length: i32,
+    pub(crate) thumb_start: i32,
+    pub(crate) thumb_len: i32,
+    pub(crate) max_offset: i32,
+    pub(crate) vertical: bool,
+}
+
+impl ScrollbarRegion {
+    pub(crate) fn contains_track(self, position: ScreenPosition) -> bool {
+        if self.vertical {
+            position.column == self.column
+                && position.line >= self.line
+                && position.line < self.line.saturating_add(self.length)
+        } else {
+            position.line == self.line
+                && position.column >= self.column
+                && position.column < self.column.saturating_add(self.length)
+        }
+    }
+
+    pub(crate) fn contains_thumb(self, position: ScreenPosition) -> bool {
+        if !self.contains_track(position) {
+            return false;
+        }
+        let coordinate = if self.vertical {
+            position.line
+        } else {
+            position.column
+        };
+        let start = if self.vertical {
+            self.line
+        } else {
+            self.column
+        };
+        let thumb_start = start.saturating_add(self.thumb_start);
+        coordinate >= thumb_start && coordinate < thumb_start.saturating_add(self.thumb_len)
+    }
+
+    fn coordinate(self, position: ScreenPosition) -> i32 {
+        if self.vertical {
+            position.line
+        } else {
+            position.column
+        }
+    }
+
+    fn start(self) -> i32 {
+        if self.vertical {
+            self.line
+        } else {
+            self.column
+        }
+    }
+}
+
+pub(crate) fn scrollbar_region(
+    line: i32,
+    column: i32,
+    length: i32,
+    content_len: i32,
+    offset: i32,
+    vertical: bool,
+) -> Option<ScrollbarRegion> {
+    if length <= 0 {
+        return None;
+    }
+    let content_len = content_len.max(1);
+    let thumb_len = if content_len <= length {
+        length
+    } else {
+        ((length as i64 * length as i64 + content_len as i64 - 1) / content_len as i64)
+            .clamp(1, length as i64) as i32
+    };
+    let max_offset = content_len.saturating_sub(length).max(0);
+    let max_start = length.saturating_sub(thumb_len);
+    let thumb_start = if max_offset == 0 {
+        0
+    } else {
+        ((offset.clamp(0, max_offset) as i64 * max_start as i64 + max_offset as i64 / 2)
+            / max_offset as i64) as i32
+    };
+    Some(ScrollbarRegion {
+        line,
+        column,
+        length,
+        thumb_start,
+        thumb_len,
+        max_offset,
+        vertical,
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -76,11 +177,27 @@ struct EventState {
     hovered: Option<DomId>,
     buttons: u16,
     last_position: ScreenPosition,
+    drag: Option<ScrollDrag>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct PointerCapture {
     target: DomId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScrollDrag {
+    source: DomId,
+    bar: ScrollbarRegion,
+    grab_offset: i32,
+    last_position: ScreenPosition,
+    moved: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollInput {
+    Wheel,
+    Keyboard,
 }
 
 #[derive(Clone)]
@@ -157,6 +274,12 @@ impl EventDispatcher {
                 );
                 state.captured = None;
                 state.buttons = 0;
+            }
+            if state
+                .drag
+                .is_some_and(|drag| !regions.iter().any(|region| region.id == drag.source))
+            {
+                state.drag = None;
             }
             if state
                 .hovered
@@ -353,6 +476,7 @@ impl EventDispatcher {
     fn dispatch_mouse(&self, event: MouseEvent) -> usize {
         let mut pointer_deliveries = Vec::new();
         let mut wheel_deliveries = Vec::new();
+        let mut scroll_deliveries = Vec::new();
         let mut focus_target = None;
         let mut scroll_changed = false;
 
@@ -378,6 +502,8 @@ impl EventDispatcher {
                         target,
                         i32::from(delta_x),
                         i32::from(delta_y),
+                        ScrollInput::Wheel,
+                        &mut scroll_deliveries,
                     );
                 }
             } else {
@@ -410,6 +536,16 @@ impl EventDispatcher {
                     changed_button,
                     state.buttons,
                     event.modifiers,
+                )
+                .with_local_position(
+                    target
+                        .and_then(|id| state.region(id))
+                        .map_or(position, |region| {
+                            ScreenPosition::new(
+                                position.line.saturating_sub(region.rect.line),
+                                position.column.saturating_sub(region.rect.column),
+                            )
+                        }),
                 );
 
                 // Boundary events use normal hit testing. While captured,
@@ -471,6 +607,81 @@ impl EventDispatcher {
                 }
 
                 if let Some(target) = target {
+                    if matches!(kind, PointerEventKind::Down)
+                        && changed_button == PointerButton::Primary
+                    {
+                        state.drag = None;
+                        if let Some((source, bar)) = state.scrollbar_at(target, position) {
+                            let enable_mouse = state
+                                .regions
+                                .iter()
+                                .find(|region| region.id == source)
+                                .and_then(|region| region.scroll)
+                                .is_some_and(|scroll| scroll.enable_mouse);
+                            if enable_mouse {
+                                if bar.contains_thumb(position) {
+                                    state.drag = Some(ScrollDrag {
+                                        source,
+                                        bar,
+                                        grab_offset: bar.coordinate(position).saturating_sub(
+                                            bar.start().saturating_add(bar.thumb_start),
+                                        ),
+                                        last_position: position,
+                                        moved: false,
+                                    });
+                                } else {
+                                    scroll_changed |= self.scrollbar_click(
+                                        source,
+                                        bar,
+                                        position,
+                                        &state,
+                                        &mut scroll_deliveries,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    if matches!(kind, PointerEventKind::Move)
+                        && state.buttons & PointerButton::Primary.bit() != 0
+                        && matches!(changed_button, PointerButton::None | PointerButton::Primary)
+                        && let Some(mut drag) = state.drag
+                    {
+                        let delta_x = drag.last_position.column.saturating_sub(position.column);
+                        let delta_y = drag.last_position.line.saturating_sub(position.line);
+                        if delta_x != 0 || delta_y != 0 {
+                            let coordinate = if drag.bar.vertical {
+                                position.line
+                            } else {
+                                position.column
+                            };
+                            let track_start = drag.bar.start();
+                            let travel = drag.bar.length.saturating_sub(drag.bar.thumb_len);
+                            if travel > 0 && drag.bar.max_offset > 0 {
+                                let desired_start = coordinate
+                                    .saturating_sub(track_start)
+                                    .saturating_sub(drag.grab_offset)
+                                    .clamp(0, travel);
+                                let next = ((desired_start as i64 * drag.bar.max_offset as i64
+                                    + travel as i64 / 2)
+                                    / travel as i64)
+                                    as i32;
+                                if self.set_scroll_offset(
+                                    drag.source,
+                                    drag.bar.vertical,
+                                    next,
+                                    &state,
+                                    &mut scroll_deliveries,
+                                ) {
+                                    drag.moved = true;
+                                    scroll_changed = true;
+                                }
+                            }
+                        }
+                        drag.last_position = position;
+                        state.drag = Some(drag);
+                    }
+
                     queue_pointer(
                         &state,
                         target,
@@ -516,8 +727,10 @@ impl EventDispatcher {
                         // Browser ordering is pointerup -> lostpointercapture
                         // -> click. A click is only produced when the primary
                         // button is released over its original target.
+                        let dragged = state.drag.take().is_some_and(|drag| drag.moved);
                         if changed_button == PointerButton::Primary
                             && normal_target == Some(capture.target)
+                            && !dragged
                         {
                             queue_pointer(
                                 &state,
@@ -603,6 +816,10 @@ impl EventDispatcher {
             listener.call(event);
             count += 1;
         }
+        for (listener, event) in scroll_deliveries {
+            listener.call(event);
+            count += 1;
+        }
         if scroll_changed {
             self.viewport.request_redraw();
         }
@@ -614,6 +831,7 @@ impl EventDispatcher {
 
     fn dispatch_key(&self, event: KeyboardEvent) -> usize {
         let mut scroll_changed = false;
+        let mut scroll_deliveries = Vec::new();
         let callbacks = {
             let state = self.state.read().expect("event registry poisoned");
             let target = state.focused.or_else(|| state.root());
@@ -627,14 +845,22 @@ impl EventDispatcher {
                     {
                         let (delta_x, delta_y, edge, page) = key_scroll(event.key.code);
                         if delta_x != 0 || delta_y != 0 {
-                            scroll_changed |=
-                                self.scroll_from_target(&state, target, delta_x, delta_y);
+                            scroll_changed |= self.scroll_from_target(
+                                &state,
+                                target,
+                                delta_x,
+                                delta_y,
+                                ScrollInput::Keyboard,
+                                &mut scroll_deliveries,
+                            );
                         }
                         if let Some(edge) = edge {
-                            scroll_changed |= self.scroll_to_edge(&state, target, edge);
+                            scroll_changed |=
+                                self.scroll_to_edge(&state, target, edge, &mut scroll_deliveries);
                         }
                         if let Some(page) = page {
-                            scroll_changed |= self.scroll_page(&state, target, page);
+                            scroll_changed |=
+                                self.scroll_page(&state, target, page, &mut scroll_deliveries);
                         }
                     }
                     let mut callbacks =
@@ -657,6 +883,9 @@ impl EventDispatcher {
         for listener in callbacks {
             listener.call(event);
         }
+        for (listener, event) in scroll_deliveries {
+            listener.call(event);
+        }
         if scroll_changed {
             self.viewport.request_redraw();
         }
@@ -669,6 +898,8 @@ impl EventDispatcher {
         target: DomId,
         delta_x: i32,
         delta_y: i32,
+        input: ScrollInput,
+        deliveries: &mut Vec<(EventListener<ScrollEvent>, ScrollEvent)>,
     ) -> bool {
         if delta_x == 0 && delta_y == 0 {
             return false;
@@ -687,13 +918,23 @@ impl EventDispatcher {
                 break;
             };
             if let Some(scroll) = region.scroll {
+                if input == ScrollInput::Wheel && (!scroll.enable_mouse || !scroll.wheel) {
+                    current = region.parent;
+                    continue;
+                }
                 let offset = offsets.entry(id).or_default();
-                let step = i32::from(scroll.wheel_step.max(1));
+                let before_x = offset.x;
+                let before_y = offset.y;
+                let step = if input == ScrollInput::Wheel {
+                    i32::from(scroll.wheel_step.max(1))
+                } else {
+                    1
+                };
                 let requested_x = remaining_x.saturating_mul(step);
                 let requested_y = remaining_y.saturating_mul(step);
                 let (x, consumed_x) = consume_scroll(offset.x, requested_x, scroll.max_x);
                 let (y, consumed_y) = consume_scroll(offset.y, requested_y, scroll.max_y);
-                if matches!(scroll.axes, ScrollAxes::Horizontal | ScrollAxes::Both) {
+                if scroll.horizontal {
                     if x != offset.x {
                         offset.x = x;
                         changed = true;
@@ -706,7 +947,7 @@ impl EventDispatcher {
                         };
                     }
                 }
-                if matches!(scroll.axes, ScrollAxes::Vertical | ScrollAxes::Both) {
+                if scroll.vertical {
                     if y != offset.y {
                         offset.y = y;
                         changed = true;
@@ -719,6 +960,21 @@ impl EventDispatcher {
                         };
                     }
                 }
+                if before_x != offset.x || before_y != offset.y {
+                    queue_scroll_event(
+                        state,
+                        id,
+                        ScrollEvent {
+                            offset_x: offset.x,
+                            offset_y: offset.y,
+                            max_x: scroll.max_x.max(0),
+                            max_y: scroll.max_y.max(0),
+                            delta_x: offset.x.saturating_sub(before_x),
+                            delta_y: offset.y.saturating_sub(before_y),
+                        },
+                        deliveries,
+                    );
+                }
                 if remaining_x == 0 && remaining_y == 0 {
                     break;
                 }
@@ -728,7 +984,75 @@ impl EventDispatcher {
         changed
     }
 
-    fn scroll_to_edge(&self, state: &EventState, target: DomId, end: ScrollEdge) -> bool {
+    fn scrollbar_click(
+        &self,
+        source: DomId,
+        bar: ScrollbarRegion,
+        position: ScreenPosition,
+        state: &EventState,
+        deliveries: &mut Vec<(EventListener<ScrollEvent>, ScrollEvent)>,
+    ) -> bool {
+        let travel = bar.length.saturating_sub(bar.thumb_len);
+        if travel <= 0 || bar.max_offset <= 0 {
+            return false;
+        }
+        let desired_start = bar
+            .coordinate(position)
+            .saturating_sub(bar.start())
+            .saturating_sub(bar.thumb_len / 2)
+            .clamp(0, travel);
+        let next = ((desired_start as i64 * bar.max_offset as i64 + travel as i64 / 2)
+            / travel as i64) as i32;
+        self.set_scroll_offset(source, bar.vertical, next, state, deliveries)
+    }
+
+    fn set_scroll_offset(
+        &self,
+        source: DomId,
+        vertical: bool,
+        value: i32,
+        state: &EventState,
+        deliveries: &mut Vec<(EventListener<ScrollEvent>, ScrollEvent)>,
+    ) -> bool {
+        let mut offsets = self.scroll_offsets.lock().expect("scroll mutex poisoned");
+        let offset = offsets.entry(source).or_default();
+        let before_x = offset.x;
+        let before_y = offset.y;
+        let target = if vertical {
+            &mut offset.y
+        } else {
+            &mut offset.x
+        };
+        if *target == value.max(0) {
+            return false;
+        }
+        *target = value.max(0);
+        let Some(scroll) = state.region(source).and_then(|region| region.scroll) else {
+            return true;
+        };
+        queue_scroll_event(
+            state,
+            source,
+            ScrollEvent {
+                offset_x: offset.x,
+                offset_y: offset.y,
+                max_x: scroll.max_x.max(0),
+                max_y: scroll.max_y.max(0),
+                delta_x: offset.x.saturating_sub(before_x),
+                delta_y: offset.y.saturating_sub(before_y),
+            },
+            deliveries,
+        );
+        true
+    }
+
+    fn scroll_to_edge(
+        &self,
+        state: &EventState,
+        target: DomId,
+        end: ScrollEdge,
+        deliveries: &mut Vec<(EventListener<ScrollEvent>, ScrollEvent)>,
+    ) -> bool {
         let mut current = Some(target);
         let mut visited = HashSet::new();
         let mut offsets = self.scroll_offsets.lock().expect("scroll mutex poisoned");
@@ -740,7 +1064,7 @@ impl EventDispatcher {
                 break;
             };
             if let Some(scroll) = region.scroll
-                && matches!(scroll.axes, ScrollAxes::Vertical | ScrollAxes::Both)
+                && scroll.vertical
             {
                 let offset = offsets.entry(id).or_default();
                 let next = match end {
@@ -748,7 +1072,21 @@ impl EventDispatcher {
                     ScrollEdge::End => scroll.max_y.max(0),
                 };
                 if offset.y != next {
+                    let before = offset.y;
                     offset.y = next;
+                    queue_scroll_event(
+                        state,
+                        id,
+                        ScrollEvent {
+                            offset_x: offset.x,
+                            offset_y: offset.y,
+                            max_x: scroll.max_x.max(0),
+                            max_y: scroll.max_y.max(0),
+                            delta_x: 0,
+                            delta_y: offset.y.saturating_sub(before),
+                        },
+                        deliveries,
+                    );
                     return true;
                 }
             }
@@ -757,7 +1095,13 @@ impl EventDispatcher {
         false
     }
 
-    fn scroll_page(&self, state: &EventState, target: DomId, direction: i32) -> bool {
+    fn scroll_page(
+        &self,
+        state: &EventState,
+        target: DomId,
+        direction: i32,
+        deliveries: &mut Vec<(EventListener<ScrollEvent>, ScrollEvent)>,
+    ) -> bool {
         let mut current = Some(target);
         let mut visited = HashSet::new();
         let mut offsets = self.scroll_offsets.lock().expect("scroll mutex poisoned");
@@ -769,7 +1113,7 @@ impl EventDispatcher {
                 break;
             };
             if let Some(scroll) = region.scroll
-                && matches!(scroll.axes, ScrollAxes::Vertical | ScrollAxes::Both)
+                && scroll.vertical
             {
                 let offset = offsets.entry(id).or_default();
                 let page = scroll.viewport_height.max(1);
@@ -778,7 +1122,21 @@ impl EventDispatcher {
                     .saturating_add(direction.saturating_mul(page))
                     .clamp(0, scroll.max_y.max(0));
                 if next != offset.y {
+                    let before = offset.y;
                     offset.y = next;
+                    queue_scroll_event(
+                        state,
+                        id,
+                        ScrollEvent {
+                            offset_x: offset.x,
+                            offset_y: offset.y,
+                            max_x: scroll.max_x.max(0),
+                            max_y: scroll.max_y.max(0),
+                            delta_x: 0,
+                            delta_y: offset.y.saturating_sub(before),
+                        },
+                        deliveries,
+                    );
                     return true;
                 }
             }
@@ -967,6 +1325,17 @@ fn listener<T: Clone>(slot: &Attr<T>) -> Option<T> {
     slot.clone().into()
 }
 
+fn queue_scroll_event(
+    state: &EventState,
+    target: DomId,
+    event: ScrollEvent,
+    deliveries: &mut Vec<(EventListener<ScrollEvent>, ScrollEvent)>,
+) {
+    for listener in state.route_scroll(target) {
+        deliveries.push((listener, event));
+    }
+}
+
 fn pointer_slot(
     handlers: &EventHandlers,
     handler: PointerHandler,
@@ -988,6 +1357,10 @@ fn pointer_slot(
 }
 
 impl EventState {
+    fn region(&self, id: DomId) -> Option<&EventRegion> {
+        self.regions.iter().find(|region| region.id == id)
+    }
+
     fn hit_target(&self, position: ScreenPosition) -> Option<DomId> {
         self.regions
             .iter()
@@ -1019,6 +1392,10 @@ impl EventState {
         self.route(target, |handlers| listener(&handlers.wheel))
     }
 
+    fn route_scroll(&self, target: DomId) -> Vec<EventListener<ScrollEvent>> {
+        self.route(target, |handlers| listener(&handlers.scroll))
+    }
+
     fn is_pointer_interactive(&self, target: DomId) -> bool {
         [
             PointerHandler::Down,
@@ -1048,6 +1425,39 @@ impl EventState {
             current = region.parent;
         }
         false
+    }
+
+    fn scrollbar_at(
+        &self,
+        target: DomId,
+        position: ScreenPosition,
+    ) -> Option<(DomId, ScrollbarRegion)> {
+        let mut current = Some(target);
+        let mut visited = HashSet::new();
+        while let Some(id) = current {
+            if !visited.insert(id) {
+                break;
+            }
+            let Some(region) = self.regions.iter().find(|region| region.id == id) else {
+                break;
+            };
+            if let Some(scroll) = region.scroll {
+                if scroll
+                    .vertical_bar
+                    .is_some_and(|bar| bar.contains_track(position))
+                {
+                    return scroll.vertical_bar.map(|bar| (id, bar));
+                }
+                if scroll
+                    .horizontal_bar
+                    .is_some_and(|bar| bar.contains_track(position))
+                {
+                    return scroll.horizontal_bar.map(|bar| (id, bar));
+                }
+            }
+            current = region.parent;
+        }
+        None
     }
 
     fn root(&self) -> Option<DomId> {

@@ -3,7 +3,7 @@ use crossterm::style::{Attributes, Color};
 use crate::basic::common::Attr;
 use crate::{Edges, Overflow, Style};
 
-use super::types::{ComputedBorder, ComputedStyle, ComputedText, ScrollSpec};
+use super::types::{ComputedBorder, ComputedScrollStyle, ComputedStyle, ComputedText, ScrollSpec};
 
 pub(super) fn slot<T: Clone>(value: &Attr<T>) -> Option<T> {
     value.clone().into()
@@ -36,6 +36,19 @@ impl ComputedStyle {
             justify: slot(&style.justify).unwrap_or_default(),
             align: slot(&style.align).unwrap_or_default(),
             overflow: slot(&style.overflow).unwrap_or_default(),
+            overflow_x: slot(&style.overflow_x)
+                .or_else(|| slot(&style.overflow))
+                .unwrap_or_default(),
+            overflow_y: slot(&style.overflow_y)
+                .or_else(|| slot(&style.overflow))
+                .unwrap_or_default(),
+            scroll: ComputedScrollStyle {
+                wheel: style.scroll.enable_wheel.unwrap_or(true),
+                enable_mouse: style.scroll.enable_mouse.unwrap_or(true),
+                wheel_step: style.scroll.wheel_step.unwrap_or(1).max(1),
+                draw_scrollbar: style.scroll.draw_scrollbar.unwrap_or(true),
+                scrollbar: style.scroll.scrollbar.clone().unwrap_or_default(),
+            },
             visibility: slot(&style.visibility).unwrap_or_default(),
             z_index: slot(&style.z_index).unwrap_or_default(),
             background: slot(&style.background),
@@ -57,24 +70,20 @@ impl ComputedStyle {
     }
 }
 
-pub(super) fn scroll_spec(overflow: &Overflow) -> Option<ScrollSpec<'_>> {
-    match overflow {
-        Overflow::Scroll(props) => Some(ScrollSpec {
-            axes: props.axes,
-            draw_scrollbar: props.draw_scrollbar,
-            wheel_step: props.wheel_step,
-            scrollbar: &props.scrollbar,
-            always: true,
-        }),
-        Overflow::Auto(props) => Some(ScrollSpec {
-            axes: props.axes,
-            draw_scrollbar: props.draw_scrollbar,
-            wheel_step: props.wheel_step,
-            scrollbar: &props.scrollbar,
-            always: false,
-        }),
-        Overflow::Visible | Overflow::Clip => None,
-    }
+pub(super) fn scroll_spec(style: &ComputedStyle) -> Option<ScrollSpec<'_>> {
+    let horizontal = matches!(style.overflow_x, Overflow::Auto | Overflow::Scroll);
+    let vertical = matches!(style.overflow_y, Overflow::Auto | Overflow::Scroll);
+    (horizontal || vertical).then_some(ScrollSpec {
+        horizontal,
+        vertical,
+        always_horizontal: style.overflow_x == Overflow::Scroll,
+        always_vertical: style.overflow_y == Overflow::Scroll,
+        draw_scrollbar: style.scroll.draw_scrollbar,
+        wheel_step: style.scroll.wheel_step,
+        wheel: style.scroll.wheel,
+        enable_mouse: style.scroll.enable_mouse,
+        scrollbar: &style.scroll.scrollbar,
+    })
 }
 
 pub(super) fn terminal_text() -> ComputedText {

@@ -17,12 +17,11 @@ pub use context::{
 pub use dom::{DomId, DomNode};
 pub use events::{
     EventHandlers, EventListener, FocusEvent, KeyboardEvent, PasteEvent, PointerButton,
-    PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent, WheelEvent,
+    PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent, ScrollEvent, WheelEvent,
 };
 pub use props::{
-    Align, Attributes, AutoProps, AxisPosition, BorderKind, BorderStyle, Dimension, DomProps,
-    Edges, Fill, FillError, Justify, Layout, Overflow, OverflowScrollbarStyle, Percent,
-    PercentBasis, Point, Props, ScrollAxes, ScrollProps, Style, StylePatch, TextStyle, Visibility,
-    style, style_patch,
+    Align, Attributes, AxisPosition, BorderKind, BorderStyle, Dimension, DomProps, Edges, Fill,
+    FillError, Justify, Layout, Overflow, OverflowScrollbarStyle, Percent, PercentBasis, Point,
+    Props, ScrollStyle, Style, StylePatch, TextStyle, Visibility, style, style_patch,
 };
 pub use text::{Span, Text, TextAlign, TextOverflow, TextWrap};

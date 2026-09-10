@@ -1,15 +1,15 @@
 use std::collections::HashSet;
 
 use crate::{
-    Align, Dimension, DomId, DomNode, Edges, Justify, Layout, Overflow, PercentBasis, ScrollAxes,
-    Style, Visibility,
+    Align, Dimension, DomId, DomNode, Edges, Justify, Layout, Overflow, PercentBasis, Style,
+    Visibility,
 };
 
 use super::Commit;
 use super::geometry::{
     RectI, definite_dimension, justify_offset, resolve_dimension, resolve_position,
 };
-use super::style::{content_insets, scroll_spec, slot};
+use super::style::{content_insets, slot};
 use super::text::text_measure;
 use super::types::{ComputedStyle, ComputedText, ScrollSpec};
 
@@ -220,12 +220,13 @@ impl Commit {
             return (base, false, false, children, (width, height));
         };
 
-        let vertical_axis = matches!(spec.axes, ScrollAxes::Vertical | ScrollAxes::Both);
-        let horizontal_axis = matches!(spec.axes, ScrollAxes::Horizontal | ScrollAxes::Both);
+        let vertical_axis = spec.vertical;
+        let horizontal_axis = spec.horizontal;
         let bars_allowed = base.width > 0 && base.height > 0;
-        let mut bar_vertical = bars_allowed && spec.always && spec.draw_scrollbar && vertical_axis;
+        let mut bar_vertical =
+            bars_allowed && spec.always_vertical && spec.draw_scrollbar && vertical_axis;
         let mut bar_horizontal =
-            bars_allowed && spec.always && spec.draw_scrollbar && horizontal_axis;
+            bars_allowed && spec.always_horizontal && spec.draw_scrollbar && horizontal_axis;
 
         let mut seen = [false; 4];
         for _ in 0..4 {
@@ -247,12 +248,12 @@ impl Commit {
                 && vertical_axis
                 && base.width > 0
                 && base.height > 0
-                && (spec.always || height > content.height);
+                && (spec.always_vertical || height > content.height);
             let next_horizontal = spec.draw_scrollbar
                 && horizontal_axis
                 && base.width > 0
                 && base.height > 0
-                && (spec.always || width > content.width);
+                && (spec.always_horizontal || width > content.width);
             if next_vertical == bar_vertical && next_horizontal == bar_horizontal {
                 return (
                     content,
@@ -537,7 +538,12 @@ impl Commit {
             if cross_is_auto && style.align == Align::Stretch && !scrolls_axis(style, !horizontal) {
                 cross = cross_available_for_child(margin, horizontal, available_cross);
             }
-            if matches!(&style.overflow, Overflow::Clip) {
+            let clips_cross = if horizontal {
+                style.overflow_y == Overflow::Clip
+            } else {
+                style.overflow_x == Overflow::Clip
+            };
+            if clips_cross {
                 cross = cross.min(cross_available_for_child(
                     margin,
                     horizontal,
@@ -663,13 +669,10 @@ impl Commit {
 }
 
 pub(super) fn scrolls_axis(style: &ComputedStyle, horizontal: bool) -> bool {
-    let Some(spec) = scroll_spec(&style.overflow) else {
-        return false;
-    };
     if horizontal {
-        matches!(spec.axes, ScrollAxes::Horizontal | ScrollAxes::Both)
+        matches!(style.overflow_x, Overflow::Auto | Overflow::Scroll)
     } else {
-        matches!(spec.axes, ScrollAxes::Vertical | ScrollAxes::Both)
+        matches!(style.overflow_y, Overflow::Auto | Overflow::Scroll)
     }
 }
 
@@ -680,10 +683,12 @@ pub(super) fn collect_scroll_ids(node: &DomNode, ids: &mut HashSet<DomId>) {
         children,
     } = node
     {
-        if matches!(
-            slot(&props.style.overflow),
-            Some(Overflow::Scroll(_) | Overflow::Auto(_))
-        ) {
+        let shorthand = slot(&props.style.overflow).unwrap_or_default();
+        let x = slot(&props.style.overflow_x).unwrap_or(shorthand);
+        let y = slot(&props.style.overflow_y).unwrap_or(shorthand);
+        if matches!(x, Overflow::Scroll | Overflow::Auto)
+            || matches!(y, Overflow::Scroll | Overflow::Auto)
+        {
             ids.insert(*id);
         }
         for child in children {

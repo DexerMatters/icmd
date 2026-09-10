@@ -106,6 +106,8 @@ pub struct PointerEvent {
     pub pointer_type: PointerType,
     pub kind: PointerEventKind,
     pub position: ScreenPosition,
+    /// Position relative to the event target's visible rectangle.
+    pub local_position: ScreenPosition,
     pub button: PointerButton,
     pub buttons: u16,
     pub modifiers: KeyModifiers,
@@ -124,10 +126,16 @@ impl PointerEvent {
             pointer_type: PointerType::Mouse,
             kind,
             position,
+            local_position: position,
             button,
             buttons,
             modifiers,
         }
+    }
+
+    pub(crate) fn with_local_position(mut self, local_position: ScreenPosition) -> Self {
+        self.local_position = local_position;
+        self
     }
 
     pub fn is_primary(&self) -> bool {
@@ -147,6 +155,16 @@ pub struct WheelEvent {
     pub delta_x: i16,
     pub delta_y: i16,
     pub modifiers: KeyModifiers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollEvent {
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub max_x: i32,
+    pub max_y: i32,
+    pub delta_x: i32,
+    pub delta_y: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -178,6 +196,7 @@ pub struct EventHandlers {
     pub lost_pointer_capture: Attr<EventListener<PointerEvent>>,
     pub click: Attr<EventListener<PointerEvent>>,
     pub wheel: Attr<EventListener<WheelEvent>>,
+    pub scroll: Attr<EventListener<ScrollEvent>>,
     pub key_down: Attr<EventListener<KeyboardEvent>>,
     pub key_up: Attr<EventListener<KeyboardEvent>>,
     pub keyboard_event: Attr<EventListener<KeyboardEvent>>,
@@ -207,6 +226,7 @@ impl EventHandlers {
             lost_pointer_capture,
             click,
             wheel,
+            scroll,
             key_down,
             key_up,
             keyboard_event,

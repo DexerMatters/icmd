@@ -1,11 +1,17 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use icmd::{
     Commit, Component, ComponentContext, Dimension, Layout, Lower, Node, Overflow, Props, Renderer,
-    Runtime, ScrollAxes, ScrollProps, Size, text, ui, view,
+    Runtime, Size, text, ui, view,
 };
 
 fn surface(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
@@ -14,7 +20,7 @@ fn surface(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
         .style(|style| {
             style.width /= Dimension::Cells(8);
             style.height /= Dimension::Cells(4);
-            style.overflow /= Overflow::Scroll(ScrollProps::default());
+            style.overflow /= Overflow::Scroll;
         })
         .child(children)
 }
@@ -25,46 +31,36 @@ fn surface_content(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
 
 fn horizontal_surface(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
     let children = props.children.iter().cloned().collect::<Node>();
-    let overflow = ScrollProps {
-        axes: ScrollAxes::Horizontal,
-        ..ScrollProps::default()
-    };
     surface_content
         .style(move |style| {
             style.layout /= Layout::Horizontal;
             style.width /= Dimension::Cells(4);
             style.height /= Dimension::Cells(2);
-            style.overflow /= Overflow::Scroll(overflow);
+            style.overflow_x /= Overflow::Scroll;
+            style.overflow_y /= Overflow::Clip;
         })
         .child(children)
 }
 
 fn auto_surface(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
     let children = props.children.iter().cloned().collect::<Node>();
-    let overflow = icmd::AutoProps {
-        draw_scrollbar: true,
-        ..icmd::AutoProps::default()
-    };
     surface_content
         .style(move |style| {
             style.width /= Dimension::Cells(8);
             style.height /= Dimension::Cells(4);
-            style.overflow /= Overflow::Auto(overflow);
+            style.overflow /= Overflow::Auto;
         })
         .child(children)
 }
 
 fn hidden_scroll_surface(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
     let children = props.children.iter().cloned().collect::<Node>();
-    let overflow = ScrollProps {
-        draw_scrollbar: false,
-        ..ScrollProps::default()
-    };
     surface_content
         .style(move |style| {
             style.width /= Dimension::Cells(8);
             style.height /= Dimension::Cells(4);
-            style.overflow /= Overflow::Scroll(overflow);
+            style.overflow /= Overflow::Scroll;
+            style.scroll.draw_scrollbar /= false;
         })
         .child(children)
 }
@@ -216,4 +212,215 @@ fn auto_hides_bars_without_overflow_and_hidden_scroll_keeps_scrolling() {
         .unwrap()
         .unwrap();
     assert_ne!(first, second);
+}
+
+#[test]
+fn scrollbar_can_be_dragged_by_default_and_disabled_independently() {
+    let children = (0..10)
+        .map(|index| text(format!("row{index}")))
+        .collect::<Vec<_>>();
+    let viewport = Size::new(8, 4);
+    let (commit, _, dispatcher) = Commit::new_with_events(viewport);
+    let (input, output) = Runtime::new(Lower::default())
+        .then(commit)
+        .then(Renderer::new(viewport))
+        .start();
+    input.send(surface.children(children)).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 7,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 7,
+        row: 2,
+        modifiers: KeyModifiers::empty(),
+    }));
+    let dragged = output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert!(dragged.contains("H7"));
+    assert!(!dragged.contains("H0"));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 7,
+        row: 2,
+        modifiers: KeyModifiers::empty(),
+    }));
+
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 7,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    let clicked = output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert!(clicked.contains("H0"));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 7,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 2,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(output.recv_timeout(Duration::from_millis(100)).is_err());
+
+    let children = (0..10)
+        .map(|index| text(format!("row{index}")))
+        .collect::<Vec<_>>();
+    let node = surface_content
+        .style(|style| {
+            style.width /= Dimension::Cells(8);
+            style.height /= Dimension::Cells(4);
+            style.overflow /= Overflow::Scroll;
+            style.scroll.enable_mouse /= false;
+        })
+        .children(children);
+    let (commit, _, dispatcher) = Commit::new_with_events(viewport);
+    let (input, output) = Runtime::new(Lower::default())
+        .then(commit)
+        .then(Renderer::new(viewport))
+        .start();
+    input.send(node).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 7,
+        row: 2,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 7,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(output.recv_timeout(Duration::from_millis(100)).is_err());
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(output.recv_timeout(Duration::from_millis(100)).is_err());
+}
+
+#[test]
+fn wheel_can_be_disabled_without_disabling_keyboard_scrolling() {
+    let children = (0..10)
+        .map(|index| text(format!("row{index}")))
+        .collect::<Vec<_>>();
+    let viewport = Size::new(8, 4);
+    let node = surface_content
+        .style(|style| {
+            style.width /= Dimension::Cells(8);
+            style.height /= Dimension::Cells(4);
+            style.overflow /= Overflow::Scroll;
+            style.scroll.enable_wheel /= false;
+        })
+        .children(children);
+    let (commit, _, dispatcher) = Commit::new_with_events(viewport);
+    let (input, output) = Runtime::new(Lower::default())
+        .then(commit)
+        .then(Renderer::new(viewport))
+        .start();
+    input.send(node).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(output.recv_timeout(Duration::from_millis(100)).is_err());
+
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Key(KeyEvent::new_with_kind(
+        KeyCode::Down,
+        KeyModifiers::empty(),
+        KeyEventKind::Press,
+    )));
+    let keyboard = output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert!(keyboard.contains("H1"));
+}
+
+#[test]
+fn overflow_surfaces_emit_scroll_events() {
+    let events = Arc::new(AtomicUsize::new(0));
+    let listener_events = events.clone();
+    let node = surface_content
+        .style(|style| {
+            style.width /= Dimension::Cells(8);
+            style.height /= Dimension::Cells(4);
+            style.overflow /= Overflow::Scroll;
+        })
+        .events(move |handlers| {
+            handlers.scroll /= move |_event| {
+                listener_events.fetch_add(1, Ordering::SeqCst);
+            };
+        })
+        .children(
+            (0..10)
+                .map(|index| text(format!("row{index}")))
+                .collect::<Vec<_>>(),
+        );
+    let viewport = Size::new(8, 4);
+    let (commit, _, dispatcher) = Commit::new_with_events(viewport);
+    let (input, output) = Runtime::new(Lower::default())
+        .then(commit)
+        .then(Renderer::new(viewport))
+        .start();
+    input.send(node).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert!(events.load(Ordering::SeqCst) > 0);
 }
