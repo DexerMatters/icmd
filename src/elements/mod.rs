@@ -3,6 +3,7 @@ pub(crate) mod canvas;
 pub(crate) mod controls;
 pub(crate) mod feedback;
 pub(crate) mod image;
+pub(crate) mod input;
 pub(crate) mod scroll;
 pub(crate) mod text_edit;
 
