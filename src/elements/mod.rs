@@ -42,8 +42,9 @@ pub use feedback::{
     SpinnerProps, alert, badge, progress_bar, skeleton, spinner,
 };
 pub use image::{ImageProps, image};
-pub use scroll::{ScrollAreaProps, scroll_area};
-pub use text_edit::{
-    InputProps, TextAreaProps, TextClipboardAction, TextClipboardEvent, TextEditHandler,
-    TextValueEvent, input, text_area,
+pub use input::{
+    RawInputAppearance, RawInputMode, RawInputProps, TextClipboardAction, TextClipboardEvent,
+    TextValueEvent, raw_input,
 };
+pub use scroll::{ScrollAreaProps, scroll_area};
+pub use text_edit::{InputProps, TextAreaProps, TextEditHandler, input, text_area};

@@ -186,8 +186,8 @@ pub(crate) fn normalize(value: &str, multiline: bool) -> String {
 /// The pure editor model.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EditModel {
-    value: String,
-    caret: Caret,
+    pub(crate) value: String,
+    pub(crate) caret: Caret,
     /// Preferred terminal-cell column for vertical movement.
     preferred_column: Option<usize>,
     ownership: ValueOwnership,

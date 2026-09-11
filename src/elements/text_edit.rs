@@ -55,22 +55,10 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextValueEvent {
-    pub value: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextClipboardAction {
-    Copy,
-    Cut,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextClipboardEvent {
-    pub action: TextClipboardAction,
-    pub text: String,
-}
+// The value and clipboard event types are owned by the input module; the
+// legacy editor re-exports them so existing callers keep compiling until the
+// public cutover removes this component.
+pub use super::input::{TextClipboardAction, TextClipboardEvent, TextValueEvent};
 
 #[derive(Clone, Default)]
 pub struct InputProps {

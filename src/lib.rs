@@ -13,11 +13,11 @@ pub use theme::{ThemeProviderProps, theme_context, theme_provider};
 pub use elements::{
     AlertProps, AlertVariant, BadgeProps, BadgeVariant, CanvasContext, CanvasDraw, CanvasError,
     CanvasProps, CheckboxProps, ImageProps, InputProps, ProgressBarProps, RadioProps,
-    ScrollAreaProps, SkeletonProps, SpinnerProps, SwitchProps, TextAreaProps, TextClipboardAction,
-    TextClipboardEvent, TextEditHandler, TextValueEvent, alert, badge, blockquote, button, canvas,
-    card, center, checkbox, code, column, container, divider, footer, heading, image, input, kbd,
-    label, muted, paragraph, progress_bar, radio, row, scroll_area, section, skeleton, spacer,
-    spinner, switch, text_area,
+    RawInputAppearance, RawInputMode, RawInputProps, ScrollAreaProps, SkeletonProps, SpinnerProps,
+    SwitchProps, TextAreaProps, TextClipboardAction, TextClipboardEvent, TextEditHandler,
+    TextValueEvent, alert, badge, blockquote, button, canvas, card, center, checkbox, code, column,
+    container, divider, footer, heading, image, input, kbd, label, muted, paragraph, progress_bar,
+    radio, raw_input, row, scroll_area, section, skeleton, spacer, spinner, switch, text_area,
 };
 
 pub use basic::{
@@ -47,11 +47,11 @@ pub use runtime::{
 pub mod prelude {
     pub use crate::{
         Attr, Component, ComponentContext, Dimension, DomProps, Edges, ImageLoading, ImageSource,
-        InputProps, Layout, Node, Props, Ref, ScrollAreaProps, ScrollAxes, ScrollDelta,
-        ScrollEvent, ScrollOffset, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Style,
-        StylePatch, TextAreaProps, TextClipboardAction, TextClipboardEvent, TextEditHandler,
-        TextValueEvent, TextWrap, ThemeProviderProps, column, heading, input, progress_bar,
-        provider, row, scroll_area, style, style_patch, text, text_area, theme_context,
-        theme_provider, ui, view,
+        InputProps, Layout, Node, Props, RawInputAppearance, RawInputMode, RawInputProps, Ref,
+        ScrollAreaProps, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph,
+        ScrollbarStyle, ScrollbarVisibility, Style, StylePatch, TextAreaProps, TextClipboardAction,
+        TextClipboardEvent, TextEditHandler, TextValueEvent, TextWrap, ThemeProviderProps, column,
+        heading, input, progress_bar, provider, raw_input, row, scroll_area, style, style_patch,
+        text, text_area, theme_context, theme_provider, ui, view,
     };
 }
