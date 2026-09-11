@@ -673,6 +673,12 @@ impl ops::DivAssign<&StylePatch> for Style {
 pub struct DomProps {
     pub style: Style,
     pub events: EventHandlers,
+    /// Whether a pointer press on this host moves keyboard focus to it.
+    ///
+    /// Focus is an explicit property rather than inferred from which event
+    /// callbacks happen to be installed: a component that wants keyboard focus
+    /// opts in, and everyone else stays non-focusable by default.
+    pub focusable: bool,
     pub(crate) scroll: Option<Box<ScrollConfig>>,
 }
 
@@ -694,6 +700,7 @@ impl DomProps {
     pub fn with_overrides(mut self, overrides: &Self) -> Self {
         self.style = self.style.with_overrides(&overrides.style);
         self.events.merge(&overrides.events);
+        self.focusable |= overrides.focusable;
         if overrides.scroll.is_some() {
             self.scroll = overrides.scroll.clone();
         }

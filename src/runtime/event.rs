@@ -47,6 +47,7 @@ impl EventRect {
 pub(crate) struct EventRegion {
     pub(crate) id: DomId,
     pub(crate) parent: Option<DomId>,
+    pub(crate) focusable: bool,
     pub(crate) rect: EventRect,
     /// Screen position that this region's local coordinates start from.
     ///
@@ -799,7 +800,7 @@ impl EventDispatcher {
                 }
 
                 if matches!(kind, PointerEventKind::Down)
-                    && normal_target.is_some_and(|target| state.is_pointer_interactive(target))
+                    && normal_target.is_some_and(|target| state.is_focusable(target))
                 {
                     focus_target = normal_target;
                 }
@@ -1440,6 +1441,17 @@ impl EventState {
 
     fn route_scroll(&self, target: DomId) -> Vec<EventListener<ScrollEvent>> {
         self.route(target, |handlers| listener(&handlers.scroll))
+    }
+
+    /// Whether a pointer press on `target` should move keyboard focus to it.
+    ///
+    /// Focus is opt-in via [`crate::DomProps::focusable`]; scroll areas remain
+    /// focusable so their keyboard scrolling keeps working.
+    fn is_focusable(&self, target: DomId) -> bool {
+        self.regions
+            .iter()
+            .find(|region| region.id == target)
+            .is_some_and(|region| region.focusable || region.scroll.is_some())
     }
 
     fn is_pointer_interactive(&self, target: DomId) -> bool {

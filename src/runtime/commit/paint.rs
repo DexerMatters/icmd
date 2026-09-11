@@ -257,6 +257,7 @@ impl Commit {
                     event_regions.push(EventRegion {
                         id: *id,
                         parent,
+                        focusable: props.focusable,
                         rect: EventRect::new(
                             hit_rect.line,
                             hit_rect.column,

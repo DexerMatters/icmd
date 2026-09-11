@@ -30,6 +30,34 @@ impl<E> EventListener<E> {
         let mut callback = self.callback.lock().expect("event listener poisoned");
         callback(event);
     }
+
+    fn call_owned(&self, event: E) {
+        self.call(event);
+    }
+}
+
+impl<E> EventListener<E> {
+    /// Compose a component-internal listener with a caller-supplied observer.
+    ///
+    /// The internal behavior runs first so it can reduce state before the
+    /// caller observes the same event. The caller's observer always runs, even
+    /// when the internal handler stopped propagation: `stop_propagation`
+    /// controls ancestor delivery, not the other observers on this host.
+    pub fn compose(
+        internal: impl FnMut(E) + Send + 'static,
+        caller: Option<EventListener<E>>,
+    ) -> EventListener<E>
+    where
+        E: Clone + Send + 'static,
+    {
+        let mut internal = internal;
+        EventListener::new(move |event: E| {
+            internal(event.clone());
+            if let Some(caller) = &caller {
+                caller.call(event);
+            }
+        })
+    }
 }
 
 impl<E> Clone for EventListener<E> {

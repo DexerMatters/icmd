@@ -1484,6 +1484,9 @@ fn editor_node(
     let caller_events = dom.events.clone();
     let mut inner_dom = dom;
     inner_dom.events = EventHandlers::default();
+    // The editor's inner host is the keyboard focus target; it is focusable
+    // exactly when the control is enabled.
+    inner_dom.focusable = !config.disabled;
     let outer_dom = DomProps {
         events: caller_events,
         ..DomProps::default()
