@@ -19,7 +19,8 @@ use crossterm::{
 };
 
 use crate::{
-    Commit, Component, ComponentContext, FrameError, Lower, Node, Props, Renderer, Runtime, Size,
+    Commit, Component, ComponentContext, FrameError, ImageProtocol, ImageUpdatePolicy, Lower, Node,
+    Props, Renderer, RendererConfig, Runtime, Size,
 };
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,12 @@ pub struct RuntimeConfig {
     pub mouse_capture: bool,
     pub bracketed_paste: bool,
     pub focus_change: bool,
+    /// Native protocol selection. `Auto` uses Chafa's environment detection.
+    pub image_protocol: ImageProtocol,
+    /// Shared budget for decoded lazy sources and renderer image caches.
+    pub image_cache_bytes: usize,
+    /// Native update behavior for protocols without targeted deletion.
+    pub image_update_policy: ImageUpdatePolicy,
 }
 
 impl Default for RuntimeConfig {
@@ -41,6 +48,9 @@ impl Default for RuntimeConfig {
             mouse_capture: true,
             bracketed_paste: true,
             focus_change: true,
+            image_protocol: ImageProtocol::Auto,
+            image_cache_bytes: 64 * 1024 * 1024,
+            image_update_policy: ImageUpdatePolicy::Adaptive,
         }
     }
 }
@@ -178,7 +188,19 @@ pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), Render
     let viewport = terminal::size().map(|(width, height)| Size::new(width, height))?;
     let mut terminal = TerminalSession::enter(config.clone())?;
     let (commit, _, dispatcher) = Commit::new_with_events(viewport);
-    let renderer = Renderer::try_new(viewport).map_err(RenderError::Frame)?;
+    let renderer = Renderer::with_config(
+        viewport,
+        RendererConfig {
+            image_protocol: config.image_protocol,
+            image_cache_bytes: config.image_cache_bytes,
+            image_update_policy: config.image_update_policy,
+            // `None` asks the renderer to refresh terminal geometry with
+            // viewport resizes. Standalone renderers can still set an exact
+            // value for deterministic tests.
+            cell_pixel_size: None,
+        },
+    )
+    .map_err(RenderError::Frame)?;
     let (input, output) = Runtime::new(Lower::default())
         .then(commit)
         .then(renderer)
@@ -187,16 +209,26 @@ pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), Render
         .send(root.apply(node.into()))
         .map_err(|_| RenderError::RuntimeClosed)?;
 
-    loop {
+    'render: loop {
         if let Some(frame) = receive_frame(&output, config.poll_interval)? {
             terminal.write(&frame)?;
         }
         while event::poll(Duration::ZERO)? {
             let event = event::read()?;
             if matches!(&event, Event::Key(key) if is_exit_key(*key, config.exit_key)) {
-                return Ok(());
+                break 'render;
             }
             dispatcher.dispatch(event);
         }
     }
+
+    // Closing the root input lets every pipeline stage unwind. The renderer
+    // emits one final targeted Kitty cleanup frame before its output channel
+    // closes, so alternate-screen teardown cannot leave virtual placements
+    // behind in the terminal.
+    drop(input);
+    while let Ok(result) = output.recv_timeout(Duration::from_secs(1)) {
+        terminal.write(&result?)?;
+    }
+    Ok(())
 }

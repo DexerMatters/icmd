@@ -1,7 +1,7 @@
 use icmd::ui;
 
 mod widgets {
-    pub fn status(_: &mut icmd::ElementContext, _: &icmd::Props<()>) -> icmd::Node {
+    pub fn status(_: &mut icmd::ComponentContext, _: &icmd::Props<()>) -> icmd::Node {
         "status".into()
     }
 }

@@ -11,15 +11,15 @@
 /// written as a paired element, a self-closing element, or a fragment:
 ///
 /// ```
-/// # use icmd::{button, header, progress_bar, ui, vbox};
+/// # use icmd::{button, heading, progress_bar, ui, column};
 /// # fn example(done: u64, total: u64, caption: String) {
 /// #     let submit = || {};
 /// let _node = ui! {
-///     <vbox>
-///         <header>"Status"</header>
+///     <column>
+///         <heading>"Status"</heading>
 ///         <progress_bar value={done} max={total} label="build" />
 ///         <button on_click={move |_| submit()}>{caption}</button>
-///     </vbox>
+///     </column>
 /// };
 /// # }
 /// ```

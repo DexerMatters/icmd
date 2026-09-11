@@ -14,14 +14,14 @@ pub fn container(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
-pub fn vbox(cx: &mut ComponentContext, props: &Props<()>) -> Node {
+pub fn column(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Vertical;
         style.gap /= theme.spacing.sm;
     })
 }
 
-pub fn hbox(cx: &mut ComponentContext, props: &Props<()>) -> Node {
+pub fn row(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Horizontal;
         style.gap /= theme.spacing.sm;
@@ -61,14 +61,10 @@ pub fn card(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
-pub fn header(cx: &mut ComponentContext, props: &Props<()>) -> Node {
+pub fn heading(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.text = theme.typography.heading.clone();
     })
-}
-
-pub fn title(cx: &mut ComponentContext, props: &Props<()>) -> Node {
-    header(cx, props)
 }
 
 pub fn paragraph(cx: &mut ComponentContext, props: &Props<()>) -> Node {
@@ -108,23 +104,6 @@ pub fn button(cx: &mut ComponentContext, props: &Props<()>) -> Node {
         style.border.edges /= Edges::all(false);
         style.border.foreground /= theme.colors.primary;
         style.border.background /= theme.colors.primary;
-    })
-}
-
-pub fn input(cx: &mut ComponentContext, props: &Props<()>) -> Node {
-    themed(cx, props, |style, theme| {
-        style.padding /= Edges::symmetric(theme.spacing.xs, theme.spacing.sm);
-        style.background /= theme.colors.input;
-        style.text.foreground /= theme.colors.foreground;
-        style.border.kind /= theme.borders.kind;
-        style.border.edges /= Edges {
-            top: false,
-            right: false,
-            bottom: true,
-            left: false,
-        };
-        style.border.foreground /= theme.colors.border;
-        style.border.background /= theme.colors.input;
     })
 }
 
@@ -190,7 +169,3 @@ pub fn kbd(cx: &mut ComponentContext, props: &Props<()>) -> Node {
         style.border.background /= theme.colors.muted;
     })
 }
-
-pub use hbox as row;
-pub use header as heading;
-pub use vbox as column;

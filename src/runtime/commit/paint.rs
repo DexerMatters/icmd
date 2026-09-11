@@ -2,15 +2,22 @@ use std::collections::HashMap;
 
 use crossterm::style::Color;
 
-use crate::{BorderKind, Cell, DomId, DomNode, Fill, Image, Overflow, Rect, ScreenPosition};
+use crate::{
+    BorderKind, Cell, DomId, DomNode, Fill, Image, Overflow, Rect, ScreenPosition,
+    basic::{ScrollbarGlyph, ScrollbarStyle},
+};
 
-use super::super::event::{EventRect, EventRegion, ScrollOffset, ScrollRegion, scrollbar_region};
+use super::super::event::{
+    EventRect, EventRegion, RuntimeScrollOffset, ScrollRegion, scrollbar_region,
+};
 use super::Commit;
 use super::geometry::RectI;
+use super::layout::ScrollbarMetrics;
 use super::style::{content_insets, scroll_spec};
-use super::text::{merge_text, raster_text};
+use super::text::merge_text;
 use super::types::{
-    BorderPainter, Clip, ComputedBorder, ComputedText, PaintFragment, PaintKey, PaintRole,
+    BorderPainter, Clip, ComputedBorder, ComputedText, PaintContent, PaintFragment, PaintKey,
+    PaintRole,
 };
 
 impl Commit {
@@ -30,6 +37,28 @@ impl Commit {
         event_order: &mut u64,
     ) {
         if clip.is_empty() {
+            // Eager file sources are retained even when an ancestor's
+            // viewport clip currently excludes the tile. This records a
+            // zero paint clip while allowing the renderer to start loading
+            // immediately; hidden/visibility-gated ancestors still return
+            // before reaching this branch.
+            if let DomNode::Raster { id, raster } = node
+                && raster.loading == crate::ImageLoading::Eager
+            {
+                Self::insert_raster(
+                    scene,
+                    PaintKey {
+                        node: *id,
+                        role: PaintRole::Content,
+                    },
+                    raster.clone(),
+                    rect,
+                    level,
+                    *order,
+                    clip,
+                );
+                *order = (*order).saturating_add(1);
+            }
             return;
         }
         match node {
@@ -41,6 +70,21 @@ impl Commit {
                         role: PaintRole::Content,
                     },
                     image.clone(),
+                    rect,
+                    level,
+                    *order,
+                    clip,
+                );
+                *order = (*order).saturating_add(1);
+            }
+            DomNode::Raster { id, raster } => {
+                Self::insert_raster(
+                    scene,
+                    PaintKey {
+                        node: *id,
+                        role: PaintRole::Content,
+                    },
+                    raster.clone(),
                     rect,
                     level,
                     *order,
@@ -78,8 +122,18 @@ impl Commit {
                     order,
                 );
                 let content = rect.inset(content_insets(style.border.insets(), style.padding));
+                if let Some(report) = text.measured_width.as_ref()
+                    && let Some(visible) = clip.intersection(content)
+                {
+                    // The editor surface wraps its own rows, so it has to know
+                    // how wide a row can actually be painted: a parent may have
+                    // clamped the box it asked for, and rows wrapped for the
+                    // requested width then lose their tail.
+                    report(visible.width.min(content.width).max(0) as u16);
+                }
                 if let Some(content_visible) = clip.intersection(content)
-                    && let Some(image) = raster_text(
+                    && let Some(image) = self.raster_text_cached(
+                        *id,
                         text,
                         content,
                         content_visible,
@@ -138,20 +192,37 @@ impl Commit {
                 );
                 let inner = rect.inset(style.border.insets());
                 let base_content = inner.inset(style.padding);
-                let spec = scroll_spec(&style);
-                let (content, bar_vertical, bar_horizontal, children_layouts, extent) =
+                let spec = scroll_spec(props.scroll.as_deref());
+                let scroll_layout =
                     self.layout_scroll_content(children, base_content, &style, spec.as_ref());
-                let max_x = extent.0.saturating_sub(content.width).max(0);
-                let max_y = extent.1.saturating_sub(content.height).max(0);
+                let content = scroll_layout.content;
+                let max_x =
+                    if spec.as_ref().is_some_and(|spec| spec.horizontal) && content.width > 0 {
+                        scroll_layout.extent.0.saturating_sub(content.width).max(0)
+                    } else {
+                        0
+                    };
+                let max_y = if spec.as_ref().is_some_and(|spec| spec.vertical) && content.height > 0
+                {
+                    scroll_layout.extent.1.saturating_sub(content.height).max(0)
+                } else {
+                    0
+                };
                 let offset = if spec.is_some() {
                     let mut offsets = self.scroll_offsets.lock().expect("scroll mutex poisoned");
                     let offset = offsets.entry(*id).or_default();
+                    if let Some(requested) = spec.as_ref().and_then(|spec| spec.requested_offset) {
+                        offset.x = i32::try_from(requested.x).unwrap_or(i32::MAX);
+                        offset.y = i32::try_from(requested.y).unwrap_or(i32::MAX);
+                    }
                     offset.x = offset.x.clamp(0, max_x);
                     offset.y = offset.y.clamp(0, max_y);
                     *offset
                 } else {
-                    ScrollOffset::default()
+                    RuntimeScrollOffset::default()
                 };
+                let vertical_metrics = scroll_layout.vertical_metrics(offset);
+                let horizontal_metrics = scroll_layout.horizontal_metrics(offset);
                 let scroll_region = spec.as_ref().map(|spec| ScrollRegion {
                     max_x,
                     max_y,
@@ -161,30 +232,14 @@ impl Commit {
                     wheel_step: spec.wheel_step,
                     wheel: spec.wheel,
                     enable_mouse: spec.enable_mouse,
-                    vertical_bar: bar_vertical
-                        .then(|| {
-                            scrollbar_region(
-                                content.line,
-                                content.right(),
-                                content.height,
-                                extent.1,
-                                offset.y,
-                                true,
-                            )
-                        })
-                        .flatten(),
-                    horizontal_bar: bar_horizontal
-                        .then(|| {
-                            scrollbar_region(
-                                content.bottom(),
-                                content.column,
-                                content.width,
-                                extent.0,
-                                offset.x,
-                                false,
-                            )
-                        })
-                        .flatten(),
+                    enable_keyboard: spec.enable_keyboard,
+                    controlled: spec.controlled,
+                    vertical_bar: vertical_metrics.map(|metrics| {
+                        scrollbar_region(content.line, content.right(), metrics, true)
+                    }),
+                    horizontal_bar: horizontal_metrics.map(|metrics| {
+                        scrollbar_region(content.bottom(), content.column, metrics, false)
+                    }),
                 });
 
                 if *id != DomId(0)
@@ -192,6 +247,13 @@ impl Commit {
                     && hit_rect.width > 0
                     && hit_rect.height > 0
                 {
+                    // Handlers compare the position they receive with the
+                    // content they drew, so a node's local origin is its own
+                    // content box. Scroll offsets are deliberately not folded
+                    // in: a scroll container converts its viewport-local
+                    // position with the offset it owns, and its children are
+                    // already drawn shifted by that offset.
+                    let (origin_line, origin_column) = (base_content.line, base_content.column);
                     event_regions.push(EventRegion {
                         id: *id,
                         parent,
@@ -201,6 +263,7 @@ impl Commit {
                             hit_rect.width,
                             hit_rect.height,
                         ),
+                        origin: ScreenPosition::new(origin_line, origin_column),
                         level: paint_level,
                         order: *event_order,
                         handlers: props.events.clone(),
@@ -210,14 +273,18 @@ impl Commit {
                 }
 
                 let child_clip = match spec {
-                    Some(ref spec) => clip.restrict_axes(content, spec.horizontal, spec.vertical),
+                    Some(ref spec) => clip.restrict_axes(
+                        content,
+                        spec.horizontal || style.overflow_x == Overflow::Clip,
+                        spec.vertical || style.overflow_y == Overflow::Clip,
+                    ),
                     None => clip.restrict_axes(
                         inner,
                         style.overflow_x == Overflow::Clip,
                         style.overflow_y == Overflow::Clip,
                     ),
                 };
-                for (child, mut child_rect) in children_layouts {
+                for (child, mut child_rect) in scroll_layout.children {
                     if spec.is_some() {
                         child_rect.line = child_rect.line.saturating_sub(offset.y);
                         child_rect.column = child_rect.column.saturating_sub(offset.x);
@@ -241,10 +308,8 @@ impl Commit {
                         scene,
                         *id,
                         content,
-                        bar_vertical,
-                        bar_horizontal,
-                        extent,
-                        offset,
+                        vertical_metrics,
+                        horizontal_metrics,
                         spec.scrollbar,
                         style.text,
                         current_backdrop,
@@ -402,11 +467,9 @@ impl Commit {
         scene: &mut HashMap<PaintKey, PaintFragment>,
         node: DomId,
         content: RectI,
-        vertical: bool,
-        horizontal: bool,
-        extent: (i32, i32),
-        offset: ScrollOffset,
-        scrollbar: &crate::OverflowScrollbarStyle,
+        vertical_metrics: Option<ScrollbarMetrics>,
+        horizontal_metrics: Option<ScrollbarMetrics>,
+        scrollbar: &ScrollbarStyle,
         inherited: ComputedText,
         backdrop: Option<Color>,
         level: i32,
@@ -414,11 +477,9 @@ impl Commit {
         order: &mut u64,
     ) {
         let background = backdrop.unwrap_or(Color::Reset);
-        if vertical && content.height > 0 {
+        if let Some(metrics) = vertical_metrics {
             if let Some(image) = scrollbar_image(
-                content.height,
-                extent.1,
-                offset.y,
+                metrics,
                 &scrollbar.vertical_track,
                 &scrollbar.vertical_thumb,
                 merge_text(inherited, &scrollbar.track),
@@ -441,11 +502,9 @@ impl Commit {
                 *order = (*order).saturating_add(1);
             }
         }
-        if horizontal && content.width > 0 {
+        if let Some(metrics) = horizontal_metrics {
             if let Some(image) = scrollbar_image(
-                content.width,
-                extent.0,
-                offset.x,
+                metrics,
                 &scrollbar.horizontal_track,
                 &scrollbar.horizontal_thumb,
                 merge_text(inherited, &scrollbar.track),
@@ -468,7 +527,7 @@ impl Commit {
                 *order = (*order).saturating_add(1);
             }
         }
-        if vertical && horizontal {
+        if vertical_metrics.is_some() && horizontal_metrics.is_some() {
             let cell = Cell::styled(inherited.foreground, background, inherited.attributes, " ")
                 .expect("scrollbar corner is a valid cell");
             if let Ok(image) = Image::from_rows(vec![vec![cell]]) {
@@ -570,8 +629,56 @@ impl Commit {
         scene.insert(
             key,
             PaintFragment {
-                image,
+                content: PaintContent::Cells(image),
                 position: ScreenPosition::new(rect.line, rect.column),
+                raster_clip: None,
+                level,
+                order,
+            },
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_raster(
+        scene: &mut HashMap<PaintKey, PaintFragment>,
+        key: PaintKey,
+        raster: crate::RasterPlacement,
+        rect: RectI,
+        level: i32,
+        order: u64,
+        clip: Clip,
+    ) {
+        let visible = clip.intersection(rect);
+        let load_clip = if raster.loading == crate::ImageLoading::Eager {
+            Some(rect)
+        } else if raster.source.loaded_image().is_none() {
+            clip.prefetch().intersection(rect)
+        } else {
+            visible
+        };
+        let Some(load_clip) = load_clip else {
+            return;
+        };
+        if load_clip.width <= 0 || load_clip.height <= 0 {
+            return;
+        }
+        let raster_clip = visible.map_or_else(
+            || crate::Rect::new(0, 0, 0, 0),
+            |visible| {
+                crate::Rect::new(
+                    visible.line.saturating_sub(rect.line).max(0) as usize,
+                    visible.column.saturating_sub(rect.column).max(0) as usize,
+                    visible.width as usize,
+                    visible.height as usize,
+                )
+            },
+        );
+        scene.insert(
+            key,
+            PaintFragment {
+                content: PaintContent::Raster(raster),
+                position: ScreenPosition::new(rect.line, rect.column),
+                raster_clip: Some(raster_clip),
                 level,
                 order,
             },
@@ -644,7 +751,7 @@ fn background_image(
     let fill_width = fill.map_or(1, Fill::width);
     let fill_cell = Cell::styled(text.foreground, color, text.attributes, fill_symbol).ok()?;
     if fill_width == 1 {
-        return Image::blank(visible.width as usize, visible.height as usize, fill_cell).ok();
+        return Image::new(visible.width as usize, visible.height as usize, fill_cell).ok();
     }
 
     let blank = Cell::styled(text.foreground, color, text.attributes, " ").ok()?;
@@ -742,36 +849,17 @@ fn corner_glyph(
 
 #[allow(clippy::too_many_arguments)]
 fn scrollbar_image(
-    length: i32,
-    content_len: i32,
-    offset: i32,
-    track: &Fill,
-    thumb: &Fill,
+    metrics: ScrollbarMetrics,
+    track: &ScrollbarGlyph,
+    thumb: &ScrollbarGlyph,
     track_style: ComputedText,
     thumb_style: ComputedText,
     background: Color,
     vertical: bool,
 ) -> Option<Image> {
-    let length = length.max(0) as usize;
-    if length == 0 {
-        return None;
-    }
-    let content_len = content_len.max(1);
-    let viewport_len = length as i32;
-    let thumb_len = if content_len <= viewport_len {
-        length
-    } else {
-        ((viewport_len as i64 * length as i64 + content_len as i64 - 1) / content_len as i64)
-            .clamp(1, length as i64) as usize
-    };
-    let max_offset = (content_len - viewport_len).max(0);
-    let max_start = length.saturating_sub(thumb_len);
-    let thumb_start = if max_offset == 0 {
-        0
-    } else {
-        ((offset.clamp(0, max_offset) as i64 * max_start as i64 + max_offset as i64 / 2)
-            / max_offset as i64) as usize
-    };
+    let length = metrics.length as usize;
+    let thumb_len = metrics.thumb_len as usize;
+    let thumb_start = metrics.thumb_start as usize;
     let make_cell = |symbol: &str, style: ComputedText| {
         Cell::styled(
             style.foreground,
@@ -780,20 +868,8 @@ fn scrollbar_image(
             symbol,
         )
     };
-    let track_symbol = if track.width() == 1 {
-        track.symbol()
-    } else if vertical {
-        "│"
-    } else {
-        "─"
-    };
-    let thumb_symbol = if thumb.width() == 1 {
-        thumb.symbol()
-    } else if vertical {
-        "┃"
-    } else {
-        "━"
-    };
+    let track_symbol = track.symbol();
+    let thumb_symbol = thumb.symbol();
     if vertical {
         let rows = (0..length)
             .map(|index| {

@@ -1,5 +1,10 @@
 pub(crate) mod basic;
-pub(crate) mod extra;
+pub(crate) mod canvas;
+pub(crate) mod controls;
+pub(crate) mod feedback;
+pub(crate) mod image;
+pub(crate) mod scroll;
+pub(crate) mod text_edit;
 
 use crate::{DomProps, Node, Props, Style, basic::ComponentContext, theme::Theme, ui};
 
@@ -26,12 +31,18 @@ fn themed(
 }
 
 pub use basic::{
-    blockquote, button, card, center, code, column, container, divider, footer, hbox, header,
-    heading, input, kbd, label, muted, paragraph, row, section, spacer, title, vbox,
+    blockquote, button, card, center, code, column, container, divider, footer, heading, kbd,
+    label, muted, paragraph, row, section, spacer,
 };
-pub use extra::{
-    AlertProps, AlertVariant, BadgeProps, BadgeVariant, CanvasContext, CanvasDraw, CanvasError,
-    CanvasProps, CheckboxProps, ProgressBarProps, RadioProps, ScrollBarProps, ScrollbarOrientation,
-    ScrollbarProps, SkeletonProps, SpinnerProps, SwitchProps, alert, badge, canvas, checkbox,
-    progress_bar, progressbar, radio, scrollbar, skeleton, spinner, switch,
+pub use canvas::{CanvasContext, CanvasDraw, CanvasError, CanvasProps, canvas};
+pub use controls::{CheckboxProps, RadioProps, SwitchProps, checkbox, radio, switch};
+pub use feedback::{
+    AlertProps, AlertVariant, BadgeProps, BadgeVariant, ProgressBarProps, SkeletonProps,
+    SpinnerProps, alert, badge, progress_bar, skeleton, spinner,
+};
+pub use image::{ImageProps, image};
+pub use scroll::{ScrollAreaProps, scroll_area};
+pub use text_edit::{
+    InputProps, TextAreaProps, TextClipboardAction, TextClipboardEvent, TextEditHandler,
+    TextValueEvent, input, text_area,
 };

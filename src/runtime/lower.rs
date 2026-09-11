@@ -12,7 +12,7 @@ use super::hooks::{FiberId, HookSlot, UpdateQueue};
 use crate::basic::{
     DomId, DomNode, DomProps, Key, Node,
     common::{NodeKind, RenderFn},
-    context::{Context, ContextValues},
+    context::{ComponentContext, ContextValues},
 };
 
 type FiberArena = SlotMap<FiberId, Fiber>;
@@ -22,6 +22,10 @@ enum FiberKind {
     Image {
         id: DomId,
         image: crate::Image,
+    },
+    Raster {
+        id: DomId,
+        raster: crate::RasterPlacement,
     },
     Text {
         id: DomId,
@@ -79,6 +83,7 @@ pub struct Lower {
     updates: UpdateQueue,
     wake_tx: Sender<()>,
     wake_rx: Receiver<()>,
+    effect_fibers: Vec<FiberId>,
 }
 
 impl Default for Lower {
@@ -100,23 +105,43 @@ impl Lower {
             updates: Arc::new(Mutex::new(VecDeque::new())),
             wake_tx,
             wake_rx,
+            effect_fibers: Vec::new(),
         }
     }
 
     fn lower(&mut self, node: Node) -> DomNode {
-        self.apply_updates();
+        let _ = self.apply_updates();
         self.root_node = Some(node.clone());
         self.reconcile_children(self.root, vec![node]);
         self.commit_effects();
         self.root_dom()
     }
 
-    fn rerender(&mut self) -> DomNode {
-        let node = self
-            .root_node
-            .clone()
-            .expect("root component is not mounted");
-        self.reconcile_children(self.root, vec![node]);
+    fn rerender(&mut self, dirty: Vec<FiberId>) -> DomNode {
+        let requested: HashSet<_> = dirty.into_iter().collect();
+        let roots: Vec<_> = requested
+            .iter()
+            .copied()
+            .filter(|fiber| {
+                let mut parent = self.fibers.get(*fiber).and_then(|value| value.parent);
+                while let Some(current) = parent {
+                    if requested.contains(&current) {
+                        return false;
+                    }
+                    parent = self.fibers.get(current).and_then(|value| value.parent);
+                }
+                true
+            })
+            .collect();
+        for fiber in roots {
+            if self
+                .fibers
+                .get(fiber)
+                .is_some_and(|value| matches!(value.kind, FiberKind::Function { .. }))
+            {
+                self.render_component(fiber);
+            }
+        }
         self.commit_effects();
         self.root_dom()
     }
@@ -171,6 +196,10 @@ impl Lower {
                 id: *id,
                 image: image.clone(),
             }],
+            FiberKind::Raster { id, raster } => vec![DomNode::Raster {
+                id: *id,
+                raster: raster.clone(),
+            }],
             FiberKind::Text { id, text } => vec![DomNode::Text {
                 id: *id,
                 text: text.as_ref().clone(),
@@ -184,13 +213,13 @@ impl Lower {
         }
     }
 
-    fn apply_updates(&mut self) -> bool {
+    fn apply_updates(&mut self) -> Vec<FiberId> {
         while self.wake_rx.try_recv().is_ok() {}
         let updates = {
             let mut queue = self.updates.lock().expect("state update queue poisoned");
             queue.drain(..).collect::<Vec<_>>()
         };
-        let mut applied = false;
+        let mut applied = Vec::new();
         for update in updates {
             let Some(fiber) = self.fibers.get_mut(update.fiber) else {
                 continue;
@@ -199,7 +228,7 @@ impl Lower {
                 continue;
             };
             (update.apply)(state.as_mut());
-            applied = true;
+            applied.push(update.fiber);
         }
         applied
     }
@@ -250,6 +279,7 @@ impl Lower {
     fn compatible(&self, fiber: FiberId, node: &Node) -> bool {
         match (&self.fibers[fiber].kind, &node.kind) {
             (FiberKind::Image { .. }, NodeKind::Image(_))
+            | (FiberKind::Raster { .. }, NodeKind::Raster(_))
             | (FiberKind::Text { .. }, NodeKind::Text(_))
             | (FiberKind::Element { .. }, NodeKind::Element { .. })
             | (FiberKind::Fragment, NodeKind::Fragment(_)) => true,
@@ -280,6 +310,14 @@ impl Lower {
                 FiberKind::Image {
                     id: self.allocate_dom_id(),
                     image: image.clone(),
+                },
+                None,
+                ContextValues::default(),
+            ),
+            NodeKind::Raster(raster) => (
+                FiberKind::Raster {
+                    id: self.allocate_dom_id(),
+                    raster: raster.clone(),
                 },
                 None,
                 ContextValues::default(),
@@ -339,7 +377,7 @@ impl Lower {
             NodeKind::Element { children, .. } => self.reconcile_children(fiber, children),
             NodeKind::Provider { children, .. } => self.reconcile_children(fiber, children),
             NodeKind::Fragment(children) => self.reconcile_children(fiber, children),
-            NodeKind::Image(_) | NodeKind::Text(_) => {}
+            NodeKind::Image(_) | NodeKind::Raster(_) | NodeKind::Text(_) => {}
         }
         fiber
     }
@@ -352,6 +390,15 @@ impl Lower {
                     unreachable!()
                 };
                 *current = image;
+            }
+            NodeKind::Raster(raster) => {
+                let FiberKind::Raster {
+                    raster: current, ..
+                } = &mut self.fibers[fiber].kind
+                else {
+                    unreachable!()
+                };
+                *current = raster;
             }
             NodeKind::Text(text) => {
                 let FiberKind::Text { text: current, .. } = &mut self.fibers[fiber].kind else {
@@ -427,7 +474,7 @@ impl Lower {
             )
         };
         let inherited_context = self.inherited_context(fiber);
-        let mut context = Context::new(
+        let mut context = ComponentContext::new(
             fiber,
             hooks,
             self.updates.clone(),
@@ -438,6 +485,7 @@ impl Lower {
         let (hooks, provided_context) = context.finish();
         self.fibers[fiber].hooks = hooks;
         self.fibers[fiber].provided_context = provided_context;
+        self.effect_fibers.push(fiber);
         self.reconcile_children(fiber, vec![child]);
     }
 
@@ -453,9 +501,16 @@ impl Lower {
     }
 
     fn commit_effects(&mut self) {
-        let fibers = self.fibers.keys().collect::<Vec<_>>();
+        let fibers = mem::take(&mut self.effect_fibers);
+        let mut seen = HashSet::new();
         for fiber in fibers {
-            let hook_count = self.fibers[fiber].hooks.len();
+            if !seen.insert(fiber) {
+                continue;
+            }
+            let Some(current) = self.fibers.get(fiber) else {
+                continue;
+            };
+            let hook_count = current.hooks.len();
             for index in 0..hook_count {
                 let (cleanup, pending) = match &mut self.fibers[fiber].hooks[index] {
                     HookSlot::Effect {
@@ -503,8 +558,9 @@ impl super::pipeline::PipelineComponent for Lower {
                     if output.send(self.lower(node)).is_err() { break; }
                 }
                 recv(wake) -> _ => {
-                    if self.apply_updates() && self.root_node.is_some()
-                        && output.send(self.rerender()).is_err()
+                    let dirty = self.apply_updates();
+                    if !dirty.is_empty() && self.root_node.is_some()
+                        && output.send(self.rerender(dirty)).is_err()
                     {
                         break;
                     }

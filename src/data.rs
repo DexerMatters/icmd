@@ -1,9 +1,11 @@
 use crossterm::style::{Attributes, Color};
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+use crate::RasterPlacement;
 
 /// Maximum number of terminal cells in one retained surface.
 pub const MAX_SURFACE_CELLS: usize = 1_048_576;
@@ -35,7 +37,7 @@ impl ImagePosition {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Size {
     pub width: u16,
     pub height: u16,
@@ -105,6 +107,7 @@ pub struct Cell {
     pub(crate) background: Color,
     pub(crate) attributes: Attributes,
     pub(crate) symbol: Arc<str>,
+    width: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +181,7 @@ impl Cell {
             background,
             attributes,
             symbol: Arc::from(symbol),
+            width: width as u8,
         })
     }
     pub fn blank() -> Self {
@@ -185,11 +189,12 @@ impl Cell {
             foreground: Color::Reset,
             background: Color::Reset,
             attributes: Attributes::default(),
-            symbol: Arc::from(" "),
+            symbol: blank_symbol(),
+            width: 1,
         }
     }
     pub fn width(&self) -> usize {
-        UnicodeWidthStr::width(self.symbol.as_ref())
+        self.width as usize
     }
     pub fn symbol(&self) -> &str {
         &self.symbol
@@ -208,9 +213,15 @@ impl Cell {
             foreground: self.foreground,
             background: self.background,
             attributes: self.attributes,
-            symbol: Arc::from(" "),
+            symbol: blank_symbol(),
+            width: 1,
         }
     }
+}
+
+fn blank_symbol() -> Arc<str> {
+    static BLANK: OnceLock<Arc<str>> = OnceLock::new();
+    BLANK.get_or_init(|| Arc::from(" ")).clone()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,12 +242,25 @@ impl CellSlot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Image {
     width: usize,
     height: usize,
-    cells: Vec<CellSlot>,
+    // Most images travel through several retained stages unchanged. Sharing
+    // keeps those clones constant-time; patch operations detach only when a
+    // frame still retains an older view of the surface.
+    cells: Arc<Vec<CellSlot>>,
 }
+
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && (Arc::ptr_eq(&self.cells, &other.cells) || self.cells == other.cells)
+    }
+}
+
+impl Eq for Image {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageError {
@@ -280,10 +304,6 @@ impl Error for ImageError {}
 
 impl Image {
     pub fn new(width: usize, height: usize, fill: Cell) -> Result<Self, ImageError> {
-        Self::blank(width, height, fill)
-    }
-
-    pub fn blank(width: usize, height: usize, fill: Cell) -> Result<Self, ImageError> {
         if width == 0 || height == 0 {
             return Err(ImageError::Empty);
         }
@@ -312,7 +332,7 @@ impl Image {
         Ok(Self {
             width,
             height,
-            cells,
+            cells: Arc::new(cells),
         })
     }
 
@@ -373,7 +393,7 @@ impl Image {
         Ok(Self {
             width,
             height,
-            cells,
+            cells: Arc::new(cells),
         })
     }
 
@@ -415,18 +435,14 @@ impl Image {
         Ok(())
     }
 
-    fn index(&self, position: ImagePosition) -> usize {
-        position.line * self.width + position.column
-    }
-
-    fn glyph_span(&self, index: usize) -> (usize, usize) {
+    fn glyph_span(cells: &[CellSlot], index: usize) -> (usize, usize) {
         let mut start = index;
-        while start > 0 && matches!(self.cells[start], CellSlot::Continuation(_)) {
+        while start > 0 && matches!(cells[start], CellSlot::Continuation(_)) {
             start -= 1;
         }
-        let end = if matches!(self.cells[start], CellSlot::Lead(_))
-            && start + 1 < self.cells.len()
-            && matches!(self.cells[start + 1], CellSlot::Continuation(_))
+        let end = if matches!(cells[start], CellSlot::Lead(_))
+            && start + 1 < cells.len()
+            && matches!(cells[start + 1], CellSlot::Continuation(_))
         {
             start + 2
         } else {
@@ -435,8 +451,8 @@ impl Image {
         (start, end)
     }
 
-    fn clear_span(&mut self, start: usize, end: usize) {
-        self.cells[start..end].fill(CellSlot::Lead(Cell::blank()));
+    fn clear_span(cells: &mut [CellSlot], start: usize, end: usize) {
+        cells[start..end].fill(CellSlot::Lead(Cell::blank()));
     }
 
     fn validate_bounds(&self, rect: Rect) -> Result<(), ImageError> {
@@ -456,11 +472,14 @@ impl Image {
         self.validate_rect(rect, rows)?;
         let mut affected_left = rect.column;
         let mut affected_right = rect.right();
+        let cells = Arc::make_mut(&mut self.cells);
         for line in rect.line..rect.bottom() {
+            // Wide glyphs may extend by a different amount on every row;
+            // never reuse one row's clear span for another row.
             let mut left = rect.column;
             let mut right = rect.right();
             for column in rect.column..rect.right() {
-                let (start, end) = self.glyph_span(self.index(ImagePosition::new(line, column)));
+                let (start, end) = Self::glyph_span(cells, line * self.width + column);
                 let start_column = start % self.width;
                 let end_column = if end % self.width == 0 {
                     self.width
@@ -470,19 +489,19 @@ impl Image {
                 left = left.min(start_column);
                 right = right.max(end_column);
             }
-            let start = self.index(ImagePosition::new(line, left));
-            let end = self.index(ImagePosition::new(line, right.min(self.width)));
-            self.clear_span(start, end);
+            let start = line * self.width + left;
+            let end = line * self.width + right.min(self.width);
+            Self::clear_span(cells, start, end);
             affected_left = affected_left.min(left);
             affected_right = affected_right.max(right);
         }
         for (row_offset, row) in rows.iter().enumerate() {
             let mut column = rect.column;
             for cell in row {
-                let index = self.index(ImagePosition::new(rect.line + row_offset, column));
-                self.cells[index] = CellSlot::Lead(cell.clone());
+                let index = (rect.line + row_offset) * self.width + column;
+                cells[index] = CellSlot::Lead(cell.clone());
                 if cell.width() == 2 {
-                    self.cells[index + 1] = CellSlot::Continuation(cell.as_blank());
+                    cells[index + 1] = CellSlot::Continuation(cell.as_blank());
                 }
                 column += cell.width();
             }
@@ -498,14 +517,17 @@ impl Image {
     pub(crate) fn patch_cells(&mut self, edits: &[CellEdit]) -> Result<Rect, ImageError> {
         self.validate_edits(edits)?;
         let mut affected: Option<Rect> = None;
+        let width = self.width;
+        let cells = Arc::make_mut(&mut self.cells);
+        let cells_len = cells.len();
         for edit in edits {
-            let index = self.index(edit.position);
-            let (old_start, old_end) = self.glyph_span(index);
+            let index = edit.position.line * width + edit.position.column;
+            let (old_start, old_end) = Self::glyph_span(cells, index);
             let new_end = index + edit.cell.width();
-            self.clear_span(old_start, old_end.max(new_end).min(self.cells.len()));
-            self.cells[index] = CellSlot::Lead(edit.cell.clone());
+            Self::clear_span(cells, old_start, old_end.max(new_end).min(cells_len));
+            cells[index] = CellSlot::Lead(edit.cell.clone());
             if edit.cell.width() == 2 {
-                self.cells[index + 1] = CellSlot::Continuation(edit.cell.as_blank());
+                cells[index + 1] = CellSlot::Continuation(edit.cell.as_blank());
             }
             let start_col = old_start % self.width;
             let end_absolute = old_end.max(new_end) - 1;
@@ -550,6 +572,80 @@ impl Image {
             rows.push(row);
         }
         Self::from_rows(rows)
+    }
+
+    /// Return the smallest rectangular replacement that changes `self` into
+    /// `next`, provided it is smaller than the full surface. Boundaries are
+    /// expanded around wide glyphs in both images so `PatchRect` can never
+    /// split a continuation cell.
+    pub(crate) fn diff_patch_rect(&self, next: &Self) -> Option<(Rect, Vec<Vec<Cell>>)> {
+        if self.width != next.width || self.height != next.height || self == next {
+            return None;
+        }
+        let mut top = self.height;
+        let mut bottom = 0usize;
+        let mut left = self.width;
+        let mut right = 0usize;
+        for line in 0..self.height {
+            for column in 0..self.width {
+                if self.cell_at(line, column) != next.cell_at(line, column) {
+                    top = top.min(line);
+                    bottom = bottom.max(line + 1);
+                    left = left.min(column);
+                    right = right.max(column + 1);
+                }
+            }
+        }
+        if top >= bottom || left >= right {
+            return None;
+        }
+
+        loop {
+            let before = (left, right);
+            for line in top..bottom {
+                for image in [self, next] {
+                    while left > 0 && matches!(image.cell_at(line, left), CellSlot::Continuation(_))
+                    {
+                        left -= 1;
+                    }
+                    while right < self.width
+                        && matches!(image.cell_at(line, right - 1), CellSlot::Lead(cell) if cell.width() == 2)
+                    {
+                        right += 1;
+                    }
+                }
+            }
+            if before == (left, right) {
+                break;
+            }
+        }
+        let rect = Rect::new(top, left, right - left, bottom - top);
+        if rect.width.saturating_mul(rect.height) >= self.width.saturating_mul(self.height) {
+            return None;
+        }
+        let mut rows = Vec::with_capacity(rect.height);
+        for line in rect.line..rect.bottom() {
+            let mut row = Vec::with_capacity(rect.width);
+            let mut column = rect.column;
+            while column < rect.right() {
+                match next.cell_at(line, column) {
+                    CellSlot::Lead(cell) if cell.width() == 2 && column + 1 < rect.right() => {
+                        row.push(cell.clone());
+                        column += 2;
+                    }
+                    CellSlot::Lead(cell) => {
+                        row.push(cell.clone());
+                        column += 1;
+                    }
+                    CellSlot::Continuation(cell) => {
+                        row.push(cell.as_blank());
+                        column += 1;
+                    }
+                }
+            }
+            rows.push(row);
+        }
+        Some((rect, rows))
     }
 }
 
@@ -602,6 +698,12 @@ pub enum Operation {
         position: ScreenPosition,
         level: i32,
     },
+    CreateRaster {
+        id: ImageId,
+        raster: RasterPlacement,
+        position: ScreenPosition,
+        level: i32,
+    },
     Remove {
         id: ImageId,
     },
@@ -621,6 +723,16 @@ pub enum Operation {
         id: ImageId,
         image: Image,
     },
+    ReplaceRaster {
+        id: ImageId,
+        raster: RasterPlacement,
+    },
+    /// Restrict a retained raster to a local cell rectangle without changing
+    /// its source image or transform. `None` means its full destination.
+    SetRasterClip {
+        id: ImageId,
+        clip: Option<Rect>,
+    },
     PatchRect {
         id: ImageId,
         rect: Rect,
@@ -630,4 +742,67 @@ pub enum Operation {
         id: ImageId,
         edits: Vec<CellEdit>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(symbol: &str) -> Cell {
+        Cell::plain(symbol).unwrap()
+    }
+
+    #[test]
+    fn diff_patch_rebuilds_a_sparse_cell_change() {
+        let old = Image::from_rows(vec![vec![cell("a"), cell("b"), cell("c")]]).unwrap();
+        let next = Image::from_rows(vec![vec![cell("a"), cell("x"), cell("c")]]).unwrap();
+        let (rect, rows) = old.diff_patch_rect(&next).expect("sparse change patches");
+        assert_eq!(rect, Rect::new(0, 1, 1, 1));
+        let mut patched = old.clone();
+        patched.patch_rect(rect, &rows).unwrap();
+        assert_eq!(patched, next);
+    }
+
+    #[test]
+    fn diff_patch_expands_for_wide_glyph_boundaries() {
+        let old = Image::from_rows(vec![vec![cell("a"), cell("界"), cell("c")]]).unwrap();
+        let next =
+            Image::from_rows(vec![vec![cell("a"), cell("x"), Cell::blank(), cell("c")]]).unwrap();
+        let (rect, rows) = old.diff_patch_rect(&next).expect("sparse change patches");
+        assert_eq!(rect, Rect::new(0, 1, 2, 1));
+        let mut patched = old.clone();
+        patched.patch_rect(rect, &rows).unwrap();
+        assert_eq!(patched, next);
+    }
+
+    #[test]
+    fn patch_rect_clears_wide_neighbors_per_row() {
+        let old = Image::from_rows(vec![
+            vec![
+                cell("a"),
+                cell("界"),
+                cell("b"),
+                cell("c"),
+                cell("d"),
+                cell("e"),
+            ],
+            vec![
+                cell("a"),
+                cell("b"),
+                cell("c"),
+                cell("d"),
+                cell("界"),
+                cell("e"),
+            ],
+        ])
+        .unwrap();
+        let rows = vec![
+            vec![cell("x"), cell("x"), cell("x"), cell("x")],
+            vec![cell("y"), cell("y"), cell("y"), cell("y")],
+        ];
+        let mut patched = old.clone();
+        patched.patch_rect(Rect::new(0, 1, 4, 2), &rows).unwrap();
+        assert_eq!(patched.cell_at(0, 5).cell().symbol(), "d");
+        assert_eq!(patched.cell_at(1, 6).cell().symbol(), "e");
+    }
 }

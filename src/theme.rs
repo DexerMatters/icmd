@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 use crossterm::style::Color;
 
 use crate::{
-    Attr, BorderKind, ComponentContext, ContextKey, Edges, Node, Props, Style, TextStyle,
-    create_context, style,
+    Attr, BorderKind, ComponentContext, ContextKey, Edges, Node, Props, ScrollbarStyle, Style,
+    TextStyle, create_context, style,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -469,6 +469,7 @@ pub struct Theme {
     pub typography: ThemeTypography,
     pub spacing: ThemeSpacing,
     pub borders: ThemeBorders,
+    pub scrollbar: ScrollbarStyle,
 }
 
 /// Props for the built-in theme provider. The global theme context key is
@@ -509,7 +510,15 @@ impl Theme {
     pub fn new(mode: ThemeMode, colors: ThemeColors) -> Self {
         let typography = ThemeTypography::from_colors(&colors);
         let borders = ThemeBorders::from_colors(&colors);
-        Self::from_parts(mode, colors, typography, ThemeSpacing::default(), borders)
+        let scrollbar = scrollbar_style(&colors);
+        Self::from_parts(
+            mode,
+            colors,
+            typography,
+            ThemeSpacing::default(),
+            borders,
+            scrollbar,
+        )
     }
 
     pub fn from_parts(
@@ -518,6 +527,7 @@ impl Theme {
         typography: ThemeTypography,
         spacing: ThemeSpacing,
         borders: ThemeBorders,
+        scrollbar: ScrollbarStyle,
     ) -> Self {
         Self {
             mode,
@@ -525,6 +535,7 @@ impl Theme {
             typography,
             spacing,
             borders,
+            scrollbar,
         }
     }
 
@@ -573,6 +584,13 @@ fn foreground_style(background: Color, foreground: Color) -> Style {
         style.background /= background;
         style.text.foreground /= foreground;
     })
+}
+
+fn scrollbar_style(colors: &ThemeColors) -> ScrollbarStyle {
+    let mut scrollbar = ScrollbarStyle::default();
+    scrollbar.track.foreground /= colors.muted_foreground;
+    scrollbar.thumb.foreground /= colors.primary;
+    scrollbar
 }
 
 static THEME_CONTEXT: OnceLock<ContextKey<Theme>> = OnceLock::new();

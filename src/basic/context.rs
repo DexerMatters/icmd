@@ -164,7 +164,7 @@ where
     }
 }
 
-pub struct Context<CustomHook = ()> {
+pub struct ComponentContext<CustomHook = ()> {
     pub(crate) fiber: FiberId,
     pub(crate) hook_cursor: usize,
     pub(crate) hooks: Vec<HookSlot>,
@@ -175,13 +175,7 @@ pub struct Context<CustomHook = ()> {
     pub(crate) custom_hook: CustomHook,
 }
 
-/// Context passed to logical function components.
-pub type ComponentContext<CustomHook = ()> = Context<CustomHook>;
-
-/// Backwards-compatible name for [`ComponentContext`].
-pub type ElementContext<CustomHook = ()> = Context<CustomHook>;
-
-impl<CustomHook> Context<CustomHook>
+impl<CustomHook> ComponentContext<CustomHook>
 where
     CustomHook: Default,
 {
@@ -361,14 +355,14 @@ where
     }
 }
 
-impl<CustomHook> ops::Deref for Context<CustomHook> {
+impl<CustomHook> ops::Deref for ComponentContext<CustomHook> {
     type Target = CustomHook;
     fn deref(&self) -> &Self::Target {
         &self.custom_hook
     }
 }
 
-impl<CustomHook> ops::DerefMut for Context<CustomHook> {
+impl<CustomHook> ops::DerefMut for ComponentContext<CustomHook> {
     fn deref_mut(&mut self) -> &mut CustomHook {
         &mut self.custom_hook
     }

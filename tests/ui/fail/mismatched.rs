@@ -1,5 +1,5 @@
-use icmd::{ui, vbox};
+use icmd::{column, ui};
 
 fn main() {
-    let _ = ui! { <vbox>"text"</button> };
+    let _ = ui! { <column>"text"</button> };
 }

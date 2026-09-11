@@ -8,7 +8,7 @@ use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventK
 #[allow(unused_imports)]
 use icmd::{
     Attr, Commit, Component, ComponentContext, Lower, Node, Props, Renderer, Runtime, StateSetter,
-    button, checkbox, header, progress_bar, ui, vbox, view,
+    button, checkbox, column, heading, progress_bar, ui, view,
 };
 
 fn render_node(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
@@ -19,10 +19,10 @@ fn render_node(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
 fn macro_builds_nested_tree() {
     let _value = "hello";
     let node = ui! {
-        <vbox>
-            <header>{_value}</header>
+        <column>
+            <heading>{_value}</heading>
             <button key="save" events={|events| events.click /= |_| {}}>{"Go"}</button>
-        </vbox>
+        </column>
     };
     let _ = node;
 }
@@ -161,7 +161,7 @@ fn macro_key_preserves_state_when_children_reorder() {
     let (commit, _) = Commit::new(size);
     let (input, output) = Runtime::new(Lower::default())
         .then(commit)
-        .then(Renderer::new(size))
+        .then(Renderer::new(size).unwrap())
         .start();
     input.send(root).unwrap();
     let _ = output
@@ -187,7 +187,7 @@ fn macro_key_preserves_state_when_children_reorder() {
 #[test]
 fn macro_builds_fragment_and_custom_component() {
     let component = render_node;
-    let node = ui! { <><component>"a"</component><vbox /></> };
+    let node = ui! { <><component>"a"</component><column /></> };
     let _ = node;
 }
 

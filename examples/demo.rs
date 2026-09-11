@@ -14,14 +14,14 @@ use crossterm::event::KeyCode;
 use icmd::theme::{Theme, ThemeMode, ThemePreset};
 use icmd::{
     AlertVariant, Align, BadgeVariant, Component, ComponentContext, Dimension, Edges, Justify,
-    KeyboardEvent, Layout, Node, Overflow, Percent, Props, RuntimeConfig, ScrollEvent,
-    ScrollbarOrientation, StateSetter, Text, TextOverflow, TextWrap, render, theme_provider, ui,
-    view,
+    KeyboardEvent, Layout, Node, Percent, Props, RuntimeConfig, ScrollAxes, ScrollEvent,
+    ScrollOffset, StateSetter, Text, TextClipboardEvent, TextOverflow, TextValueEvent, TextWrap,
+    render, theme_provider, ui, view,
 };
 use icmd::{
-    alert, badge, blockquote, button, canvas, card, center, checkbox, code, divider, hbox, header,
-    input, kbd, label, muted, paragraph, progress_bar, radio, row, scrollbar, skeleton, spacer,
-    spinner, switch, title, vbox,
+    alert, badge, blockquote, button, canvas, card, center, checkbox, code, column, divider,
+    heading, input, kbd, label, muted, paragraph, progress_bar, radio, row, scroll_area, skeleton,
+    spacer, spinner, switch, text_area,
 };
 
 const TABS: [&str; 4] = ["Overview", "Components", "Data", "Theme"];
@@ -45,12 +45,12 @@ fn overview(theme: &Theme, tick: usize) -> Node {
                     style.justify /= Justify::SpaceBetween;
                     style.gap /= 0;
                 }}>
-                    <title>"Terminal UI, composed like a web page"</title>
+                    <heading>"Terminal UI, composed like a web page"</heading>
                     <badge text="LIVE" variant={BadgeVariant::Secondary} />
                 </view>
                 <paragraph>{Text::new(
                     "Dense by design: keyboard-first controls, cell-aware layout and incremental ANSI updates.",
-                ).wrap(TextWrap::Word)}</paragraph>
+                ).wrap(TextWrap::Hard)}</paragraph>
                 <center>{Text::new("context-aware  •  incremental  •  Unicode-ready")
                     .foreground(theme.colors.accent)}</center>
             </card>
@@ -78,7 +78,7 @@ fn overview(theme: &Theme, tick: usize) -> Node {
                 style.gap /= 1;
             }}>
                 <card style={|style| style.width /= Dimension::Percent(Percent::available(43))}>
-                    <header>"Live runtime"</header>
+                    <heading>"Live runtime"</heading>
                     <progress_bar value={progress_value} max={100} width={24} label="build" />
                     <spinner frame={tick} label="streaming diff frames" />
                     <muted>"Damaged cells only."</muted>
@@ -91,7 +91,7 @@ fn overview(theme: &Theme, tick: usize) -> Node {
                         style.justify /= Justify::SpaceBetween;
                         style.gap /= 0;
                     }}>
-                        <header>"Renderer activity"</header>
+                        <heading>"Renderer activity"</heading>
                         <muted>"last 30 frames"</muted>
                     </view>
                     <canvas width={32} height={5} draw={Arc::new(move |drawing| {
@@ -117,11 +117,16 @@ fn overview(theme: &Theme, tick: usize) -> Node {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn components_page(
     completed: bool,
     set_completed: &StateSetter<bool>,
     notifications: bool,
     set_notifications: &StateSetter<bool>,
+    query: String,
+    set_query: &StateSetter<String>,
+    wrap: TextWrap,
+    set_wrap: &StateSetter<TextWrap>,
 ) -> Node {
     let check = {
         let setter = set_completed.clone();
@@ -144,6 +149,13 @@ fn components_page(
             />
         }
     };
+    let query_setter = set_query.clone();
+    let wrap_setter = set_wrap.clone();
+    let next_wrap = match wrap {
+        TextWrap::NoWrap => TextWrap::Soft,
+        TextWrap::Soft => TextWrap::Hard,
+        TextWrap::Hard => TextWrap::NoWrap,
+    };
 
     ui! {
         <view style={|style| {
@@ -152,7 +164,7 @@ fn components_page(
             style.gap /= 1;
         }}>
             <card style={|style| style.width /= Dimension::Max}>
-                <title>"Component gallery"</title>
+                <heading>"Component gallery"</heading>
                 <muted>"Click the checkbox and switch; focus follows the pointer."</muted>
             </card>
             <view style={|style| {
@@ -161,23 +173,42 @@ fn components_page(
                 style.gap /= 1;
             }}>
                 <card style={|style| style.width /= Dimension::Percent(Percent::available(32))}>
-                    <header>"Controls"</header>
-                    <input>"filter widgets…"</input>
+                    <heading>"Controls"</heading>
+                    <label>"Controlled input"</label>
+                    <input
+                        value={query}
+                        placeholder="filter widgets…"
+                        on_change={move |event: TextValueEvent| query_setter.set(event.value)}
+                    />
+                    <label>"Uncontrolled textarea"</label>
+                    <text_area
+                        width={24}
+                        height={4}
+                        wrap={wrap}
+                        default_value={"Long Unicode text: 这是一个很长的示例文本，含有 emoji 👩‍💻 and an unbreakable-token-for-hard-wrap."}
+                        on_clipboard={move |event: TextClipboardEvent| eprintln!("host clipboard {:?}: {:?}", event.action, event.text)}
+                    />
+                    <row>
+                        <button on_click={move |_| wrap_setter.set(next_wrap)}>
+                            {format!("wrap: {:?}", wrap)}
+                        </button>
+                        <muted>"Ctrl+C / Ctrl+X uses host clipboard"</muted>
+                    </row>
                     {check}
                     {radio}
                     {toggle}
                     <row><kbd>"Enter"</kbd><muted>" activate"</muted></row>
                 </card>
                 <card style={|style| style.width /= Dimension::Percent(Percent::available(32))}>
-                    <header>"Typography"</header>
+                    <heading>"Typography"</heading>
                     <label>"Semantic text styles"</label>
                     <paragraph>{Text::new("Body copy wraps on terminal cell boundaries.")
-                        .wrap(TextWrap::Word)}</paragraph>
+                        .wrap(TextWrap::Hard)}</paragraph>
                     <blockquote>"Small APIs make composition predictable."</blockquote>
                     <code>"state.update(|v| *v += 1)"</code>
                 </card>
                 <card style={|style| style.width /= Dimension::Percent(Percent::available(32))}>
-                    <header>"Feedback"</header>
+                    <heading>"Feedback"</heading>
                     <badge text="primary" variant={BadgeVariant::Primary} />
                     <badge text="success" variant={BadgeVariant::Secondary} />
                     <badge text="warning" variant={BadgeVariant::Accent} />
@@ -199,13 +230,22 @@ fn data_page(
     horizontal_offset: u64,
     set_horizontal_offset: &StateSetter<u64>,
 ) -> Node {
+    let vertical_setter = set_vertical_offset.clone();
+    let horizontal_setter = set_horizontal_offset.clone();
     let stream = ui! {
-        <card style={|style| {
-            style.width /= Dimension::Max;
-            style.height /= Dimension::Cells(13);
-            style.overflow /= Overflow::Clip;
-            style.overflow_y /= Overflow::Auto;
-        }}>
+        <scroll_area
+            axes={ScrollAxes::Both}
+            offset={ScrollOffset::new(horizontal_offset as u32, vertical_offset as u32)}
+            scrollbar_visibility={icmd::ScrollbarVisibility::Always}
+            on_scroll={move |event: ScrollEvent| {
+                vertical_setter.set(event.offset.y as u64);
+                horizontal_setter.set(event.offset.x as u64);
+            }}
+            style={|style| {
+                style.width /= Dimension::Max;
+                style.height /= Dimension::Cells(13);
+            }}
+        >
             {(0..24).map(|index| ui! {
                 <view style={|style| {
                     style.layout /= Layout::Horizontal;
@@ -227,41 +267,14 @@ fn data_page(
                     />
                 </view>
             }).collect::<Node>()}
-        </card>
-    };
-    let vertical_setter = set_vertical_offset.clone();
-    let vertical = ui! {
-        <scrollbar
-            length={9}
-            content_len={24}
-            viewport_len={9}
-            offset={vertical_offset}
-            on_scroll={move |event: ScrollEvent| {
-                vertical_setter.set(event.offset_y.max(0) as u64);
-            }}
-        />
-    };
-    let horizontal_setter = set_horizontal_offset.clone();
-    let horizontal = ui! {
-        <scrollbar
-            length={20}
-            content_len={72}
-            viewport_len={20}
-            offset={horizontal_offset}
-            orientation={ScrollbarOrientation::Horizontal}
-            on_scroll={move |event: ScrollEvent| {
-                horizontal_setter.set(event.offset_x.max(0) as u64);
-            }}
-        />
+        </scroll_area>
     };
     let inspector = ui! {
         <card style={|style| style.width /= Dimension::Cells(27)}>
-            <header>"Viewport"</header>
-            {vertical}
-            {horizontal}
+            <heading>"Viewport"</heading>
             <divider />
-            <hbox>{format!("x:{horizontal_offset:02}")}<spacer />{format!("y:{vertical_offset:02}")}</hbox>
-            <vbox><muted>"wheel"</muted><muted>"arrows / pgup / pgdn"</muted></vbox>
+            <row>{format!("x:{horizontal_offset:02}")}<spacer />{format!("y:{vertical_offset:02}")}</row>
+            <column><muted>"wheel"</muted><muted>"arrows / pgup / pgdn"</muted></column>
         </card>
     };
     ui! {
@@ -271,7 +284,7 @@ fn data_page(
             style.gap /= 1;
         }}>
             <card style={|style| style.width /= Dimension::Max}>
-                <title>"Scrollable event stream"</title>
+                <heading>"Scrollable event stream"</heading>
                 <muted>"The content scrolls; page chrome stays in place."</muted>
             </card>
             <view style={|style| {
@@ -350,7 +363,7 @@ fn theme_page(
                     style.justify /= Justify::SpaceBetween;
                     style.gap /= 0;
                 }}>
-                    <title>"Theme laboratory"</title>
+                    <heading>"Theme laboratory"</heading>
                     <button on_click={move |_| mode_setter.set(!dark)}>
                         {if dark { "☾ dark" } else { "☀ light" }}
                     </button>
@@ -360,11 +373,11 @@ fn theme_page(
                 {presets}
             </card>
             <card style={|style| style.width /= Dimension::Max}>
-                <header>{format!(
+                <heading>{format!(
                     "{} / {}",
                     ThemePreset::ALL[preset % ThemePreset::ALL.len()].name(),
                     if dark { "dark" } else { "light" }
-                )}</header>
+                )}</heading>
                 {palette}
                 <divider />
                 {Text::new("foreground").foreground(theme.colors.foreground)}
@@ -386,6 +399,8 @@ fn app(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     let (preset, set_preset) = cx.use_state(|| 1usize);
     let (completed, set_completed) = cx.use_state(|| true);
     let (notifications, set_notifications) = cx.use_state(|| true);
+    let (query, set_query) = cx.use_state(String::new);
+    let (wrap, set_wrap) = cx.use_state(|| TextWrap::Hard);
     let (tick, set_tick) = cx.use_state(|| 0usize);
     let (vertical_offset, set_vertical_offset) = cx.use_state(|| 6_u64);
     let (horizontal_offset, set_horizontal_offset) = cx.use_state(|| 18_u64);
@@ -489,7 +504,16 @@ fn app(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     };
     let page = match tab {
         0 => overview(&theme, tick),
-        1 => components_page(completed, &set_completed, notifications, &set_notifications),
+        1 => components_page(
+            completed,
+            &set_completed,
+            notifications,
+            &set_notifications,
+            query,
+            &set_query,
+            wrap,
+            &set_wrap,
+        ),
         2 => data_page(
             &theme,
             vertical_offset,
@@ -500,12 +524,10 @@ fn app(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
         _ => theme_page(&theme, dark, preset_index, &set_dark, &set_preset),
     };
     let body = ui! {
-        <view style={|style| {
+        <scroll_area axes={ScrollAxes::Vertical} style={|style| {
             style.width /= Dimension::Max;
             style.height /= Dimension::Max;
-            style.overflow /= Overflow::Clip;
-            style.overflow_y /= Overflow::Auto;
-        }}>{page}</view>
+        }}>{page}</scroll_area>
     };
     let status = ui! {
         <view style={|style| {

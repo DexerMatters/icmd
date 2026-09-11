@@ -4,15 +4,15 @@ mod dom;
 pub(crate) mod events;
 pub(crate) mod props;
 mod text;
+pub(crate) mod text_layout;
 
-pub use common::Component as ElementComponent;
 pub use common::{
     __ui_apply, __ui_events, __ui_tag_names_equal, Attr, Component, Forward, Key, Node,
     PropsTransform, empty, fragment, text, view,
 };
 pub use context::{
-    ComponentContext, Context, ContextKey, EffectResult, ElementContext, ProviderProps, Ref,
-    StateSetter, create_context, provider,
+    ComponentContext, ContextKey, EffectResult, ProviderProps, Ref, StateSetter, create_context,
+    provider,
 };
 pub use dom::{DomId, DomNode};
 pub use events::{
@@ -21,7 +21,8 @@ pub use events::{
 };
 pub use props::{
     Align, Attributes, AxisPosition, BorderKind, BorderStyle, Dimension, DomProps, Edges, Fill,
-    FillError, Justify, Layout, Overflow, OverflowScrollbarStyle, Percent, PercentBasis, Point,
-    Props, ScrollStyle, Style, StylePatch, TextStyle, Visibility, style, style_patch,
+    FillError, Justify, Layout, Overflow, Percent, PercentBasis, Point, Props, ScrollAxes,
+    ScrollDelta, ScrollOffset, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Style,
+    StylePatch, TextStyle, Visibility, style, style_patch,
 };
 pub use text::{Span, Text, TextAlign, TextOverflow, TextWrap};

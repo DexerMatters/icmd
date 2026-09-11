@@ -1,4 +1,4 @@
-use crate::Image;
+use crate::{Image, RasterPlacement};
 
 use super::{props::DomProps, text::Text};
 
@@ -20,19 +20,26 @@ pub enum DomNode {
         id: DomId,
         image: Image,
     },
+    Raster {
+        id: DomId,
+        raster: RasterPlacement,
+    },
 }
 
 impl DomNode {
     pub fn id(&self) -> DomId {
         match self {
-            Self::Element { id, .. } | Self::Text { id, .. } | Self::Image { id, .. } => *id,
+            Self::Element { id, .. }
+            | Self::Text { id, .. }
+            | Self::Image { id, .. }
+            | Self::Raster { id, .. } => *id,
         }
     }
 
     pub fn children(&self) -> &[Self] {
         match self {
             Self::Element { children, .. } => children,
-            Self::Text { .. } | Self::Image { .. } => &[],
+            Self::Text { .. } | Self::Image { .. } | Self::Raster { .. } => &[],
         }
     }
 }

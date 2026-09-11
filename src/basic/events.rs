@@ -1,10 +1,16 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    cell::RefCell,
+    sync::{Arc, Mutex},
+};
 
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::{ScreenPosition, Size};
 
-use super::common::Attr;
+use super::{
+    common::Attr,
+    props::{ScrollDelta, ScrollOffset},
+};
 
 type ListenerCallback<E> = Box<dyn FnMut(E) + Send + 'static>;
 
@@ -159,17 +165,47 @@ pub struct WheelEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollEvent {
-    pub offset_x: i32,
-    pub offset_y: i32,
-    pub max_x: i32,
-    pub max_y: i32,
-    pub delta_x: i32,
-    pub delta_y: i32,
+    pub offset: ScrollOffset,
+    pub max_offset: ScrollOffset,
+    pub delta: ScrollDelta,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyboardEvent {
     pub key: KeyEvent,
+}
+
+thread_local! {
+    static KEYBOARD_PROPAGATION: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+}
+
+impl KeyboardEvent {
+    /// Prevent this keyboard event from reaching ancestor keyboard listeners.
+    ///
+    /// The runtime checks this flag between focused-target and ancestor
+    /// listeners. It is deliberately scoped to the current dispatch, so
+    /// nested event dispatches do not consume their parent event.
+    pub fn stop_propagation(&self) {
+        KEYBOARD_PROPAGATION.with(|stack| {
+            if let Some(stopped) = stack.borrow_mut().last_mut() {
+                *stopped = true;
+            }
+        });
+    }
+
+    pub(crate) fn begin_dispatch() {
+        KEYBOARD_PROPAGATION.with(|stack| stack.borrow_mut().push(false));
+    }
+
+    pub(crate) fn propagation_stopped() -> bool {
+        KEYBOARD_PROPAGATION.with(|stack| stack.borrow().last().copied().unwrap_or(false))
+    }
+
+    pub(crate) fn end_dispatch() {
+        KEYBOARD_PROPAGATION.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -13,7 +13,7 @@ fn frame_for(node: Node) -> (String, impl FnOnce()) {
     let (commit, _) = Commit::new(Size::new(40, 4));
     let (input, output) = Runtime::new(Lower::default())
         .then(commit)
-        .then(Renderer::new(Size::new(40, 4)))
+        .then(Renderer::new(Size::new(40, 4)).unwrap())
         .start();
     input.send(node).unwrap();
     let frame = output
@@ -90,7 +90,7 @@ fn provider_value_changes_are_visible_to_consumers() {
     let (commit, _) = Commit::new(Size::new(40, 4));
     let (input, output) = Runtime::new(Lower::default())
         .then(commit)
-        .then(Renderer::new(Size::new(40, 4)))
+        .then(Renderer::new(Size::new(40, 4)).unwrap())
         .start();
     input.send(root).unwrap();
     let first = output

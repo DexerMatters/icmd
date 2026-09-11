@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::{
     any::{Any, TypeId},
     fmt, ops,
@@ -5,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    Image,
+    Image, ImageSource, RasterImage, RasterPlacement,
     basic::context::{ComponentContext, ContextKey},
 };
 
@@ -77,6 +78,7 @@ pub(crate) enum NodeKind {
     },
     Text(Text),
     Image(Image),
+    Raster(RasterPlacement),
     Fragment(Vec<Node>),
 }
 
@@ -111,6 +113,12 @@ impl Node {
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = Some(key.into());
         self
+    }
+
+    /// Construct a host raster node. Most callers should use the declarative
+    /// [`crate::image`] component instead.
+    pub fn raster(raster: RasterPlacement) -> Self {
+        Self::from_kind(NodeKind::Raster(raster))
     }
 
     pub(crate) fn node_key(&self) -> Option<&Key> {
@@ -320,16 +328,6 @@ pub trait Component<P>: 'static {
         P: Default + Send + Sync + 'static,
     {
         self.apply(Props::default())
-    }
-
-    /// Compatibility spelling for [`Component::node`].
-    #[deprecated(note = "use `node()`; components are logical nodes")]
-    fn element(self) -> Node
-    where
-        Self: Sized + Send + Sync + 'static,
-        P: Default + Send + Sync + 'static,
-    {
-        self.node()
     }
 
     fn mapped<F>(self, transform: F) -> Forward<Self, F>
@@ -547,6 +545,72 @@ impl<T> ops::DivAssign<T> for Attr<T> {
             Self::Unset => *self = Self::Set(rhs),
             Self::Set(value) => *value = rhs,
         }
+    }
+}
+
+impl ops::DivAssign<RasterImage> for Attr<ImageSource> {
+    fn div_assign(&mut self, rhs: RasterImage) {
+        *self = Self::Set(ImageSource::from(rhs));
+    }
+}
+
+impl From<ImageSource> for Attr<ImageSource> {
+    fn from(value: ImageSource) -> Self {
+        Self::Set(value)
+    }
+}
+
+impl From<RasterImage> for Attr<ImageSource> {
+    fn from(value: RasterImage) -> Self {
+        Self::Set(value.into())
+    }
+}
+
+impl From<PathBuf> for Attr<ImageSource> {
+    fn from(value: PathBuf) -> Self {
+        Self::Set(value.into())
+    }
+}
+
+impl From<String> for Attr<ImageSource> {
+    fn from(value: String) -> Self {
+        Self::Set(value.into())
+    }
+}
+
+impl From<&str> for Attr<ImageSource> {
+    fn from(value: &str) -> Self {
+        Self::Set(value.into())
+    }
+}
+
+impl From<&Path> for Attr<ImageSource> {
+    fn from(value: &Path) -> Self {
+        Self::Set(value.into())
+    }
+}
+
+impl ops::DivAssign<PathBuf> for Attr<ImageSource> {
+    fn div_assign(&mut self, rhs: PathBuf) {
+        *self = Self::Set(ImageSource::file(rhs));
+    }
+}
+
+impl ops::DivAssign<&Path> for Attr<ImageSource> {
+    fn div_assign(&mut self, rhs: &Path) {
+        *self = Self::Set(ImageSource::file(rhs));
+    }
+}
+
+impl ops::DivAssign<String> for Attr<ImageSource> {
+    fn div_assign(&mut self, rhs: String) {
+        *self = Self::Set(ImageSource::file(rhs));
+    }
+}
+
+impl ops::DivAssign<&str> for Attr<ImageSource> {
+    fn div_assign(&mut self, rhs: &str) {
+        *self = Self::Set(ImageSource::file(rhs));
     }
 }
 

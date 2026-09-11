@@ -1,14 +1,14 @@
 use std::{sync::Arc, time::Duration};
 
-use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::style::Color;
 use icmd::{
     AlertProps, Attr, BadgeProps, CheckboxProps, Commit, Component, ComponentContext, Dimension,
-    DomProps, Fill, Layout, Lower, Node, Percent, Props, RadioProps, Renderer, Runtime,
-    ScrollEvent, ScrollbarProps, Size, SkeletonProps, SpinnerProps, Style, SwitchProps, canvas,
-    empty, fragment, progress_bar, scrollbar, style_patch, text,
+    DomProps, Fill, Layout, Lower, Node, Overflow, Percent, Props, RadioProps, Renderer, Runtime,
+    ScrollAreaProps, ScrollAxes, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Size,
+    SkeletonProps, SpinnerProps, Style, SwitchProps, canvas, column, empty, fragment, progress_bar,
+    scroll_area, style_patch, text,
     theme::{Theme, ThemeMode, ThemePreset, theme},
-    theme_provider, ui, vbox, view,
+    theme_provider, ui, view,
 };
 
 fn root_empty(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
@@ -50,7 +50,7 @@ fn render(node: Node, viewport: Size) -> String {
     let (commit, _) = Commit::new(viewport);
     let (input, output) = Runtime::new(Lower::default())
         .then(commit)
-        .then(Renderer::new(viewport))
+        .then(Renderer::new(viewport).unwrap())
         .start();
     input.send(node).unwrap();
     output
@@ -116,6 +116,7 @@ fn percentages_can_resolve_against_available_space_or_the_viewport() {
             style.layout /= Layout::Absolute;
             style.width /= Dimension::Cells(10);
             style.height /= Dimension::Cells(4);
+            style.overflow /= Overflow::Visible;
         })
         .children([viewport]);
     let frame = render(viewport, Size::new(20, 10));
@@ -234,7 +235,7 @@ fn extra_modifiers_compose_and_full_props_stay_available() {
 
 #[test]
 fn generic_node_helpers_compose_with_builtin_components() {
-    let node = vbox.children([text("one"), fragment([text("two"), empty()])]);
+    let node = column.children([text("one"), fragment([text("two"), empty()])]);
     let frame = render(node, Size::new(8, 3));
     assert!(frame.contains('o'));
     assert!(frame.contains('t'));
@@ -249,14 +250,13 @@ fn widget_props_are_unset_until_extra_modifies_them() {
     assert!(!progress.show_percentage.is_set());
     assert!(!progress.label.is_set());
 
-    let scroll: ScrollbarProps = Default::default();
+    let scroll: ScrollAreaProps = Default::default();
+    assert!(!scroll.axes.is_set());
+    assert!(!scroll.scrollbar_visibility.is_set());
     assert!(!scroll.offset.is_set());
-    assert!(!scroll.content_len.is_set());
-    assert!(!scroll.viewport_len.is_set());
-    assert!(!scroll.length.is_set());
-    assert!(!scroll.orientation.is_set());
     assert!(!scroll.enable_mouse.is_set());
     assert!(!scroll.enable_wheel.is_set());
+    assert!(!scroll.enable_keyboard.is_set());
 
     let spinner: SpinnerProps = Default::default();
     assert!(!spinner.frame.is_set());
@@ -280,77 +280,48 @@ fn widget_props_are_unset_until_extra_modifies_them() {
 }
 
 #[test]
-fn standalone_scrollbar_handles_wheel_track_clicks_and_thumb_dragging() {
-    let scroll_events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let events = scroll_events.clone();
-    let node = scrollbar
-        .props(ScrollbarProps {
-            content_len: Attr::Set(10),
-            viewport_len: Attr::Set(3),
-            length: Attr::Set(4),
-            ..ScrollbarProps::default()
+fn scroll_area_is_the_integrated_scroll_component() {
+    let node = scroll_area
+        .props(ScrollAreaProps {
+            axes: Attr::Set(ScrollAxes::Vertical),
+            scrollbar_visibility: Attr::Set(ScrollbarVisibility::Hidden),
+            ..ScrollAreaProps::default()
         })
-        .events(move |handlers| {
-            handlers.scroll /= move |_event: ScrollEvent| {
-                events.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            };
+        .style(|style| {
+            style.width /= Dimension::Cells(4);
+            style.height /= Dimension::Cells(2);
         })
-        .node();
-    let viewport = Size::new(1, 4);
-    let (commit, _, dispatcher) = Commit::new_with_events(viewport);
-    let (input, output) = Runtime::new(Lower::default())
-        .then(commit)
-        .then(Renderer::new(viewport))
-        .start();
-    input.send(node).unwrap();
-    let first = output
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap()
-        .unwrap();
+        .children([text("one"), text("two"), text("three")]);
+    let frame = render(node, Size::new(4, 2));
+    assert!(frame.contains('o'));
+    assert!(!frame.contains('│'));
+}
 
-    for _ in 0..4 {
-        dispatcher.dispatch(Event::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::empty(),
-        }));
-    }
-    let wheeled = output
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap()
-        .unwrap();
-    assert_ne!(first, wheeled);
+#[test]
+fn scrollbar_glyphs_validate_early_and_theme_styles_are_overridable() {
+    assert!(ScrollbarGlyph::new("界").is_err());
+    assert!(ScrollbarGlyph::new("ab").is_err());
 
-    dispatcher.dispatch(Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: 0,
-        row: 3,
-        modifiers: KeyModifiers::empty(),
-    }));
-    let clicked = output
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap()
-        .unwrap();
-    assert_ne!(wheeled, clicked);
+    let scrollbar = ScrollbarStyle {
+        vertical_track: ScrollbarGlyph::new("!").unwrap(),
+        vertical_thumb: ScrollbarGlyph::new("#").unwrap(),
+        ..ScrollbarStyle::default()
+    };
+    let themed = Theme::default().customize(|theme| theme.scrollbar = scrollbar.clone());
+    assert_eq!(themed.scrollbar.vertical_track.symbol(), "!");
 
-    dispatcher.dispatch(Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Up(MouseButton::Left),
-        column: 0,
-        row: 3,
-        modifiers: KeyModifiers::empty(),
-    }));
-    dispatcher.dispatch(Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: 0,
-        row: 3,
-        modifiers: KeyModifiers::empty(),
-    }));
-    dispatcher.dispatch(Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Drag(MouseButton::Left),
-        column: 0,
-        row: 1,
-        modifiers: KeyModifiers::empty(),
-    }));
-    assert!(scroll_events.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+    let node = scroll_area
+        .props(ScrollAreaProps {
+            axes: Attr::Set(ScrollAxes::Vertical),
+            scrollbar_visibility: Attr::Set(ScrollbarVisibility::Always),
+            scrollbar_style: Attr::Set(scrollbar),
+            ..ScrollAreaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(4);
+            style.height /= Dimension::Cells(2);
+        })
+        .children([text("one"), text("two"), text("three")]);
+    let frame = render(node, Size::new(4, 2));
+    assert!(frame.contains('!') || frame.contains('#'));
 }

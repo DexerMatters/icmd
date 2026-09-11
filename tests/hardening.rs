@@ -14,7 +14,7 @@ fn render(node: Node, viewport: Size) -> String {
     let (commit, _) = Commit::new(viewport);
     let (input, output) = Runtime::new(Lower::default())
         .then(commit)
-        .then(Renderer::new(viewport))
+        .then(Renderer::new(viewport).unwrap())
         .start();
     input.send(node).unwrap();
     output
@@ -89,6 +89,23 @@ fn clipped_descendants_do_not_paint_or_receive_pointer_events() {
 }
 
 #[test]
+fn layouts_clip_children_by_default() {
+    let node = viewport_root(
+        view.style(|style| {
+            style.layout /= Layout::Absolute;
+            style.width /= Dimension::Cells(4);
+            style.height /= Dimension::Cells(1);
+            style.column /= AxisPosition::Cells(1);
+        })
+        .child(
+            view.style(|style| style.column /= AxisPosition::Cells(-1))
+                .child("X"),
+        ),
+    );
+    assert!(!render(node, Size::new(5, 1)).contains('X'));
+}
+
+#[test]
 fn stretch_subtracts_cross_axis_margins() {
     let node = view
         .style(|style| {
@@ -134,9 +151,9 @@ fn space_between_distributes_odd_remainders_to_the_leading_gap() {
 
 #[test]
 fn limits_are_fallible_and_graphemes_are_bounded() {
-    assert!(Renderer::try_new(Size::new(1025, 1025)).is_err());
-    assert!(Image::blank(1024, 1024, Cell::blank()).is_ok());
-    assert!(Image::blank(1024, 1025, Cell::blank()).is_err());
+    assert!(Renderer::new(Size::new(1025, 1025)).is_err());
+    assert!(Image::new(1024, 1024, Cell::blank()).is_ok());
+    assert!(Image::new(1024, 1025, Cell::blank()).is_err());
     assert!(Cell::plain("a".repeat(257)).is_err());
     assert!(Fill::new("a".repeat(257)).is_err());
 }
@@ -178,7 +195,7 @@ fn oversized_declarative_canvas_uses_error_placeholder() {
 
 #[test]
 fn renderer_tie_order_is_deterministic() {
-    let mut renderer = Renderer::try_new(Size::new(2, 1)).unwrap();
+    let mut renderer = Renderer::new(Size::new(2, 1)).unwrap();
     let a = Image::from_rows(vec![vec![Cell::plain("A").unwrap()]]).unwrap();
     let b = Image::from_rows(vec![vec![Cell::plain("B").unwrap()]]).unwrap();
     renderer
@@ -209,15 +226,15 @@ fn renderer_tie_order_is_deterministic() {
             force_redraw: false,
         })
         .unwrap();
-    let diff = renderer.try_render_diff().unwrap().unwrap();
+    let diff = renderer.render_diff().unwrap().unwrap();
     assert!(diff.contains('B'));
     assert!(!diff.contains('A'));
 }
 
 #[test]
 fn renderer_rejects_frames_atomically_and_restores_overlap() {
-    let mut renderer = Renderer::new(Size::new(4, 1));
-    renderer.render_diff();
+    let mut renderer = Renderer::new(Size::new(4, 1)).unwrap();
+    renderer.render_diff().unwrap();
     let image = |symbol: &str| Image::from_rows(vec![vec![Cell::plain(symbol).unwrap()]]).unwrap();
     renderer
         .apply_frame(icmd::Frame::new(vec![
@@ -235,13 +252,13 @@ fn renderer_rejects_frames_atomically_and_restores_overlap() {
             },
         ]))
         .unwrap();
-    assert!(renderer.render_diff().unwrap().contains('B'));
+    assert!(renderer.render_diff().unwrap().unwrap().contains('B'));
     renderer
         .apply_frame(icmd::Frame::new(vec![Operation::Remove {
             id: icmd::ImageId(2),
         }]))
         .unwrap();
-    assert!(renderer.render_diff().unwrap().contains('A'));
+    assert!(renderer.render_diff().unwrap().unwrap().contains('A'));
 
     let result = renderer.apply_frame(icmd::Frame::new(vec![
         Operation::Move {
@@ -256,15 +273,15 @@ fn renderer_rejects_frames_atomically_and_restores_overlap() {
         },
     ]));
     assert!(result.is_err());
-    assert!(renderer.render_diff().is_none());
+    assert!(renderer.render_diff().unwrap().is_none());
 }
 
 #[test]
 fn renderer_handles_wide_patch_boundaries_and_resize() {
     let wide = Cell::plain("界").unwrap();
     let image = Image::from_rows(vec![vec![wide, Cell::plain("A").unwrap()]]).unwrap();
-    let mut renderer = Renderer::new(Size::new(3, 1));
-    renderer.render_diff();
+    let mut renderer = Renderer::new(Size::new(3, 1)).unwrap();
+    renderer.render_diff().unwrap();
     renderer
         .apply_frame(icmd::Frame::new(vec![Operation::Create {
             id: icmd::ImageId(1),
@@ -273,7 +290,7 @@ fn renderer_handles_wide_patch_boundaries_and_resize() {
             level: 0,
         }]))
         .unwrap();
-    renderer.render_diff();
+    renderer.render_diff().unwrap();
     renderer
         .apply_frame(icmd::Frame::new(vec![Operation::PatchRect {
             id: icmd::ImageId(1),
@@ -281,9 +298,9 @@ fn renderer_handles_wide_patch_boundaries_and_resize() {
             rows: vec![vec![Cell::plain("B").unwrap()]],
         }]))
         .unwrap();
-    assert!(renderer.render_diff().unwrap().contains('B'));
+    assert!(renderer.render_diff().unwrap().unwrap().contains('B'));
     renderer
         .apply_frame(icmd::Frame::empty().resize(Size::new(2, 1)))
         .unwrap();
-    assert!(renderer.render_diff().unwrap().contains("\x1b[2J"));
+    assert!(renderer.render_diff().unwrap().unwrap().contains("\x1b[2J"));
 }

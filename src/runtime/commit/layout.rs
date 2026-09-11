@@ -13,6 +13,71 @@ use super::style::{content_insets, slot};
 use super::text::text_measure;
 use super::types::{ComputedStyle, ComputedText, ScrollSpec};
 
+pub(super) struct ScrollLayout<'a> {
+    pub(super) content: RectI,
+    pub(super) bar_vertical: bool,
+    pub(super) bar_horizontal: bool,
+    pub(super) children: Vec<(&'a DomNode, RectI)>,
+    pub(super) extent: (i32, i32),
+}
+
+impl<'a> ScrollLayout<'a> {
+    pub(super) fn vertical_metrics(
+        &self,
+        offset: super::super::event::RuntimeScrollOffset,
+    ) -> Option<ScrollbarMetrics> {
+        self.bar_vertical
+            .then(|| ScrollbarMetrics::new(self.content.height, self.extent.1, offset.y))?
+    }
+
+    pub(super) fn horizontal_metrics(
+        &self,
+        offset: super::super::event::RuntimeScrollOffset,
+    ) -> Option<ScrollbarMetrics> {
+        self.bar_horizontal
+            .then(|| ScrollbarMetrics::new(self.content.width, self.extent.0, offset.x))?
+    }
+}
+
+/// Canonical geometry for a scrollbar thumb.  Paint and hit-testing consume
+/// the same metrics produced from the layout extent and retained offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScrollbarMetrics {
+    pub(crate) length: i32,
+    pub(crate) thumb_start: i32,
+    pub(crate) thumb_len: i32,
+    pub(crate) max_offset: i32,
+}
+
+impl ScrollbarMetrics {
+    pub(crate) fn new(length: i32, content_len: i32, offset: i32) -> Option<Self> {
+        if length <= 0 {
+            return None;
+        }
+        let content_len = content_len.max(1);
+        let thumb_len = if content_len <= length {
+            length
+        } else {
+            ((length as i64 * length as i64 + content_len as i64 - 1) / content_len as i64)
+                .clamp(1, length as i64) as i32
+        };
+        let max_offset = content_len.saturating_sub(length).max(0);
+        let max_start = length.saturating_sub(thumb_len);
+        let thumb_start = if max_offset == 0 {
+            0
+        } else {
+            ((offset.clamp(0, max_offset) as i64 * max_start as i64 + max_offset as i64 / 2)
+                / max_offset as i64) as i32
+        };
+        Some(Self {
+            length,
+            thumb_start,
+            thumb_len,
+            max_offset,
+        })
+    }
+}
+
 impl Commit {
     pub(super) fn root_rect(&self, root: &DomNode) -> RectI {
         let style = match root {
@@ -64,6 +129,7 @@ impl Commit {
     ) -> (i32, i32) {
         match node {
             DomNode::Image { image, .. } => (image.width() as i32, image.height() as i32),
+            DomNode::Raster { raster, .. } => (raster.width as i32, raster.height as i32),
             DomNode::Text { text, .. } => {
                 let style = ComputedStyle::resolve(&text.layout_style, inherited);
                 if style.visibility == Visibility::Hidden {
@@ -207,17 +273,23 @@ impl Commit {
         }
     }
 
-    #[allow(clippy::type_complexity)]
     pub(super) fn layout_scroll_content<'a>(
         &mut self,
         children: &'a [DomNode],
         base: RectI,
         style: &ComputedStyle,
         spec: Option<&ScrollSpec<'_>>,
-    ) -> (RectI, bool, bool, Vec<(&'a DomNode, RectI)>, (i32, i32)) {
+    ) -> ScrollLayout<'a> {
         let Some(spec) = spec else {
-            let (children, width, height) = self.child_layouts(children, base, style);
-            return (base, false, false, children, (width, height));
+            let (children, width, height) =
+                self.child_layouts(children, base, style, (false, false));
+            return ScrollLayout {
+                content: base,
+                bar_vertical: false,
+                bar_horizontal: false,
+                children,
+                extent: (width, height),
+            };
         };
 
         let vertical_axis = spec.vertical;
@@ -243,7 +315,8 @@ impl Commit {
                 base.height
                     .saturating_sub(i32::from(bar_horizontal && base.height > 0)),
             );
-            let (next_children, width, height) = self.child_layouts(children, content, style);
+            let (next_children, width, height) =
+                self.child_layouts(children, content, style, (horizontal_axis, vertical_axis));
             let next_vertical = spec.draw_scrollbar
                 && vertical_axis
                 && base.width > 0
@@ -255,13 +328,13 @@ impl Commit {
                 && base.height > 0
                 && (spec.always_horizontal || width > content.width);
             if next_vertical == bar_vertical && next_horizontal == bar_horizontal {
-                return (
+                return ScrollLayout {
                     content,
                     bar_vertical,
                     bar_horizontal,
-                    next_children,
-                    (width, height),
-                );
+                    children: next_children,
+                    extent: (width, height),
+                };
             }
             let next_state = usize::from(next_vertical) * 2 + usize::from(next_horizontal);
             if seen[next_state] {
@@ -281,14 +354,15 @@ impl Commit {
             base.height
                 .saturating_sub(i32::from(bar_horizontal && base.height > 0)),
         );
-        let (children_layouts, width, height) = self.child_layouts(children, content, style);
-        (
+        let (children_layouts, width, height) =
+            self.child_layouts(children, content, style, (horizontal_axis, vertical_axis));
+        ScrollLayout {
             content,
             bar_vertical,
             bar_horizontal,
-            children_layouts,
-            (width, height),
-        )
+            children: children_layouts,
+            extent: (width, height),
+        }
     }
 
     pub(super) fn child_layouts<'a>(
@@ -296,6 +370,7 @@ impl Commit {
         children: &'a [DomNode],
         content: RectI,
         style: &ComputedStyle,
+        scroll_axes: (bool, bool),
     ) -> (Vec<(&'a DomNode, RectI)>, i32, i32) {
         if children.is_empty() {
             return (Vec::new(), 0, 0);
@@ -307,9 +382,9 @@ impl Commit {
                     if Self::visibility_of(child) == Visibility::Hidden {
                         return None;
                     }
-                    let (offered_width, offered_height) = intrinsic_offers(style, content);
+                    let (offered_width, offered_height) = intrinsic_offers(content, scroll_axes);
                     let (iw, ih) = self.intrinsic(child, offered_width, offered_height, style.text);
-                    let (w, h) = self.child_size(child, iw, ih, content, style);
+                    let (w, h) = self.child_size(child, iw, ih, content, scroll_axes);
                     let child_style = Self::style_of(child);
                     let margin = child_style
                         .and_then(|style| slot(&style.margin))
@@ -400,7 +475,7 @@ impl Commit {
             if Self::visibility_of(child) == Visibility::Hidden {
                 continue;
             }
-            let (offered_width, offered_height) = intrinsic_offers(style, content);
+            let (offered_width, offered_height) = intrinsic_offers(content, scroll_axes);
             let (iw, ih) = self.intrinsic(child, offered_width, offered_height, style.text);
             let child_style = Self::style_of(child);
             let margin = child_style
@@ -426,17 +501,27 @@ impl Commit {
                 .unwrap_or(Dimension::Auto);
             let intrinsic_main = if horizontal { iw } else { ih };
             let intrinsic_cross = if horizontal { ih } else { iw };
-            let main_available = if scrolls_axis(style, horizontal) {
+            let main_scrolls = if horizontal {
+                scroll_axes.0
+            } else {
+                scroll_axes.1
+            };
+            let cross_scrolls = if horizontal {
+                scroll_axes.1
+            } else {
+                scroll_axes.0
+            };
+            let main_available = if main_scrolls {
                 None
             } else {
                 Some(available_main)
             };
-            let cross_available = if scrolls_axis(style, !horizontal) {
+            let cross_available = if cross_scrolls {
                 None
             } else {
                 Some(available_cross)
             };
-            let main = if main_dimension == Dimension::Max && !scrolls_axis(style, horizontal) {
+            let main = if main_dimension == Dimension::Max && !main_scrolls {
                 max_count = max_count.saturating_add(1);
                 0
             } else {
@@ -530,12 +615,22 @@ impl Commit {
         for (index, (child, margin, main_dimension, cross_dimension, mut main, mut cross)) in
             entries.into_iter().enumerate()
         {
-            if main_dimension == Dimension::Max && !scrolls_axis(style, horizontal) {
+            let main_scrolls = if horizontal {
+                scroll_axes.0
+            } else {
+                scroll_axes.1
+            };
+            let cross_scrolls = if horizontal {
+                scroll_axes.1
+            } else {
+                scroll_axes.0
+            };
+            if main_dimension == Dimension::Max && !main_scrolls {
                 main = max_share + (remainder > 0) as i32;
                 remainder -= (remainder > 0) as i32;
             }
             let cross_is_auto = cross_dimension == Dimension::Auto;
-            if cross_is_auto && style.align == Align::Stretch && !scrolls_axis(style, !horizontal) {
+            if cross_is_auto && style.align == Align::Stretch && !cross_scrolls {
                 cross = cross_available_for_child(margin, horizontal, available_cross);
             }
             let clips_cross = if horizontal {
@@ -543,7 +638,7 @@ impl Commit {
             } else {
                 style.overflow_x == Overflow::Clip
             };
-            if clips_cross {
+            if clips_cross && !cross_scrolls {
                 cross = cross.min(cross_available_for_child(
                     margin,
                     horizontal,
@@ -639,14 +734,14 @@ impl Commit {
         iw: i32,
         ih: i32,
         available: RectI,
-        parent_style: &ComputedStyle,
+        scroll_axes: (bool, bool),
     ) -> (i32, i32) {
         let Some(style) = Self::style_of(child) else {
             return (iw.max(0), ih.max(0));
         };
         let width = resolve_dimension(
             slot(&style.width).unwrap_or(Dimension::Auto),
-            if scrolls_axis(parent_style, true) {
+            if scroll_axes.0 {
                 None
             } else {
                 Some(available.width)
@@ -656,7 +751,7 @@ impl Commit {
         );
         let height = resolve_dimension(
             slot(&style.height).unwrap_or(Dimension::Auto),
-            if scrolls_axis(parent_style, false) {
+            if scroll_axes.1 {
                 None
             } else {
                 Some(available.height)
@@ -668,14 +763,6 @@ impl Commit {
     }
 }
 
-pub(super) fn scrolls_axis(style: &ComputedStyle, horizontal: bool) -> bool {
-    if horizontal {
-        matches!(style.overflow_x, Overflow::Auto | Overflow::Scroll)
-    } else {
-        matches!(style.overflow_y, Overflow::Auto | Overflow::Scroll)
-    }
-}
-
 pub(super) fn collect_scroll_ids(node: &DomNode, ids: &mut HashSet<DomId>) {
     if let DomNode::Element {
         id,
@@ -683,12 +770,7 @@ pub(super) fn collect_scroll_ids(node: &DomNode, ids: &mut HashSet<DomId>) {
         children,
     } = node
     {
-        let shorthand = slot(&props.style.overflow).unwrap_or_default();
-        let x = slot(&props.style.overflow_x).unwrap_or(shorthand);
-        let y = slot(&props.style.overflow_y).unwrap_or(shorthand);
-        if matches!(x, Overflow::Scroll | Overflow::Auto)
-            || matches!(y, Overflow::Scroll | Overflow::Auto)
-        {
+        if props.scroll.is_some() {
             ids.insert(*id);
         }
         for child in children {
@@ -711,11 +793,11 @@ pub(super) fn cross_available_for_child(
 }
 
 pub(super) fn intrinsic_offers(
-    style: &ComputedStyle,
     content: RectI,
+    scroll_axes: (bool, bool),
 ) -> (Option<i32>, Option<i32>) {
     (
-        (!scrolls_axis(style, true)).then_some(content.width),
-        (!scrolls_axis(style, false)).then_some(content.height),
+        (!scroll_axes.0).then_some(content.width),
+        (!scroll_axes.1).then_some(content.height),
     )
 }

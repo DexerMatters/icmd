@@ -1,6 +1,6 @@
 use icmd::{
-    Attr, Component, ComponentContext, Node, Props, RuntimeConfig, button, paragraph, render, ui,
-    vbox,
+    Attr, Component, ComponentContext, Node, Props, RuntimeConfig, button, column, paragraph,
+    render, ui,
 };
 
 #[derive(Default)]
@@ -15,14 +15,14 @@ fn status(_cx: &mut ComponentContext, props: &Props<StatusProps>) -> Node {
 fn app(_cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     let caption = "Save";
     ui! {
-        <vbox>
+        <column>
             <status message="Ready" />
             <button on_click={|_| {}}>{caption}</button>
             <>
                 "Built with ui!"
                 <status message={String::from("typed component props")} />
             </>
-        </vbox>
+        </column>
     }
 }
 

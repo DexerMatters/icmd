@@ -33,7 +33,7 @@ fn button_renders() {
     let (commit, _) = Commit::new(viewport);
     let (input, output) = Runtime::new(Lower::default())
         .then(commit)
-        .then(Renderer::new(viewport))
+        .then(Renderer::new(viewport).unwrap())
         .start();
     input.send(button.apply(())).unwrap();
 

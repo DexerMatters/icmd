@@ -4,19 +4,16 @@ use crossterm::style::{Attributes, Color};
 
 use crate::{
     Align, AxisPosition, BorderKind, Dimension, DomId, Edges, Fill, Image, Justify, Layout,
-    Overflow, OverflowScrollbarStyle, ScreenPosition, Visibility,
+    Overflow, RasterPlacement, ScreenPosition, ScrollOffset, ScrollbarStyle, Visibility,
 };
 
 use super::geometry::RectI;
 
 type AxisBounds = Option<(i32, i32)>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ComputedText {
-    pub(super) foreground: Color,
-    pub(super) background: Option<Color>,
-    pub(super) attributes: Attributes,
-}
+/// The effective text style is owned by the canonical text layout engine so the
+/// editor surface and the commit pipeline share one style type.
+pub(super) use crate::basic::text_layout::ComputedText;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ComputedBorder {
@@ -61,7 +58,6 @@ pub(super) struct ComputedStyle {
     pub(super) overflow: Overflow,
     pub(super) overflow_x: Overflow,
     pub(super) overflow_y: Overflow,
-    pub(super) scroll: ComputedScrollStyle,
     pub(super) visibility: Visibility,
     pub(super) z_index: i32,
     pub(super) background: Option<Color>,
@@ -79,16 +75,10 @@ pub(super) struct ScrollSpec<'a> {
     pub(super) wheel_step: u16,
     pub(super) wheel: bool,
     pub(super) enable_mouse: bool,
-    pub(super) scrollbar: &'a OverflowScrollbarStyle,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ComputedScrollStyle {
-    pub(super) wheel: bool,
-    pub(super) enable_mouse: bool,
-    pub(super) wheel_step: u16,
-    pub(super) draw_scrollbar: bool,
-    pub(super) scrollbar: OverflowScrollbarStyle,
+    pub(super) enable_keyboard: bool,
+    pub(super) controlled: bool,
+    pub(super) requested_offset: Option<ScrollOffset>,
+    pub(super) scrollbar: &'a ScrollbarStyle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -154,6 +144,38 @@ impl Clip {
 
     pub(super) fn restrict(self, rect: RectI) -> Self {
         self.restrict_axes(rect, true, true)
+    }
+
+    pub(super) fn prefetch(self) -> Self {
+        let expand = |bounds: Option<(i32, i32)>| {
+            bounds.map(|(start, end)| {
+                let margin = end.saturating_sub(start).max(1);
+                (start.saturating_sub(margin), end.saturating_add(margin))
+            })
+        };
+        match self {
+            Self::Unbounded => Self::Unbounded,
+            Self::Bounded(rect) => {
+                let horizontal_margin = rect.width.max(1);
+                let vertical_margin = rect.height.max(1);
+                Self::Bounded(RectI::new(
+                    rect.line.saturating_sub(vertical_margin),
+                    rect.column.saturating_sub(horizontal_margin),
+                    rect.width
+                        .saturating_add(horizontal_margin.saturating_mul(2)),
+                    rect.height
+                        .saturating_add(vertical_margin.saturating_mul(2)),
+                ))
+            }
+            Self::Axes {
+                horizontal,
+                vertical,
+            } => Self::Axes {
+                horizontal: expand(horizontal),
+                vertical: expand(vertical),
+            },
+            Self::Empty => Self::Empty,
+        }
     }
 
     pub(super) fn restrict_axes(self, rect: RectI, horizontal: bool, vertical: bool) -> Self {
@@ -222,10 +244,19 @@ pub(super) struct PaintKey {
 
 #[derive(Clone)]
 pub(super) struct PaintFragment {
-    pub(super) image: Image,
+    pub(super) content: PaintContent,
     pub(super) position: ScreenPosition,
+    /// Raster-only local visibility. Cell fragments are physically cropped
+    /// while painting; rasters retain their full transform for cache reuse.
+    pub(super) raster_clip: Option<crate::Rect>,
     pub(super) level: i32,
     pub(super) order: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum PaintContent {
+    Cells(Image),
+    Raster(RasterPlacement),
 }
 
 pub(super) struct BorderPainter<'a> {

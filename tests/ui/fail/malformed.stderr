@@ -1,15 +1,15 @@
 error: ui!: malformed opening tag
  --> tests/ui/fail/malformed.rs:4:13
   |
-4 |     let _ = ui! { <vbox value= /> };
-  |             ^^^^^^^^^^^^^^^^^^^^^^^
+4 |     let _ = ui! { <column value= /> };
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^
   |
   = note: this error originates in the macro `$crate::ui` which comes from the expansion of the macro `ui` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-warning: unused import: `vbox`
- --> tests/ui/fail/malformed.rs:1:16
+warning: unused import: `column`
+ --> tests/ui/fail/malformed.rs:1:12
   |
-1 | use icmd::{ui, vbox};
-  |                ^^^^
+1 | use icmd::{column, ui};
+  |            ^^^^^^
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

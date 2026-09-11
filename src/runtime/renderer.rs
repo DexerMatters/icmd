@@ -1,7 +1,15 @@
+use super::image::{
+    ImageManager, KittyBackend, NativeTile, PreparedRaster, ScreenRect, TileKey, TransformKey,
+    surround_native,
+};
 use super::pipeline::PipelineComponent;
 use crate::data::{
     Cell, CellSlot, Frame, Image, ImageError, ImageId, MAX_SURFACE_CELLS, Operation, Rect,
     ScreenPosition, Size,
+};
+use crate::{
+    ImageMode, ImageProtocol, ImageSource, ImageUpdatePolicy, RasterImage, RasterPlacement,
+    raster::{RasterPixels, render_rgba_with_cell_size, symbols_from_pixels},
 };
 use crossbeam_channel::{Receiver, Sender};
 use crossterm::cursor::{MoveTo, RestorePosition, SavePosition};
@@ -9,10 +17,15 @@ use crossterm::style::{
     Attribute, Attributes, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
 use crossterm::terminal::{Clear, ClearType};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::ffi::CString;
 use std::fmt;
 use std::fmt::Write as _;
+use std::ops::Range;
+use std::time::{Duration, Instant};
+
+const ADAPTIVE_REPLAY_DELAY: Duration = Duration::from_millis(80);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
@@ -57,16 +70,66 @@ impl fmt::Display for FrameError {
 impl Error for FrameError {}
 
 #[derive(Debug, Clone)]
-struct ImageNode {
-    image: Image,
-    position: ScreenPosition,
-    level: i32,
-    order: u64,
-    mutation: u64,
+pub(super) enum Surface {
+    Cells(Image),
+    Raster(RasterPlacement),
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ImageNode {
+    pub(super) surface: Surface,
+    pub(super) fallback: Option<Image>,
+    pub(super) position: ScreenPosition,
+    pub(super) raster_clip: Option<Rect>,
+    pub(super) level: i32,
+    pub(super) order: u64,
+    pub(super) mutation: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RendererConfig {
+    pub image_protocol: ImageProtocol,
+    pub image_cache_bytes: usize,
+    pub image_update_policy: ImageUpdatePolicy,
+    /// Pixel dimensions of one terminal cell for deterministic renderers.
+    /// `None` refreshes live terminal metrics and falls back to 8x16.
+    pub cell_pixel_size: Option<Size>,
+}
+
+impl Default for RendererConfig {
+    fn default() -> Self {
+        Self {
+            image_protocol: ImageProtocol::Auto,
+            image_cache_bytes: 64 * 1024 * 1024,
+            image_update_policy: ImageUpdatePolicy::Adaptive,
+            cell_pixel_size: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CachedPayload {
+    value: String,
+    used: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct LayerKey(i32, u64, u64, u64);
+
+struct TermInfo(*mut chafa_sys::ChafaTermInfo);
+
+unsafe impl Send for TermInfo {}
+
+impl Drop for TermInfo {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { chafa_sys::chafa_term_info_unref(self.0) };
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Damage {
+pub(super) struct Damage {
     line: i64,
     column: i64,
     width: i64,
@@ -103,35 +166,93 @@ impl Damage {
 }
 
 pub struct Renderer {
-    viewport: Size,
-    images: HashMap<ImageId, ImageNode>,
+    pub(super) viewport: Size,
+    // Retained scene nodes remain protocol-independent; image-specific state
+    // lives in the manager/backend fields below.
+    pub(super) images: HashMap<ImageId, ImageNode>,
     next_order: u64,
     next_mutation: u64,
     last: Vec<CellSlot>,
+    scratch: Vec<CellSlot>,
+    dirty: Vec<bool>,
+    changed: Vec<bool>,
     damage: Vec<Damage>,
+    // Damage is normalized into row spans before composition. `owners` stores
+    // the one-based ordinal of the surface that supplied each scratch cell.
+    // It makes wide-glyph validation constant-time without another scene walk.
+    damage_rows: Vec<Vec<Range<usize>>>,
+    owners: Vec<usize>,
+    layers: Vec<ImageId>,
+    layers_dirty: bool,
     full_redraw: bool,
+    pub(super) protocol: ImageProtocol,
+    term_info: TermInfo,
+    // Source I/O and fallback transitions are shared by every output mode.
+    pub(super) image_manager: ImageManager,
+    native_cache: HashMap<NativeKey, CachedPayload>,
+    native_cache_bytes: usize,
+    native_cache_limit: usize,
+    prepared: HashMap<TransformKey, PreparedRaster>,
+    prepared_bytes: usize,
+    cache_tick: u64,
+    pub(super) cell_pixels: Size,
+    detect_cell_pixels: bool,
+    image_update_policy: ImageUpdatePolicy,
+    pub(super) symbols_for_native: bool,
+    native_replay_at: Option<Instant>,
+    pub(super) raster_scene_dirty: bool,
+    native_tiles: HashSet<TileKey>,
+    kitty: KittyBackend,
 }
 
 impl Renderer {
-    /// Construct a renderer. This compatibility constructor panics with a
-    /// fixed message when the viewport is outside the bounded surface budget
-    /// or allocation fails; use [`Self::try_new`] when the caller needs
-    /// recovery.
-    pub fn new(viewport: Size) -> Self {
-        Self::try_new(viewport).expect("renderer viewport exceeds the supported surface limit")
+    /// Construct a renderer without mutating state when allocation fails.
+    pub fn new(viewport: Size) -> Result<Self, FrameError> {
+        Self::with_config(viewport, RendererConfig::default())
     }
 
-    /// Fallible renderer construction that never mutates state on failure.
-    pub fn try_new(viewport: Size) -> Result<Self, FrameError> {
+    pub fn with_config(viewport: Size, config: RendererConfig) -> Result<Self, FrameError> {
         let cells = blank_cells(viewport)?;
+        let cell_count = cells.len();
+        let (protocol, term_info) = detect_terminal(config.image_protocol);
+        let detect_cell_pixels = config.cell_pixel_size.is_none();
+        let cell_pixels = config
+            .cell_pixel_size
+            .or_else(live_cell_pixels)
+            .map(|size| Size::new(size.width.max(1), size.height.max(1)))
+            .unwrap_or(Size::new(8, 16));
         Ok(Self {
             viewport,
             images: HashMap::new(),
             next_order: 0,
             next_mutation: 0,
             last: cells,
+            scratch: Vec::with_capacity(cell_count),
+            dirty: vec![false; cell_count],
+            changed: vec![false; cell_count],
             damage: Vec::new(),
+            damage_rows: vec![Vec::new(); usize::from(viewport.height)],
+            owners: vec![0; cell_count],
+            layers: Vec::new(),
+            layers_dirty: true,
             full_redraw: true,
+            protocol,
+            term_info,
+            image_manager: ImageManager::new(),
+            native_cache: HashMap::new(),
+            native_cache_bytes: 0,
+            native_cache_limit: config.image_cache_bytes,
+            prepared: HashMap::new(),
+            prepared_bytes: 0,
+            cache_tick: 0,
+            cell_pixels,
+            detect_cell_pixels,
+            image_update_policy: config.image_update_policy,
+            symbols_for_native: false,
+            native_replay_at: None,
+            raster_scene_dirty: true,
+            native_tiles: HashSet::new(),
+            kitty: KittyBackend::new(),
         })
     }
 
@@ -139,22 +260,64 @@ impl Renderer {
         self.viewport
     }
 
+    fn raster_node(
+        &self,
+        raster: RasterPlacement,
+        position: ScreenPosition,
+        level: i32,
+        order: u64,
+        mutation: u64,
+    ) -> ImageNode {
+        let fallback = self.image_manager.initial_fallback(&raster);
+        ImageNode {
+            surface: Surface::Raster(raster),
+            fallback,
+            position,
+            raster_clip: None,
+            level,
+            order,
+            mutation,
+        }
+    }
+
     pub fn apply_frame(&mut self, frame: Frame) -> Result<(), FrameError> {
         self.validate_frame(&frame)?;
         if let Some(viewport) = frame.viewport
             && viewport != self.viewport
         {
+            self.refresh_cell_pixels();
             let cells = blank_cells(viewport)?;
             self.viewport = viewport;
             self.last = cells;
+            self.scratch.clear();
+            self.dirty.clear();
+            self.dirty.resize(self.last.len(), false);
+            self.changed.clear();
+            self.changed.resize(self.last.len(), false);
             self.damage.clear();
+            self.damage_rows.clear();
+            self.damage_rows
+                .resize_with(usize::from(viewport.height), Vec::new);
+            self.owners.clear();
+            self.owners.resize(self.last.len(), 0);
             self.full_redraw = true;
+            self.raster_scene_dirty = true;
         }
         if frame.force_redraw {
             self.full_redraw = true;
+            self.raster_scene_dirty = true;
         }
 
         for operation in frame.operations {
+            // Cell patches preserve a fragment's footprint, so they cannot
+            // change native visibility. Every other operation can change
+            // ownership, geometry, or source content.
+            if !matches!(
+                operation,
+                Operation::PatchRect { .. } | Operation::PatchCells { .. }
+            ) {
+                self.raster_scene_dirty = true;
+            }
             match operation {
                 Operation::Create {
                     id,
@@ -163,8 +326,10 @@ impl Renderer {
                     level,
                 } => {
                     self.add_damage(Self::node_damage_for(&ImageNode {
-                        image: image.clone(),
+                        surface: Surface::Cells(image.clone()),
+                        fallback: None,
                         position,
+                        raster_clip: None,
                         level,
                         order: self.next_order,
                         mutation: self.next_mutation,
@@ -172,19 +337,43 @@ impl Renderer {
                     self.images.insert(
                         id,
                         ImageNode {
-                            image,
+                            surface: Surface::Cells(image),
+                            fallback: None,
                             position,
+                            raster_clip: None,
                             level,
                             order: self.next_order,
                             mutation: self.next_mutation,
                         },
                     );
+                    self.layers_dirty = true;
                     self.next_order = self.next_order.saturating_add(1);
                     self.next_mutation = self.next_mutation.saturating_add(1);
+                }
+                Operation::CreateRaster {
+                    id,
+                    raster,
+                    position,
+                    level,
+                } => {
+                    let node = self.raster_node(
+                        raster,
+                        position,
+                        level,
+                        self.next_order,
+                        self.next_mutation,
+                    );
+                    self.add_damage(Self::node_damage_for(&node));
+                    self.images.insert(id, node);
+                    self.layers_dirty = true;
+                    self.next_order = self.next_order.saturating_add(1);
+                    self.next_mutation = self.next_mutation.saturating_add(1);
+                    self.full_redraw = true;
                 }
                 Operation::Remove { id } => {
                     if let Some(node) = self.images.remove(&id) {
                         self.add_damage(Self::node_damage_for(&node));
+                        self.layers_dirty = true;
                     }
                 }
                 Operation::Move { id, position } => {
@@ -203,6 +392,7 @@ impl Renderer {
                     });
                     if let Some(damage) = damage {
                         self.add_damage(damage);
+                        self.layers_dirty = true;
                     }
                 }
                 Operation::SetOrder { id, order } => {
@@ -217,20 +407,47 @@ impl Renderer {
                     self.next_mutation = self.next_mutation.saturating_add(1);
                     if let Some(damage) = damage {
                         self.add_damage(damage);
+                        self.layers_dirty = true;
                     }
                 }
                 Operation::Replace { id, image } => {
                     if let Some(node) = self.images.get_mut(&id) {
                         let old = Self::node_damage_for(node);
-                        node.image = image;
+                        node.surface = Surface::Cells(image);
+                        node.fallback = None;
                         let new = Self::node_damage_for(node);
                         self.add_damage(old.union(new));
                     }
                 }
+                Operation::ReplaceRaster { id, raster } => {
+                    let fallback = self.image_manager.initial_fallback(&raster);
+                    if let Some(node) = self.images.get_mut(&id) {
+                        let old = Self::node_damage_for(node);
+                        node.fallback = fallback;
+                        node.surface = Surface::Raster(raster);
+                        let new = Self::node_damage_for(node);
+                        self.add_damage(old.union(new));
+                        self.full_redraw = true;
+                    }
+                }
+                Operation::SetRasterClip { id, clip } => {
+                    let damage = if let Some(node) = self.images.get_mut(&id) {
+                        let old = Self::node_damage_for(node);
+                        node.raster_clip = clip;
+                        Some(old.union(Self::node_damage_for(node)))
+                    } else {
+                        None
+                    };
+                    if let Some(damage) = damage {
+                        self.add_damage(damage);
+                    }
+                }
                 Operation::PatchRect { id, rect, rows } => {
                     let damage = self.images.get_mut(&id).map(|node| {
-                        let local = node
-                            .image
+                        let Surface::Cells(image) = &mut node.surface else {
+                            return Damage::new(0, 0, 0, 0);
+                        };
+                        let local = image
                             .patch_rect(rect, &rows)
                             .expect("frame validation guarantees patch validity");
                         Self::node_damage_for_rect(node, local)
@@ -241,8 +458,10 @@ impl Renderer {
                 }
                 Operation::PatchCells { id, edits } => {
                     let damage = self.images.get_mut(&id).map(|node| {
-                        let local = node
-                            .image
+                        let Surface::Cells(image) = &mut node.surface else {
+                            return Damage::new(0, 0, 0, 0);
+                        };
+                        let local = image
                             .patch_cells(&edits)
                             .expect("frame validation guarantees patch validity");
                         Self::node_damage_for_rect(node, local)
@@ -260,41 +479,70 @@ impl Renderer {
         if let Some(viewport) = frame.viewport {
             validate_viewport(viewport)?;
         }
-        let mut dimensions: HashMap<ImageId, (usize, usize)> = self
-            .images
-            .iter()
-            .map(|(id, node)| (*id, (node.image.width(), node.image.height())))
-            .collect();
+        // Keep only frame-local overrides. Cloning the dimensions of every
+        // retained image made validating a one-cell patch scale with scene
+        // size even though validation is otherwise purely transactional.
+        let mut dimensions: HashMap<ImageId, Option<(usize, usize)>> = HashMap::new();
+        let lookup = |id: &ImageId, changes: &HashMap<ImageId, Option<(usize, usize)>>| {
+            changes.get(id).copied().flatten().or_else(|| {
+                (!changes.contains_key(id))
+                    .then(|| self.images.get(id))
+                    .flatten()
+                    .map(|node| surface_size(&node.surface))
+            })
+        };
         for operation in &frame.operations {
             match operation {
                 Operation::Create { id, image, .. } => {
-                    if dimensions
-                        .insert(*id, (image.width(), image.height()))
-                        .is_some()
-                    {
+                    if lookup(id, &dimensions).is_some() {
                         return Err(FrameError::DuplicateImage(*id));
                     }
+                    dimensions.insert(*id, Some((image.width(), image.height())));
+                }
+                Operation::CreateRaster { id, raster, .. } => {
+                    if lookup(id, &dimensions).is_some() {
+                        return Err(FrameError::DuplicateImage(*id));
+                    }
+                    dimensions.insert(
+                        *id,
+                        Some((usize::from(raster.width), usize::from(raster.height))),
+                    );
                 }
                 Operation::Remove { id } => {
-                    if dimensions.remove(id).is_none() {
+                    if lookup(id, &dimensions).is_none() {
                         return Err(FrameError::UnknownImage(*id));
                     }
+                    dimensions.insert(*id, None);
                 }
                 Operation::Move { id, .. }
                 | Operation::SetLevel { id, .. }
                 | Operation::SetOrder { id, .. } => {
-                    if !dimensions.contains_key(id) {
+                    if lookup(id, &dimensions).is_none() {
                         return Err(FrameError::UnknownImage(*id));
                     }
                 }
                 Operation::Replace { id, image } => {
-                    if !dimensions.contains_key(id) {
+                    if lookup(id, &dimensions).is_none() {
                         return Err(FrameError::UnknownImage(*id));
                     }
-                    dimensions.insert(*id, (image.width(), image.height()));
+                    dimensions.insert(*id, Some((image.width(), image.height())));
+                }
+                Operation::ReplaceRaster { id, raster } => {
+                    if lookup(id, &dimensions).is_none() {
+                        return Err(FrameError::UnknownImage(*id));
+                    }
+                    dimensions.insert(
+                        *id,
+                        Some((usize::from(raster.width), usize::from(raster.height))),
+                    );
+                }
+                Operation::SetRasterClip { id, .. } => {
+                    if lookup(id, &dimensions).is_none() {
+                        return Err(FrameError::UnknownImage(*id));
+                    }
                 }
                 Operation::PatchRect { id, rect, rows } => {
-                    let Some((width, height)) = dimensions.get(id) else {
+                    let Some((width, height)) = lookup(id, &dimensions) else {
                         return Err(FrameError::UnknownImage(*id));
                     };
                     let row_width_error = rows.iter().find_map(|row| {
@@ -309,8 +557,8 @@ impl Renderer {
                     });
                     let error = if rect.width == 0
                         || rect.height == 0
-                        || rect.right() > *width
-                        || rect.bottom() > *height
+                        || rect.right() > width
+                        || rect.bottom() > height
                     {
                         Some(ImageError::OutOfBounds)
                     } else if rows.len() != rect.height {
@@ -323,14 +571,14 @@ impl Renderer {
                     }
                 }
                 Operation::PatchCells { id, edits } => {
-                    let Some((width, height)) = dimensions.get(id) else {
+                    let Some((width, height)) = lookup(id, &dimensions) else {
                         return Err(FrameError::UnknownImage(*id));
                     };
                     if edits.iter().any(|edit| {
-                        edit.position.column >= *width
-                            || edit.position.line >= *height
+                        edit.position.column >= width
+                            || edit.position.line >= height
                             || (edit.cell.width() == 2
-                                && edit.position.column.saturating_add(1) >= *width)
+                                && edit.position.column.saturating_add(1) >= width)
                     }) {
                         return Err(FrameError::InvalidPatch {
                             image: *id,
@@ -343,12 +591,13 @@ impl Renderer {
         Ok(())
     }
 
-    fn node_damage_for(node: &ImageNode) -> Damage {
+    pub(super) fn node_damage_for(node: &ImageNode) -> Damage {
+        let (width, height) = surface_size(&node.surface);
         Damage::new(
             node.position.line as i64,
             node.position.column as i64,
-            node.image.width(),
-            node.image.height(),
+            width,
+            height,
         )
     }
     fn node_damage_for_rect(node: &ImageNode, rect: Rect) -> Damage {
@@ -359,7 +608,7 @@ impl Renderer {
             rect.height,
         )
     }
-    fn add_damage(&mut self, damage: Damage) {
+    pub(super) fn add_damage(&mut self, damage: Damage) {
         if damage.width > 0 && damage.height > 0 {
             if self.damage.len() >= 4096 {
                 self.damage.clear();
@@ -370,107 +619,962 @@ impl Renderer {
         }
     }
 
-    fn paint_at(&self, line: usize, column: usize) -> (Option<ImageId>, CellSlot) {
-        let mut winner: Option<(ImageId, &ImageNode)> = None;
-        for (id, node) in &self.images {
-            let local_line = line as i64 - node.position.line as i64;
-            let local_column = column as i64 - node.position.column as i64;
-            if local_line < 0
-                || local_column < 0
-                || local_line >= node.image.height() as i64
-                || local_column >= node.image.width() as i64
-            {
-                continue;
-            }
-            let better = winner.as_ref().is_none_or(|(current_id, current)| {
-                (node.level, node.order, node.mutation, id.0)
-                    > (current.level, current.order, current.mutation, current_id.0)
-            });
-            if better {
-                winner = Some((*id, node));
-            }
+    pub(super) fn prepare_raster(&mut self, raster: &RasterPlacement) -> Option<TransformKey> {
+        let key = self.transform_key(raster)?;
+        self.cache_tick = self.cache_tick.saturating_add(1);
+        if let Some(entry) = self.prepared.get_mut(&key) {
+            entry.used = self.cache_tick;
+            return Some(key);
         }
-        let Some((id, node)) = winner else {
-            return (None, CellSlot::Lead(Cell::blank()));
-        };
-        let slot = node.image.cell_at(
-            (line as i64 - node.position.line as i64) as usize,
-            (column as i64 - node.position.column as i64) as usize,
+        let source = self.source_image(&raster.source)?;
+        let pixels = render_rgba_with_cell_size(
+            &source,
+            raster.full_width,
+            raster.full_height,
+            raster.options,
+            self.cell_pixels,
         );
-        (Some(id), slot.clone())
-    }
-
-    fn composed_at(&self, line: usize, column: usize) -> CellSlot {
-        let (source, mut cell) = self.paint_at(line, column);
-        match &cell {
-            CellSlot::Lead(value) if value.width() == 2 => {
-                let valid = column + 1 < self.viewport.width as usize
-                    && self.paint_at(line, column + 1).0 == source
-                    && matches!(self.paint_at(line, column + 1).1, CellSlot::Continuation(_));
-                if !valid {
-                    cell = CellSlot::Lead(value.as_blank());
-                }
+        let mut alpha_cells =
+            vec![false; usize::from(raster.full_width) * usize::from(raster.full_height)];
+        for line in 0..usize::from(raster.full_height) {
+            for column in 0..usize::from(raster.full_width) {
+                let px_left = column * self.cell_pixels.width as usize;
+                let px_top = line * self.cell_pixels.height as usize;
+                let px_right =
+                    (px_left + self.cell_pixels.width as usize).min(pixels.width as usize);
+                let px_bottom = (px_top + self.cell_pixels.height as usize)
+                    .min(pixels.pixels.len() / (pixels.width as usize * 4));
+                alpha_cells[line * usize::from(raster.full_width) + column] = (px_top..px_bottom)
+                    .any(|y| {
+                        (px_left..px_right)
+                            .any(|x| pixels.pixels[(y * pixels.width as usize + x) * 4 + 3] != 0)
+                    });
             }
-            CellSlot::Continuation(value) => {
-                let valid = column > 0
-                    && self.paint_at(line, column - 1).0 == source
-                    && matches!(self.paint_at(line, column - 1).1, CellSlot::Lead(previous) if previous.width() == 2);
-                if !valid {
-                    cell = CellSlot::Lead(value.clone());
-                }
+        }
+        let bytes = pixels.pixels.len().saturating_add(alpha_cells.len());
+        self.evict_cache(bytes);
+        self.prepared_bytes = self.prepared_bytes.saturating_add(bytes);
+        self.prepared.insert(
+            key,
+            PreparedRaster {
+                pixels,
+                alpha_cells,
+                symbols: None,
+                bytes,
+                used: self.cache_tick,
+            },
+        );
+        Some(key)
+    }
+
+    pub(super) fn prepare_symbols(&mut self, key: TransformKey, width: u16, height: u16) {
+        let needs_symbols = self
+            .prepared
+            .get(&key)
+            .is_some_and(|entry| entry.symbols.is_none());
+        if !needs_symbols {
+            return;
+        }
+        let image = self.prepared.get(&key).and_then(|entry| {
+            symbols_from_pixels(&entry.pixels, width, height, key.cell_pixels).ok()
+        });
+        let Some(image) = image else { return };
+        let bytes = image
+            .width()
+            .saturating_mul(image.height())
+            .saturating_mul(48);
+        self.evict_cache(bytes);
+        if let Some(entry) = self.prepared.get_mut(&key) {
+            entry.bytes = entry.bytes.saturating_add(bytes);
+            entry.symbols = Some(image);
+            entry.used = self.cache_tick;
+            self.prepared_bytes = self.prepared_bytes.saturating_add(bytes);
+        }
+    }
+
+    fn refresh_cell_pixels(&mut self) {
+        if !self.detect_cell_pixels {
+            return;
+        }
+        let Some(cell_pixels) = live_cell_pixels() else {
+            return;
+        };
+        if cell_pixels != self.cell_pixels {
+            self.cell_pixels = cell_pixels;
+            self.full_redraw = true;
+        }
+    }
+
+    pub(super) fn evict_cache(&mut self, incoming: usize) {
+        // Encoded protocol payloads are cheapest to regenerate, so discard
+        // them before transformed RGBA data. Current transforms are pinned:
+        // a cache limit never causes the active scene to thrash itself.
+        while self.cache_bytes().saturating_add(incoming) > self.native_cache_limit {
+            let Some(key) = self
+                .native_cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            self.remove_native_cache(key);
+        }
+
+        let pinned: HashSet<_> = self
+            .images
+            .values()
+            .filter_map(|node| match &node.surface {
+                Surface::Raster(raster) => self.transform_key(raster),
+                Surface::Cells(_) => None,
+            })
+            .collect();
+        while self.cache_bytes().saturating_add(incoming) > self.native_cache_limit {
+            let Some(key) = self
+                .prepared
+                .iter()
+                .filter(|(key, _)| !pinned.contains(key))
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(entry) = self.prepared.remove(&key) {
+                self.prepared_bytes = self.prepared_bytes.saturating_sub(entry.bytes);
+                self.kitty.evict_transform(key, &mut self.native_tiles);
             }
-            _ => {}
         }
-        cell
+
+        let pinned_sources: HashSet<_> = self
+            .images
+            .values()
+            .filter_map(|node| match &node.surface {
+                Surface::Raster(raster) if self.source_should_load(node, raster) => {
+                    Some(raster.source.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        while self.cache_bytes().saturating_add(incoming) > self.native_cache_limit {
+            let Some(source) = self.image_manager.oldest_inactive_source(&pinned_sources) else {
+                break;
+            };
+            self.image_manager.remove_cached(&source);
+        }
     }
 
-    /// Render the pending damage. This compatibility wrapper panics
-    /// deterministically if the bounded diff allocation cannot be reserved;
-    /// use [`Self::try_render_diff`] for a fallible path.
-    pub fn render_diff(&mut self) -> Option<String> {
-        self.try_render_diff()
-            .expect("renderer diff allocation failed")
+    fn cache_bytes(&self) -> usize {
+        self.image_manager
+            .source_cache_bytes()
+            .saturating_add(self.prepared_bytes)
+            .saturating_add(self.native_cache_bytes)
     }
 
-    /// Render the pending damage without committing it when allocation fails.
-    pub fn try_render_diff(&mut self) -> Result<Option<String>, FrameError> {
-        if !self.full_redraw && self.damage.is_empty() {
-            return Ok(None);
+    fn remove_native_cache(&mut self, key: NativeKey) {
+        if let Some(value) = self.native_cache.remove(&key) {
+            self.native_cache_bytes = self.native_cache_bytes.saturating_sub(value.value.len());
         }
-        let width = self.viewport.width as usize;
-        let height = self.viewport.height as usize;
-        let mut desired = Vec::new();
-        desired
-            .try_reserve_exact(self.last.len())
-            .map_err(|_| FrameError::AllocationFailed {
-                cells: self.last.len(),
-            })?;
-        desired.extend_from_slice(&self.last);
-        if self.full_redraw {
+    }
+
+    fn raster_clip_contains(node: &ImageNode, local_line: usize, local_column: usize) -> bool {
+        node.raster_clip.is_none_or(|clip| {
+            local_line >= clip.line
+                && local_column >= clip.column
+                && local_line < clip.bottom()
+                && local_column < clip.right()
+        })
+    }
+
+    fn rebuild_layers(&mut self) {
+        if !self.layers_dirty && self.layers.len() == self.images.len() {
+            return;
+        }
+        self.layers.clear();
+        self.layers.extend(self.images.keys().copied());
+        self.layers.sort_by_key(|id| {
+            let node = &self.images[id];
+            (node.level, node.order, node.mutation, id.0)
+        });
+        self.layers_dirty = false;
+    }
+
+    fn normalize_damage(&mut self, full: bool) {
+        let width = usize::from(self.viewport.width);
+        let height = usize::from(self.viewport.height);
+        self.dirty.fill(false);
+        if self.damage_rows.len() != height {
+            self.damage_rows.clear();
+            self.damage_rows.resize_with(height, Vec::new);
+        }
+        for row in &mut self.damage_rows {
+            row.clear();
+        }
+        if full {
             for line in 0..height {
-                for column in 0..width {
-                    desired[line * width + column] = self.composed_at(line, column);
-                }
+                self.damage_rows[line].push(0..width);
             }
         } else {
-            for damage in self.damage.clone() {
+            for damage in &self.damage {
                 let left = damage.column.saturating_sub(2).max(0) as usize;
                 let top = damage.line.saturating_sub(2).max(0) as usize;
                 let right = (damage.column + damage.width + 2).clamp(0, width as i64) as usize;
                 let bottom = (damage.line + damage.height + 2).clamp(0, height as i64) as usize;
-                for line in top..bottom {
+                if left >= right {
+                    continue;
+                }
+                for row in &mut self.damage_rows[top..bottom] {
+                    row.push(left..right);
+                }
+            }
+            for row in &mut self.damage_rows {
+                if row.len() < 2 {
+                    continue;
+                }
+                row.sort_unstable_by_key(|span| span.start);
+                let mut merged: Vec<Range<usize>> = Vec::with_capacity(row.len());
+                for span in std::mem::take(row) {
+                    if let Some(previous) = merged.last_mut()
+                        && span.start <= previous.end
+                    {
+                        previous.end = previous.end.max(span.end);
+                    } else {
+                        merged.push(span);
+                    }
+                }
+                *row = merged;
+            }
+        }
+        for (line, spans) in self.damage_rows.iter().enumerate() {
+            for span in spans {
+                self.dirty[line * width + span.start..line * width + span.end].fill(true);
+            }
+        }
+    }
+
+    fn compose_damage(&mut self, desired: &mut [CellSlot]) {
+        self.rebuild_layers();
+        let width = usize::from(self.viewport.width);
+        let height = usize::from(self.viewport.height);
+        for (line, spans) in self.damage_rows.iter().enumerate() {
+            for span in spans {
+                let range = line * width + span.start..line * width + span.end;
+                desired[range.clone()].fill(CellSlot::Lead(Cell::blank()));
+                self.owners[range].fill(0);
+            }
+        }
+
+        // Split immutable scene/cache access from mutable scratch access. The
+        // composition pass is deliberately bottom-to-top, so an assignment is
+        // the exact deterministic equivalent of selecting the highest rank at
+        // every cell.
+        let layers = self.layers.clone();
+        let symbols_for_native = self.symbols_for_native;
+        let protocol = self.protocol;
+        let cell_pixels = self.cell_pixels;
+        let images = &self.images;
+        let prepared = &self.prepared;
+        let manager = &self.image_manager;
+        let rows = &self.damage_rows;
+        let owners = &mut self.owners;
+
+        for (ordinal, id) in layers.into_iter().enumerate() {
+            let Some(node) = images.get(&id) else {
+                continue;
+            };
+            let (image, alpha_cells, is_raster) = match &node.surface {
+                Surface::Cells(image) => (image, None, false),
+                Surface::Raster(raster) => {
+                    let transform =
+                        manager
+                            .source_image(&raster.source)
+                            .map(|source| TransformKey {
+                                image: source.id(),
+                                width: raster.full_width,
+                                height: raster.full_height,
+                                options: raster.options,
+                                cell_pixels,
+                            });
+                    match transform {
+                        Some(key)
+                            if symbols_for_native
+                                || protocol == ImageProtocol::Symbols
+                                || raster.options.mode == ImageMode::Symbols =>
+                        {
+                            let Some(entry) = prepared.get(&key) else {
+                                continue;
+                            };
+                            let Some(image) = entry.symbols.as_ref() else {
+                                continue;
+                            };
+                            (image, Some(entry.alpha_cells.as_slice()), true)
+                        }
+                        Some(_) => continue,
+                        None => {
+                            let Some(image) = node.fallback.as_ref() else {
+                                continue;
+                            };
+                            (image, None, true)
+                        }
+                    }
+                }
+            };
+            let top = node.position.line.max(0) as usize;
+            let bottom = node
+                .position
+                .line
+                .saturating_add(image.height() as i32)
+                .clamp(0, height as i32) as usize;
+            if top >= bottom {
+                continue;
+            }
+            for (line, row) in rows.iter().enumerate().take(bottom).skip(top) {
+                let local_line = (line as i32 - node.position.line) as usize;
+                for span in row {
+                    let left = span.start.max(node.position.column.max(0) as usize);
+                    let right = span.end.min(
+                        node.position
+                            .column
+                            .saturating_add(image.width() as i32)
+                            .max(0) as usize,
+                    );
+                    if left >= right {
+                        continue;
+                    }
                     for column in left..right {
-                        desired[line * width + column] = self.composed_at(line, column);
+                        let local_column = (column as i32 - node.position.column) as usize;
+                        if is_raster && !Self::raster_clip_contains(node, local_line, local_column)
+                        {
+                            continue;
+                        }
+                        if alpha_cells.is_some_and(|alpha| {
+                            !alpha
+                                .get(local_line * image.width() + local_column)
+                                .copied()
+                                .unwrap_or(false)
+                        }) {
+                            continue;
+                        }
+                        let index = line * width + column;
+                        desired[index] = image.cell_at(local_line, local_column).clone();
+                        owners[index] = ordinal.saturating_add(1);
                     }
                 }
             }
         }
-        let ansi = encode_diff(&self.last, &desired, self.viewport, self.full_redraw)?;
-        self.last = desired;
+
+        for (line, spans) in rows.iter().enumerate() {
+            for span in spans {
+                for column in span.clone() {
+                    let index = line * width + column;
+                    match &desired[index] {
+                        CellSlot::Lead(cell) if cell.width() == 2 => {
+                            let valid = column + 1 < width
+                                && owners[index] != 0
+                                && owners[index] == owners[index + 1]
+                                && matches!(desired[index + 1], CellSlot::Continuation(_));
+                            if !valid {
+                                desired[index] = CellSlot::Lead(cell.as_blank());
+                            }
+                        }
+                        CellSlot::Continuation(cell) => {
+                            let valid = column > 0
+                                && owners[index] != 0
+                                && owners[index] == owners[index - 1]
+                                && matches!(desired[index - 1], CellSlot::Lead(ref previous) if previous.width() == 2);
+                            if !valid {
+                                desired[index] = CellSlot::Lead(cell.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Render the pending damage without committing it when allocation fails.
+    pub fn render_diff(&mut self) -> Result<Option<String>, FrameError> {
+        let load_changed = self.drain_load_results();
+        let replay_due = self.native_replay_at.is_some_and(|at| at <= Instant::now());
+        if !self.full_redraw && self.damage.is_empty() && !replay_due && !load_changed {
+            return Ok(None);
+        }
+        self.prepare_visible_rasters();
+        if replay_due {
+            self.symbols_for_native = false;
+            self.native_replay_at = None;
+        }
+        let needs_native_tiles =
+            !self.symbols_for_native && (self.full_redraw || replay_due || self.raster_scene_dirty);
+        let mut native_tiles = if needs_native_tiles {
+            self.collect_native_tiles()
+        } else {
+            Vec::new()
+        };
+        let native_changed = needs_native_tiles
+            && self.native_tiles != native_tiles.iter().map(|tile| tile.key).collect();
+        let replay_only = matches!(self.protocol, ImageProtocol::Sixel | ImageProtocol::Iterm2);
+        let use_preview = replay_only
+            && native_changed
+            && !native_tiles.is_empty()
+            && !self.native_tiles.is_empty()
+            && self.image_update_policy == ImageUpdatePolicy::Adaptive
+            && !replay_due;
+        if use_preview {
+            self.symbols_for_native = true;
+            self.native_replay_at = Some(Instant::now() + ADAPTIVE_REPLAY_DELAY);
+            self.prepare_visible_rasters();
+            native_tiles.clear();
+        } else if self.symbols_for_native && self.raster_scene_dirty {
+            // A new mutation arrived before the quiet period elapsed. Render
+            // the cached symbol scene now and restart the single replay timer.
+            self.native_replay_at = Some(Instant::now() + ADAPTIVE_REPLAY_DELAY);
+            native_tiles.clear();
+        }
+        let full_redraw = self.full_redraw || replay_due || (replay_only && native_changed);
+        let mut desired = std::mem::take(&mut self.scratch);
+        if desired.capacity() < self.last.len()
+            && desired
+                .try_reserve_exact(self.last.len() - desired.capacity())
+                .is_err()
+        {
+            self.scratch = desired;
+            return Err(FrameError::AllocationFailed {
+                cells: self.last.len(),
+            });
+        }
+        desired.clear();
+        desired.extend_from_slice(&self.last);
+        self.normalize_damage(full_redraw);
+        self.compose_damage(&mut desired);
+        let ansi = match encode_diff(
+            &self.last,
+            &desired,
+            self.viewport,
+            &self.dirty,
+            full_redraw,
+            &mut self.changed,
+        ) {
+            Ok(ansi) => ansi,
+            Err(error) => {
+                self.dirty.fill(false);
+                self.scratch = desired;
+                return Err(error);
+            }
+        };
+        if full_redraw && self.protocol != ImageProtocol::Kitty {
+            self.native_tiles.clear();
+        }
+        let native = if self.symbols_for_native || !needs_native_tiles {
+            String::new()
+        } else {
+            self.native_output(native_tiles, full_redraw)
+        };
+        std::mem::swap(&mut self.last, &mut desired);
+        self.scratch = desired;
+        self.dirty.fill(false);
         self.damage.clear();
         self.full_redraw = false;
-        Ok(ansi)
+        if self.symbols_for_native {
+            self.raster_scene_dirty = true;
+        } else if needs_native_tiles {
+            self.raster_scene_dirty = false;
+        }
+        Ok(match (ansi, native) {
+            (None, native) if native.is_empty() => None,
+            (Some(cells), native) if native.is_empty() => Some(cells),
+            (Some(mut cells), native) => {
+                cells.push_str(&native);
+                Some(cells)
+            }
+            (None, native) => Some(native),
+        })
     }
+
+    fn native_output(&mut self, tiles: Vec<NativeTile>, replay: bool) -> String {
+        if self.protocol == ImageProtocol::Symbols {
+            self.native_tiles.clear();
+            return String::new();
+        }
+        match self.protocol {
+            ImageProtocol::Kitty => self.kitty_output(tiles, replay),
+            ImageProtocol::Sixel | ImageProtocol::Iterm2 | ImageProtocol::Auto => {
+                let next: HashSet<_> = tiles.iter().map(|tile| tile.key).collect();
+                if !replay && next == self.native_tiles {
+                    return String::new();
+                }
+                let mut output = String::new();
+                for tile in &tiles {
+                    if let Some(payload) = self.native_payload(tile) {
+                        let _ = write!(
+                            output,
+                            "{}{}",
+                            MoveTo(tile.rect.column as u16, tile.rect.line as u16),
+                            payload
+                        );
+                    }
+                }
+                self.native_tiles = next;
+                surround_native(output)
+            }
+            ImageProtocol::Symbols => unreachable!(),
+        }
+    }
+
+    fn native_replay_wait(&self) -> Option<Duration> {
+        self.native_replay_at
+            .map(|at| at.saturating_duration_since(Instant::now()))
+    }
+
+    fn native_payload(&mut self, tile: &NativeTile) -> Option<String> {
+        let key = NativeKey::from_tile(tile.key, self.protocol);
+        self.cache_tick = self.cache_tick.saturating_add(1);
+        if let Some(value) = self.native_cache.get_mut(&key) {
+            value.used = self.cache_tick;
+            return Some(value.value.clone());
+        }
+        let prepared = self.prepared.get(&tile.key.transform)?;
+        let value = encode_native_slice(
+            &prepared.pixels,
+            tile.key.source_column,
+            tile.key.source_line,
+            tile.key.width,
+            tile.key.height,
+            self.cell_pixels,
+            self.protocol,
+            self.term_info.0,
+        )?;
+        if value.len() <= self.native_cache_limit {
+            self.evict_cache(value.len());
+            self.native_cache_bytes = self.native_cache_bytes.saturating_add(value.len());
+            self.native_cache.insert(
+                key,
+                CachedPayload {
+                    value: value.clone(),
+                    used: self.cache_tick,
+                },
+            );
+        }
+        Some(value)
+    }
+
+    fn kitty_output(&mut self, tiles: Vec<NativeTile>, replace_all: bool) -> String {
+        self.kitty.output(
+            tiles,
+            replace_all,
+            &mut self.native_tiles,
+            &self.prepared,
+            self.cell_pixels,
+            self.term_info.0,
+        )
+    }
+
+    fn shutdown_native(&mut self) -> Option<String> {
+        if self.protocol != ImageProtocol::Kitty {
+            return None;
+        }
+        self.native_tiles.clear();
+        self.kitty.shutdown(self.term_info.0)
+    }
+
+    fn collect_native_tiles(&mut self) -> Vec<NativeTile> {
+        if self.symbols_for_native || self.protocol == ImageProtocol::Symbols {
+            return Vec::new();
+        }
+        let owners = self.cell_owners();
+        let mut nodes: Vec<_> = self
+            .images
+            .iter()
+            .map(|(id, node)| (*id, node.clone()))
+            .collect();
+        nodes.sort_by_key(|(id, node)| (node.level, node.order, node.mutation, id.0));
+        let mut result = Vec::new();
+        for (id, node) in nodes {
+            let Surface::Raster(raster) = &node.surface else {
+                continue;
+            };
+            if raster.options.mode == ImageMode::Symbols || !self.raster_is_visible(&node, raster) {
+                continue;
+            }
+            let Some(transform) = self.prepare_raster(raster) else {
+                continue;
+            };
+            let Some(prepared) = self.prepared.get(&transform) else {
+                continue;
+            };
+            for rect in self.raster_tiles(id, &node, &prepared.alpha_cells, &owners) {
+                let source_column = rect.column.saturating_sub(node.position.column) as u16;
+                let source_line = rect.line.saturating_sub(node.position.line) as u16;
+                result.push(NativeTile {
+                    key: TileKey {
+                        raster: id,
+                        transform,
+                        source_column,
+                        source_line,
+                        destination_column: rect.column,
+                        destination_line: rect.line,
+                        width: rect.width as u16,
+                        height: rect.height as u16,
+                        level: node.level,
+                        order: node.order,
+                    },
+                    rect,
+                });
+            }
+        }
+        result
+    }
+
+    fn cell_owners(&self) -> Vec<Option<LayerKey>> {
+        let mut owners =
+            vec![None; usize::from(self.viewport.width) * usize::from(self.viewport.height)];
+        for (id, node) in &self.images {
+            let Some(image) = self.cell_surface(node) else {
+                continue;
+            };
+            let raster_alpha = match &node.surface {
+                Surface::Raster(raster) => self
+                    .transform_key(raster)
+                    .and_then(|key| self.prepared.get(&key))
+                    .map(|prepared| prepared.alpha_cells.as_slice()),
+                Surface::Cells(_) => None,
+            };
+            let rank = LayerKey(node.level, node.order, node.mutation, id.0);
+            for local_line in 0..image.height() {
+                let line = node.position.line.saturating_add(local_line as i32);
+                if !(0..i32::from(self.viewport.height)).contains(&line) {
+                    continue;
+                }
+                for local_column in 0..image.width() {
+                    if matches!(node.surface, Surface::Raster(_))
+                        && !Self::raster_clip_contains(node, local_line, local_column)
+                    {
+                        continue;
+                    }
+                    if raster_alpha.is_some_and(|alpha| {
+                        !alpha
+                            .get(local_line * image.width() + local_column)
+                            .copied()
+                            .unwrap_or(false)
+                    }) {
+                        continue;
+                    }
+                    let column = node.position.column.saturating_add(local_column as i32);
+                    if !(0..i32::from(self.viewport.width)).contains(&column) {
+                        continue;
+                    }
+                    let index = line as usize * usize::from(self.viewport.width) + column as usize;
+                    if owners[index].is_none_or(|current| rank > current) {
+                        owners[index] = Some(rank);
+                    }
+                }
+            }
+        }
+        owners
+    }
+
+    fn cell_surface<'a>(&'a self, node: &'a ImageNode) -> Option<&'a Image> {
+        match &node.surface {
+            Surface::Cells(image) => Some(image),
+            Surface::Raster(raster)
+                if self.symbols_for_native
+                    || self.protocol == ImageProtocol::Symbols
+                    || raster.options.mode == ImageMode::Symbols =>
+            {
+                self.transform_key(raster)
+                    .and_then(|key| self.prepared.get(&key))
+                    .and_then(|entry| entry.symbols.as_ref())
+                    .or(node.fallback.as_ref())
+            }
+            Surface::Raster(_) => node.fallback.as_ref(),
+        }
+    }
+
+    fn raster_tiles(
+        &self,
+        id: ImageId,
+        node: &ImageNode,
+        alpha_cells: &[bool],
+        owners: &[Option<LayerKey>],
+    ) -> Vec<ScreenRect> {
+        let Surface::Raster(raster) = &node.surface else {
+            return Vec::new();
+        };
+        let clip = node.raster_clip.unwrap_or(Rect::new(
+            0,
+            0,
+            usize::from(raster.width),
+            usize::from(raster.height),
+        ));
+        let left = node
+            .position
+            .column
+            .saturating_add(clip.column as i32)
+            .max(0);
+        let top = node.position.line.saturating_add(clip.line as i32).max(0);
+        let right = node
+            .position
+            .column
+            .saturating_add(clip.right() as i32)
+            .min(i32::from(self.viewport.width));
+        let bottom = node
+            .position
+            .line
+            .saturating_add(clip.bottom() as i32)
+            .min(i32::from(self.viewport.height));
+        if right <= left || bottom <= top {
+            return Vec::new();
+        }
+        let mut spans = Vec::new();
+        for line in top..bottom {
+            let mut column = left;
+            while column < right {
+                while column < right
+                    && !self.raster_cell_visible(
+                        id,
+                        node,
+                        raster,
+                        alpha_cells,
+                        owners,
+                        line,
+                        column,
+                    )
+                {
+                    column += 1;
+                }
+                let start = column;
+                while column < right
+                    && self.raster_cell_visible(id, node, raster, alpha_cells, owners, line, column)
+                {
+                    column += 1;
+                }
+                if column > start {
+                    spans.push(ScreenRect::new(line, start, column - start, 1));
+                }
+            }
+        }
+        merge_rectangles(spans)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn raster_cell_visible(
+        &self,
+        id: ImageId,
+        node: &ImageNode,
+        raster: &RasterPlacement,
+        alpha_cells: &[bool],
+        owners: &[Option<LayerKey>],
+        line: i32,
+        column: i32,
+    ) -> bool {
+        let local_line = line.saturating_sub(node.position.line) as usize;
+        let local_column = column.saturating_sub(node.position.column) as usize;
+        let alpha = alpha_cells
+            .get(local_line * usize::from(raster.width) + local_column)
+            .copied()
+            .unwrap_or(false);
+        let index = line as usize * usize::from(self.viewport.width) + column as usize;
+        let rank = LayerKey(node.level, node.order, node.mutation, id.0);
+        alpha && owners[index].is_none_or(|owner| owner <= rank)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct NativeKey {
+    transform: TransformKey,
+    column: u16,
+    line: u16,
+    width: u16,
+    height: u16,
+    protocol: ImageProtocol,
+}
+
+impl NativeKey {
+    fn from_tile(tile: TileKey, protocol: ImageProtocol) -> Self {
+        Self {
+            transform: tile.transform,
+            column: tile.source_column,
+            line: tile.source_line,
+            width: tile.width,
+            height: tile.height,
+            protocol,
+        }
+    }
+}
+
+fn merge_rectangles(spans: Vec<ScreenRect>) -> Vec<ScreenRect> {
+    // A row can contain many independent spans. Keep only rectangles that
+    // touched the preceding row active, keyed by their horizontal extent.
+    // This yields maximal, stable rectangles in linear time after span scan.
+    let mut rectangles: Vec<ScreenRect> = Vec::new();
+    let mut active: HashMap<(i32, i32), usize> = HashMap::new();
+    let mut next: HashMap<(i32, i32), usize> = HashMap::new();
+    let mut line = None;
+    for span in spans {
+        if line != Some(span.line) {
+            active = std::mem::take(&mut next);
+            next.clear();
+            line = Some(span.line);
+        }
+        let key = (span.column, span.width);
+        let index = match active.get(&key).copied() {
+            Some(index)
+                if rectangles[index]
+                    .line
+                    .saturating_add(rectangles[index].height)
+                    == span.line =>
+            {
+                rectangles[index].height += span.height;
+                index
+            }
+            _ => {
+                rectangles.push(span);
+                rectangles.len() - 1
+            }
+        };
+        next.insert(key, index);
+    }
+    rectangles
+}
+
+fn surface_size(surface: &Surface) -> (usize, usize) {
+    match surface {
+        Surface::Cells(image) => (image.width(), image.height()),
+        Surface::Raster(raster) => (usize::from(raster.width), usize::from(raster.height)),
+    }
+}
+
+fn detect_terminal(requested: ImageProtocol) -> (ImageProtocol, TermInfo) {
+    unsafe {
+        let database = chafa_sys::chafa_term_db_get_default();
+        let mut environment: Vec<CString> = std::env::vars()
+            .filter_map(|(name, value)| CString::new(format!("{name}={value}")).ok())
+            .collect();
+        let mut pointers: Vec<_> = environment
+            .iter_mut()
+            .map(|value| value.as_ptr() as *mut _)
+            .collect();
+        pointers.push(std::ptr::null_mut());
+        let info = if database.is_null() {
+            std::ptr::null_mut()
+        } else {
+            chafa_sys::chafa_term_db_detect(database, pointers.as_mut_ptr())
+        };
+        let protocol = match requested {
+            ImageProtocol::Auto if !info.is_null() => {
+                match chafa_sys::chafa_term_info_get_best_pixel_mode(info) {
+                    chafa_sys::ChafaPixelMode_CHAFA_PIXEL_MODE_KITTY => ImageProtocol::Kitty,
+                    chafa_sys::ChafaPixelMode_CHAFA_PIXEL_MODE_SIXELS => ImageProtocol::Sixel,
+                    chafa_sys::ChafaPixelMode_CHAFA_PIXEL_MODE_ITERM2 => ImageProtocol::Iterm2,
+                    _ => ImageProtocol::Symbols,
+                }
+            }
+            ImageProtocol::Auto => ImageProtocol::Symbols,
+            value => value,
+        };
+        (protocol, TermInfo(info))
+    }
+}
+
+fn live_cell_pixels() -> Option<Size> {
+    let window = crossterm::terminal::window_size().ok()?;
+    (window.columns > 0 && window.rows > 0 && window.width > 0 && window.height > 0).then(|| {
+        Size::new(
+            (window.width / window.columns).max(1),
+            (window.height / window.rows).max(1),
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_native_slice(
+    pixels: &RasterPixels,
+    column: u16,
+    line: u16,
+    width: u16,
+    height: u16,
+    cell_pixels: Size,
+    protocol: ImageProtocol,
+    term_info: *mut chafa_sys::ChafaTermInfo,
+) -> Option<String> {
+    let mode = match protocol {
+        ImageProtocol::Kitty => chafa_sys::ChafaPixelMode_CHAFA_PIXEL_MODE_KITTY,
+        ImageProtocol::Sixel => chafa_sys::ChafaPixelMode_CHAFA_PIXEL_MODE_SIXELS,
+        ImageProtocol::Iterm2 => chafa_sys::ChafaPixelMode_CHAFA_PIXEL_MODE_ITERM2,
+        ImageProtocol::Auto | ImageProtocol::Symbols => return None,
+    };
+    unsafe {
+        let config = chafa_sys::chafa_canvas_config_new();
+        if config.is_null() {
+            return None;
+        }
+        chafa_sys::chafa_canvas_config_set_geometry(config, i32::from(width), i32::from(height));
+        chafa_sys::chafa_canvas_config_set_cell_geometry(
+            config,
+            i32::from(cell_pixels.width.max(1)),
+            i32::from(cell_pixels.height.max(1)),
+        );
+        chafa_sys::chafa_canvas_config_set_pixel_mode(config, mode);
+        if !term_info.is_null() {
+            chafa_sys::chafa_canvas_config_set_passthrough(
+                config,
+                chafa_sys::chafa_term_info_get_passthrough_type(term_info),
+            );
+        }
+        let canvas = chafa_sys::chafa_canvas_new(config);
+        chafa_sys::chafa_canvas_config_unref(config);
+        if canvas.is_null() {
+            return None;
+        }
+        let pixel_width = i32::from(width) * i32::from(cell_pixels.width.max(1));
+        let pixel_height = i32::from(height) * i32::from(cell_pixels.height.max(1));
+        let pixel_column = usize::from(column) * usize::from(cell_pixels.width.max(1));
+        let pixel_line = usize::from(line) * usize::from(cell_pixels.height.max(1));
+        let row_stride = pixels.width as usize * 4;
+        let offset = pixel_line
+            .checked_mul(row_stride)?
+            .checked_add(pixel_column.checked_mul(4)?)?;
+        if pixel_width <= 0
+            || pixel_height <= 0
+            || offset >= pixels.pixels.len()
+            || pixel_column.saturating_add(pixel_width as usize) > pixels.width as usize
+        {
+            chafa_sys::chafa_canvas_unref(canvas);
+            return None;
+        }
+        chafa_sys::chafa_canvas_draw_all_pixels(
+            canvas,
+            chafa_sys::ChafaPixelType_CHAFA_PIXEL_RGBA8_UNASSOCIATED,
+            pixels.pixels[offset..].as_ptr(),
+            pixel_width,
+            pixel_height,
+            row_stride.min(i32::MAX as usize) as i32,
+        );
+        // `build_ansi` does not depend on a terminfo entry that happens to
+        // advertise the requested protocol. This matters for explicit
+        // overrides in SSH/multiplexer sessions; the config still carries
+        // Chafa passthrough when detection provided it.
+        let value = chafa_sys::chafa_canvas_build_ansi(canvas);
+        chafa_sys::chafa_canvas_unref(canvas);
+        if value.is_null() {
+            return None;
+        }
+        // chafa-sys currently makes GLib's public GString layout opaque, so
+        // mirror that stable C ABI locally instead of assuming NUL-terminated
+        // payloads (native graphics output is a byte stream).
+        let string = &*(value as *const GStringLayout);
+        let bytes = std::slice::from_raw_parts(string.data as *const u8, string.len);
+        let output = String::from_utf8_lossy(bytes).into_owned();
+        chafa_sys::g_string_free(value, 1);
+        Some(output)
+    }
+}
+
+#[repr(C)]
+struct GStringLayout {
+    data: *mut std::ffi::c_char,
+    len: usize,
+    _allocated_len: usize,
 }
 
 fn validate_viewport(viewport: Size) -> Result<(), FrameError> {
@@ -522,31 +1626,38 @@ fn encode_diff(
     old: &[CellSlot],
     desired: &[CellSlot],
     viewport: Size,
+    dirty: &[bool],
     full: bool,
+    changed: &mut Vec<bool>,
 ) -> Result<Option<String>, FrameError> {
     let width = viewport.width as usize;
     let height = viewport.height as usize;
-    let mut changed = Vec::new();
-    changed
-        .try_reserve_exact(desired.len())
-        .map_err(|_| FrameError::AllocationFailed {
+    if changed.capacity() < desired.len()
+        && changed
+            .try_reserve_exact(desired.len() - changed.capacity())
+            .is_err()
+    {
+        return Err(FrameError::AllocationFailed {
             cells: desired.len(),
-        })?;
+        });
+    }
+    changed.clear();
     changed.resize(desired.len(), full);
     if !full {
         for index in 0..desired.len() {
-            if old[index] != desired[index] {
-                mark_footprint(&mut changed, index, &old[index]);
-                mark_footprint(&mut changed, index, &desired[index]);
+            if dirty.get(index).copied().unwrap_or(false) && old[index] != desired[index] {
+                mark_footprint(changed, index, &old[index]);
+                mark_footprint(changed, index, &desired[index]);
             }
         }
     }
     if !full && !changed.iter().any(|value| *value) {
         return Ok(None);
     }
+    let changed_count = changed.iter().filter(|value| **value).count();
     let mut output = String::new();
     output
-        .try_reserve(desired.len().saturating_mul(8))
+        .try_reserve(changed_count.saturating_mul(8).saturating_add(64))
         .map_err(|_| FrameError::AllocationFailed {
             cells: desired.len(),
         })?;
@@ -564,22 +1675,51 @@ fn encode_diff(
     )
     .unwrap();
     let mut style = (Color::Reset, Color::Reset, Attributes::default());
+    let mut isolate_next_row = false;
     for line in 0..height {
         let mut column = 0;
+        let row_start = line * width;
+        let row_end = row_start.saturating_add(width).min(desired.len());
+        let row_has_zwj = desired[row_start..row_end].iter().any(|slot| {
+            let cell = slot.cell();
+            cell.width() == 2 && cell.symbol().contains('\u{200d}')
+        });
+        let isolate_row = row_has_zwj || isolate_next_row;
+        // Isolate every write on rows containing (or immediately following)
+        // a ZWJ grapheme. This is a deliberately narrow compatibility path:
+        // terminals disagree on cursor advancement for these graphemes,
+        // while ordinary rows retain the allocation-free contiguous-run
+        // encoder.
         while column < width {
             let index = line * width + column;
-            if !changed[index] {
-                column += 1;
-                continue;
-            }
-            if column > 0
-                && matches!(desired[index - 1], CellSlot::Lead(ref cell) if cell.width() == 2)
+            let can_write = changed[index] && (!full || !desired[index].is_default());
+            if !can_write
+                || (column > 0
+                    && matches!(desired[index - 1], CellSlot::Lead(ref cell) if cell.width() == 2))
             {
                 column += 1;
                 continue;
             }
-            let cell = desired[index].cell();
-            if !full || !desired[index].is_default() {
+            write!(output, "{}", MoveTo(column as u16, line as u16)).unwrap();
+            let run_start = column;
+            while column < width {
+                let index = line * width + column;
+                if !changed[index]
+                    || (full && desired[index].is_default())
+                    || (column > 0
+                        && matches!(desired[index - 1], CellSlot::Lead(ref cell) if cell.width() == 2))
+                {
+                    break;
+                }
+                let cell = desired[index].cell();
+                let cell_width = cell.width().max(1);
+                let is_zwj = cell_width == 2 && cell.symbol().contains('\u{200d}');
+                // Some terminals apply a ZWJ grapheme's width while consuming
+                // the preceding write, so rows around one are addressed one
+                // cell at a time below.
+                if isolate_row && column > run_start {
+                    break;
+                }
                 if style.2 != cell.attributes {
                     write!(output, "{}", SetAttribute(Attribute::Reset)).unwrap();
                     write!(
@@ -605,19 +1745,20 @@ fn encode_diff(
                         style.1 = cell.background;
                     }
                 }
-                write!(
-                    output,
-                    "{}{}",
-                    MoveTo(column as u16, line as u16),
-                    cell.symbol
-                )
-                .unwrap();
-            }
-            column += cell.width();
-            if cell.width() == 0 {
-                column += 1;
+                write!(output, "{}", cell.symbol).unwrap();
+                column += cell_width;
+                // ZWJ emoji are the one class of grapheme for which terminal
+                // cursor advancement still differs across emulators. End
+                // the run after one so the following cell is addressed with
+                // an explicit cursor position instead of inheriting a
+                // potentially drifted cursor. Ordinary CJK wide cells stay
+                // batched, keeping ANSI size and throughput unchanged.
+                if isolate_row || is_zwj {
+                    break;
+                }
             }
         }
+        isolate_next_row = row_has_zwj;
     }
     write!(
         output,
@@ -635,7 +1776,42 @@ impl PipelineComponent for Renderer {
     type Output = Result<String, FrameError>;
 
     fn run(mut self, input: Receiver<Self::Input>, output: Sender<Self::Output>) {
-        while let Ok(first) = input.recv() {
+        enum Wake {
+            Frame(Frame),
+            Load((ImageSource, Result<RasterImage, crate::RasterImageError>)),
+            Timer,
+            Closed,
+        }
+
+        loop {
+            let wake = match self.native_replay_wait() {
+                Some(wait) => crossbeam_channel::select! {
+                    recv(input) -> message => message.map(Wake::Frame).unwrap_or(Wake::Closed),
+                    recv(self.image_manager.results()) -> message => message.map(Wake::Load).unwrap_or(Wake::Closed),
+                    default(wait) => Wake::Timer,
+                },
+                None => crossbeam_channel::select! {
+                    recv(input) -> message => message.map(Wake::Frame).unwrap_or(Wake::Closed),
+                    recv(self.image_manager.results()) -> message => message.map(Wake::Load).unwrap_or(Wake::Closed),
+                },
+            };
+            let first = match wake {
+                Wake::Closed => break,
+                Wake::Timer => {
+                    if !self.emit_render(&output) {
+                        return;
+                    }
+                    continue;
+                }
+                Wake::Load(result) => {
+                    self.image_manager.queue_result(result);
+                    if !self.emit_render(&output) {
+                        return;
+                    }
+                    continue;
+                }
+                Wake::Frame(frame) => frame,
+            };
             let mut frames = vec![first];
             for _ in 1..64 {
                 match input.try_recv() {
@@ -651,29 +1827,216 @@ impl PipelineComponent for Renderer {
                     return;
                 }
             }
-            match self.try_render_diff() {
-                Ok(Some(diff)) => {
-                    if output.send(Ok(diff)).is_err() {
-                        return;
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    if output.send(Err(error)).is_err() {
-                        return;
-                    }
-                }
+            if !self.emit_render(&output) {
+                return;
             }
         }
 
-        match self.try_render_diff() {
-            Ok(Some(diff)) => {
-                let _ = output.send(Ok(diff));
-            }
-            Ok(None) => {}
-            Err(error) => {
-                let _ = output.send(Err(error));
+        let _ = self.emit_render(&output);
+        if let Some(cleanup) = self.shutdown_native() {
+            let _ = output.send(Ok(cleanup));
+        }
+    }
+}
+
+impl Renderer {
+    fn emit_render(&mut self, output: &Sender<Result<String, FrameError>>) -> bool {
+        match self.render_diff() {
+            Ok(Some(diff)) => output.send(Ok(diff)).is_ok(),
+            Ok(None) => true,
+            Err(error) => output.send(Err(error)).is_ok(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot(symbol: &str) -> CellSlot {
+        CellSlot::Lead(Cell::plain(symbol).unwrap())
+    }
+
+    #[test]
+    fn contiguous_cells_share_one_cursor_move() {
+        let old = vec![CellSlot::Lead(Cell::blank()); 4];
+        let desired = vec![
+            slot("a"),
+            slot("b"),
+            slot("c"),
+            CellSlot::Lead(Cell::blank()),
+        ];
+        let mut changed = Vec::new();
+        let output = encode_diff(
+            &old,
+            &desired,
+            Size::new(4, 1),
+            &[true, true, true, false],
+            false,
+            &mut changed,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(output.contains("[1;1Habc"));
+        assert!(!output.contains("[1;2H"));
+        assert!(!output.contains("[1;3H"));
+    }
+
+    #[test]
+    fn wide_graphemes_resynchronize_the_next_ansi_run() {
+        let old = vec![CellSlot::Lead(Cell::blank()); 4];
+        let desired = vec![
+            slot("👩‍💻"),
+            CellSlot::Continuation(Cell::blank()),
+            slot("x"),
+            slot("y"),
+        ];
+        let mut changed = Vec::new();
+        let output = encode_diff(
+            &old,
+            &desired,
+            Size::new(4, 1),
+            &[true, true, true, true],
+            false,
+            &mut changed,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(output.contains("[1;1H👩‍💻"));
+        assert!(output.contains("[1;3Hx"));
+        assert!(output.contains("[1;4Hy"));
+    }
+
+    #[test]
+    fn ordered_composition_preserves_wide_glyph_footprints() {
+        let mut renderer = Renderer::with_config(
+            Size::new(4, 1),
+            RendererConfig {
+                image_protocol: ImageProtocol::Symbols,
+                cell_pixel_size: Some(Size::new(8, 16)),
+                ..RendererConfig::default()
+            },
+        )
+        .unwrap();
+        renderer
+            .apply_frame(Frame::new(vec![
+                Operation::Create {
+                    id: ImageId(1),
+                    image: Image::from_rows(vec![vec![
+                        Cell::plain("界").unwrap(),
+                        Cell::plain("x").unwrap(),
+                    ]])
+                    .unwrap(),
+                    position: ScreenPosition::default(),
+                    level: 0,
+                },
+                Operation::Create {
+                    id: ImageId(2),
+                    image: Image::new(1, 1, Cell::plain("y").unwrap()).unwrap(),
+                    position: ScreenPosition::new(0, 1),
+                    level: 1,
+                },
+            ]))
+            .unwrap();
+        renderer.render_diff().unwrap();
+        assert!(matches!(renderer.last[0], CellSlot::Lead(ref value) if value.symbol() == " "));
+        assert!(matches!(renderer.last[1], CellSlot::Lead(ref value) if value.symbol() == "y"));
+    }
+
+    #[test]
+    fn ordered_composition_matches_scan_reference_for_overlaps_and_clipping() {
+        let mut renderer = Renderer::with_config(
+            Size::new(12, 6),
+            RendererConfig {
+                image_protocol: ImageProtocol::Symbols,
+                cell_pixel_size: Some(Size::new(8, 16)),
+                ..RendererConfig::default()
+            },
+        )
+        .unwrap();
+        let cell = |value: &str| Cell::plain(value).unwrap();
+        let rows = |width: usize, height: usize, value: &str| {
+            Image::new(width, height, cell(value)).unwrap()
+        };
+        renderer
+            .apply_frame(Frame::new(vec![
+                Operation::Create {
+                    id: ImageId(1),
+                    image: rows(8, 4, "a"),
+                    position: ScreenPosition::new(0, 1),
+                    level: 0,
+                },
+                Operation::Create {
+                    id: ImageId(2),
+                    image: rows(7, 3, "b"),
+                    position: ScreenPosition::new(1, -2),
+                    level: 2,
+                },
+                Operation::Create {
+                    id: ImageId(3),
+                    image: Image::from_rows(vec![vec![cell("界"), cell("c"), cell("d")]]).unwrap(),
+                    position: ScreenPosition::new(4, 8),
+                    level: 1,
+                },
+            ]))
+            .unwrap();
+        renderer.render_diff().unwrap();
+
+        let mut expected = vec![CellSlot::Lead(Cell::blank()); 12 * 6];
+        let layers = renderer.layers.clone();
+        for line in 0..6 {
+            for column in 0..12 {
+                let mut winner = None;
+                for id in &layers {
+                    let node = &renderer.images[id];
+                    let local_line = line as i32 - node.position.line;
+                    let local_column = column as i32 - node.position.column;
+                    let Surface::Cells(image) = &node.surface else {
+                        continue;
+                    };
+                    if local_line < 0
+                        || local_column < 0
+                        || local_line >= image.height() as i32
+                        || local_column >= image.width() as i32
+                    {
+                        continue;
+                    }
+                    winner = Some((
+                        node.level,
+                        node.order,
+                        node.mutation,
+                        id.0,
+                        image
+                            .cell_at(local_line as usize, local_column as usize)
+                            .clone(),
+                    ));
+                }
+                expected[line * 12 + column] = winner
+                    .map(|(_, _, _, _, cell)| cell)
+                    .unwrap_or_else(|| CellSlot::Lead(Cell::blank()));
             }
         }
+        for line in 0..6 {
+            for column in 0..12 {
+                let index = line * 12 + column;
+                let valid = match &expected[index] {
+                    CellSlot::Lead(cell) if cell.width() == 2 => {
+                        column + 1 < 12 && matches!(expected[index + 1], CellSlot::Continuation(_))
+                    }
+                    CellSlot::Continuation(_) => {
+                        column > 0
+                            && matches!(expected[index - 1], CellSlot::Lead(ref cell) if cell.width() == 2)
+                    }
+                    _ => true,
+                };
+                if !valid {
+                    expected[index] = match &expected[index] {
+                        CellSlot::Lead(cell) => CellSlot::Lead(cell.as_blank()),
+                        CellSlot::Continuation(cell) => CellSlot::Lead(cell.clone()),
+                    };
+                }
+            }
+        }
+        assert_eq!(renderer.last, expected);
     }
 }

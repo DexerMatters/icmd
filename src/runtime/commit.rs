@@ -4,22 +4,33 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded};
+use crossterm::style::Color;
 
-use crate::{DomId, DomNode, Frame, ImageId, Size};
+use crate::{DomId, DomNode, Frame, Image, ImageId, Size, Text};
 
-use super::event::{EventDispatcher, EventRegion, ScrollOffset};
+use super::event::{EventDispatcher, EventRegion, RuntimeScrollOffset};
 use geometry::RectI;
 use layout::collect_scroll_ids;
 use style::terminal_text;
-use types::{Clip, PaintFragment, PaintKey, make_frame};
+use types::{Clip, ComputedText, PaintFragment, PaintKey, make_frame};
 
 mod geometry;
-mod layout;
+pub(crate) mod layout;
 mod paint;
 mod scene;
 mod style;
-mod text;
+pub(crate) mod text;
 mod types;
+
+struct CachedTextRaster {
+    text: Text,
+    inherited: ComputedText,
+    content_size: (i32, i32),
+    visible_local: RectI,
+    backdrop: Color,
+    image: Image,
+    used: u64,
+}
 
 #[derive(Clone)]
 pub struct ViewportSetter {
@@ -48,10 +59,14 @@ pub struct Commit {
     viewport_rx: Receiver<()>,
     latest: Option<DomNode>,
     scene: HashMap<PaintKey, PaintFragment>,
+    scene_order: Vec<PaintKey>,
     image_ids: HashMap<PaintKey, ImageId>,
     next_image_id: u64,
     event_dispatcher: EventDispatcher,
-    scroll_offsets: Arc<Mutex<HashMap<DomId, ScrollOffset>>>,
+    scroll_offsets: Arc<Mutex<HashMap<DomId, RuntimeScrollOffset>>>,
+    text_cache: HashMap<DomId, Vec<CachedTextRaster>>,
+    text_cache_tick: u64,
+    text_seen: HashSet<DomId>,
 }
 
 impl Commit {
@@ -77,10 +92,14 @@ impl Commit {
                 viewport_rx,
                 latest: None,
                 scene: HashMap::new(),
+                scene_order: Vec::new(),
                 image_ids: HashMap::new(),
                 next_image_id: 1,
                 event_dispatcher,
                 scroll_offsets,
+                text_cache: HashMap::new(),
+                text_cache_tick: 0,
+                text_seen: HashSet::new(),
             },
             setter,
         )
@@ -90,16 +109,73 @@ impl Commit {
         self.event_dispatcher.clone()
     }
 
+    fn raster_text_cached(
+        &mut self,
+        id: DomId,
+        text: &Text,
+        content: RectI,
+        visible: RectI,
+        inherited: ComputedText,
+        backdrop: Color,
+    ) -> Option<Image> {
+        self.text_seen.insert(id);
+        self.text_cache_tick = self.text_cache_tick.saturating_add(1);
+        let used = self.text_cache_tick;
+        let visible_local = RectI::new(
+            visible.line.saturating_sub(content.line),
+            visible.column.saturating_sub(content.column),
+            visible.width,
+            visible.height,
+        );
+        let entries = self.text_cache.entry(id).or_default();
+        if let Some(entry) = entries.iter_mut().find(|entry| {
+            &entry.text == text
+                && entry.inherited == inherited
+                && entry.content_size == (content.width, content.height)
+                && entry.visible_local == visible_local
+                && entry.backdrop == backdrop
+        }) {
+            entry.used = used;
+            return Some(entry.image.clone());
+        }
+        let image = text::raster_text(text, content, visible, inherited, backdrop)?;
+        if entries.len() >= 2 {
+            let oldest = entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(index, _)| index)
+                .expect("non-empty text cache");
+            entries.remove(oldest);
+        }
+        entries.push(CachedTextRaster {
+            text: text.clone(),
+            inherited,
+            content_size: (content.width, content.height),
+            visible_local,
+            backdrop,
+            image: image.clone(),
+            used,
+        });
+        Some(image)
+    }
+
     fn frame_for(&mut self, dom: Option<DomNode>, include_viewport: bool) -> Frame {
         if let Some(dom) = dom {
             self.latest = Some(dom);
         }
-        let Some(root) = self.latest.clone() else {
+        // Painting needs mutable commit state, so temporarily move the
+        // retained DOM out rather than cloning an entire tree on every resize
+        // or scroll-driven frame.
+        let Some(root) = self.latest.take() else {
             self.event_dispatcher.publish(Vec::new(), &HashSet::new());
+            self.text_cache.clear();
+            self.text_seen.clear();
             return make_frame(Vec::new(), include_viewport.then_some(self.viewport));
         };
 
         let mut next = HashMap::new();
+        self.text_seen.clear();
         let root_rect = self.root_rect(&root);
         let mut retained_scroll_ids = HashSet::new();
         collect_scroll_ids(&root, &mut retained_scroll_ids);
@@ -130,7 +206,12 @@ impl Commit {
             .publish(event_regions, &retained_scroll_ids);
 
         let operations = self.diff_scene(&next);
+        self.scene_order = next.keys().copied().collect();
+        self.scene_order
+            .sort_by_key(|key| (next[key].order, key.node.0, key.role));
         self.scene = next;
+        self.latest = Some(root);
+        self.text_cache.retain(|id, _| self.text_seen.contains(id));
         make_frame(operations, include_viewport.then_some(self.viewport))
     }
 }

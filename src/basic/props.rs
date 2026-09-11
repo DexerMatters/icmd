@@ -45,19 +45,6 @@ impl Percent {
         Self::viewport_basis_points(value.saturating_mul(100))
     }
 
-    /// Construct an available-space percentage.
-    ///
-    /// This is retained as an alias for [`Self::available`] so existing code
-    /// keeps its parent-relative behavior.
-    pub const fn from_percent(value: i32) -> Self {
-        Self::available(value)
-    }
-
-    /// Construct an available-space percentage from basis points.
-    pub const fn from_basis_points(value: i32) -> Self {
-        Self::available_basis_points(value)
-    }
-
     pub const fn available_basis_points(value: i32) -> Self {
         Self {
             basis_points: value,
@@ -150,48 +137,50 @@ pub enum Align {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Overflow {
     #[default]
-    /// Paint content outside the element when the parent clip allows it.
-    Visible,
     /// Clip content at the element's content edge without scrolling.
     Clip,
-    /// Clip and scroll only when content exceeds the available extent.
+    /// Paint content outside the element when the parent clip allows it.
+    Visible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ScrollAxes {
+    #[default]
+    Vertical,
+    Horizontal,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ScrollbarVisibility {
+    #[default]
     Auto,
-    /// Clip and create a scrolling surface, reserving scrollbars when enabled.
-    Scroll,
+    Always,
+    Hidden,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OverflowScrollbarStyle {
-    pub vertical_track: Fill,
-    pub vertical_thumb: Fill,
-    pub horizontal_track: Fill,
-    pub horizontal_thumb: Fill,
-    pub track: TextStyle,
-    pub thumb: TextStyle,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ScrollOffset {
+    pub x: u32,
+    pub y: u32,
 }
 
-impl Default for OverflowScrollbarStyle {
-    fn default() -> Self {
-        Self {
-            vertical_track: Fill::new("│").expect("default scrollbar glyph is valid"),
-            vertical_thumb: Fill::new("┃").expect("default scrollbar glyph is valid"),
-            horizontal_track: Fill::new("─").expect("default scrollbar glyph is valid"),
-            horizontal_thumb: Fill::new("━").expect("default scrollbar glyph is valid"),
-            track: TextStyle::default(),
-            thumb: TextStyle::default(),
-        }
+impl ScrollOffset {
+    pub const fn new(x: u32, y: u32) -> Self {
+        Self { x, y }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ScrollStyle {
-    /// Whether wheel input scrolls eligible containers. Defaults to `true`.
-    pub enable_wheel: Attr<bool>,
-    /// Whether mouse input can wheel, click tracks, or drag scrollbar thumbs. Defaults to `true`.
-    pub enable_mouse: Attr<bool>,
-    pub wheel_step: Attr<u16>,
-    pub draw_scrollbar: Attr<bool>,
-    pub scrollbar: Attr<OverflowScrollbarStyle>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ScrollDelta {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl ScrollDelta {
+    pub const fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -264,6 +253,40 @@ impl TryFrom<&str> for Fill {
 }
 
 impl TryFrom<String> for Fill {
+    type Error = FillError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+/// A terminal glyph that occupies exactly one column, suitable for a scrollbar.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ScrollbarGlyph(Fill);
+
+impl ScrollbarGlyph {
+    pub fn new(symbol: impl Into<String>) -> Result<Self, FillError> {
+        let fill = Fill::new(symbol)?;
+        if fill.width() != 1 {
+            return Err(FillError::UnsupportedWidth(fill.width()));
+        }
+        Ok(Self(fill))
+    }
+
+    pub fn symbol(&self) -> &str {
+        self.0.symbol()
+    }
+}
+
+impl TryFrom<&str> for ScrollbarGlyph {
+    type Error = FillError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for ScrollbarGlyph {
     type Error = FillError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
@@ -483,6 +506,29 @@ impl TextStyle {
     );
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrollbarStyle {
+    pub vertical_track: ScrollbarGlyph,
+    pub vertical_thumb: ScrollbarGlyph,
+    pub horizontal_track: ScrollbarGlyph,
+    pub horizontal_thumb: ScrollbarGlyph,
+    pub track: TextStyle,
+    pub thumb: TextStyle,
+}
+
+impl Default for ScrollbarStyle {
+    fn default() -> Self {
+        Self {
+            vertical_track: ScrollbarGlyph::new("│").expect("default scrollbar glyph is valid"),
+            vertical_thumb: ScrollbarGlyph::new("┃").expect("default scrollbar glyph is valid"),
+            horizontal_track: ScrollbarGlyph::new("─").expect("default scrollbar glyph is valid"),
+            horizontal_thumb: ScrollbarGlyph::new("━").expect("default scrollbar glyph is valid"),
+            track: TextStyle::default(),
+            thumb: TextStyle::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Style {
     pub layout: Attr<Layout>,
@@ -501,8 +547,6 @@ pub struct Style {
     pub overflow_x: Attr<Overflow>,
     /// Vertical overflow behavior.
     pub overflow_y: Attr<Overflow>,
-    /// Input and scrollbar settings for scrollable overflow surfaces.
-    pub scroll: ScrollStyle,
     pub visibility: Attr<Visibility>,
     pub z_index: Attr<i32>,
     pub background: Attr<Color>,
@@ -543,11 +587,6 @@ impl Attributes {
         );
         self
     }
-
-    #[deprecated(note = "use `with_overrides` to make precedence explicit")]
-    pub fn merge(self, overrides: &Self) -> Self {
-        self.with_overrides(overrides)
-    }
 }
 
 impl BorderStyle {
@@ -559,11 +598,6 @@ impl BorderStyle {
         self.attr = self.attr.with_overrides(&overrides.attr);
         self
     }
-
-    #[deprecated(note = "use `with_overrides` to make precedence explicit")]
-    pub fn merge(self, overrides: &Self) -> Self {
-        self.with_overrides(overrides)
-    }
 }
 
 impl TextStyle {
@@ -572,11 +606,6 @@ impl TextStyle {
         self.background.overlay(&overrides.background);
         self.attr = self.attr.with_overrides(&overrides.attr);
         self
-    }
-
-    #[deprecated(note = "use `with_overrides` to make precedence explicit")]
-    pub fn merge(self, overrides: &Self) -> Self {
-        self.with_overrides(overrides)
     }
 }
 
@@ -597,25 +626,8 @@ impl Style {
             layout, width, height, line, column, margin, padding, gap, justify, align, overflow,
             overflow_x, overflow_y, visibility, z_index, background, fill,
         );
-        self.scroll = self.scroll.with_overrides(&overrides.scroll);
         self.border = self.border.with_overrides(&overrides.border);
         self.text = self.text.with_overrides(&overrides.text);
-        self
-    }
-
-    #[deprecated(note = "use `with_overrides` to make precedence explicit")]
-    pub fn merge(self, overrides: &Self) -> Self {
-        self.with_overrides(overrides)
-    }
-}
-
-impl ScrollStyle {
-    pub fn with_overrides(mut self, overrides: &Self) -> Self {
-        self.enable_wheel.overlay(&overrides.enable_wheel);
-        self.enable_mouse.overlay(&overrides.enable_mouse);
-        self.wheel_step.overlay(&overrides.wheel_step);
-        self.draw_scrollbar.overlay(&overrides.draw_scrollbar);
-        self.scrollbar.overlay(&overrides.scrollbar);
         self
     }
 }
@@ -661,6 +673,20 @@ impl ops::DivAssign<&StylePatch> for Style {
 pub struct DomProps {
     pub style: Style,
     pub events: EventHandlers,
+    pub(crate) scroll: Option<Box<ScrollConfig>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScrollConfig {
+    pub(crate) horizontal: bool,
+    pub(crate) vertical: bool,
+    pub(crate) scrollbar_visibility: ScrollbarVisibility,
+    pub(crate) offset: Option<ScrollOffset>,
+    pub(crate) enable_mouse: bool,
+    pub(crate) enable_wheel: bool,
+    pub(crate) enable_keyboard: bool,
+    pub(crate) wheel_step: u16,
+    pub(crate) scrollbar: ScrollbarStyle,
 }
 
 impl DomProps {
@@ -668,13 +694,10 @@ impl DomProps {
     pub fn with_overrides(mut self, overrides: &Self) -> Self {
         self.style = self.style.with_overrides(&overrides.style);
         self.events.merge(&overrides.events);
+        if overrides.scroll.is_some() {
+            self.scroll = overrides.scroll.clone();
+        }
         self
-    }
-
-    /// Compatibility spelling for [`DomProps::with_overrides`].
-    #[deprecated(note = "use `with_overrides` to make precedence explicit")]
-    pub fn merge(self, overrides: &Self) -> Self {
-        self.with_overrides(overrides)
     }
 }
 

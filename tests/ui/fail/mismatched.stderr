@@ -1,7 +1,7 @@
-error[E0080]: evaluation panicked: ui!: closing tag </button> does not match opening tag <vbox>
+error[E0080]: evaluation panicked: ui!: closing tag </button> does not match opening tag <column>
  --> tests/ui/fail/mismatched.rs:4:13
   |
-4 |     let _ = ui! { <vbox>"text"</button> };
-  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `main::_` failed here
+4 |     let _ = ui! { <column>"text"</button> };
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `main::_` failed here
   |
   = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `ui` (in Nightly builds, run with -Z macro-backtrace for more info)

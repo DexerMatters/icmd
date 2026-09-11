@@ -3,14 +3,13 @@ use std::collections::HashMap;
 use crate::{ImageId, Operation};
 
 use super::Commit;
-use super::types::{PaintFragment, PaintKey};
+use super::types::{PaintContent, PaintFragment, PaintKey};
 
 impl Commit {
     pub(super) fn diff_scene(&mut self, next: &HashMap<PaintKey, PaintFragment>) -> Vec<Operation> {
         let mut operations = Vec::new();
-        let mut old_keys: Vec<_> = self.scene.keys().copied().collect();
-        old_keys.sort_by_key(|key| (self.scene[key].order, key.node.0, key.role));
         let mut retired = Vec::new();
+        let old_keys = self.scene_order.clone();
         for key in old_keys {
             let Some(new) = next.get(&key) else {
                 operations.push(Operation::Remove {
@@ -21,10 +20,37 @@ impl Commit {
             };
             let id = self.image_id(key);
             let old = &self.scene[&key];
-            if old.image != new.image {
-                operations.push(Operation::Replace {
+            if old.content != new.content {
+                match (&old.content, &new.content) {
+                    (PaintContent::Cells(previous), PaintContent::Cells(image)) => {
+                        if let Some((rect, rows)) = previous.diff_patch_rect(image) {
+                            operations.push(Operation::PatchRect { id, rect, rows });
+                        } else {
+                            operations.push(Operation::Replace {
+                                id,
+                                image: image.clone(),
+                            });
+                        }
+                    }
+                    (_, PaintContent::Raster(raster)) => {
+                        operations.push(Operation::ReplaceRaster {
+                            id,
+                            raster: raster.clone(),
+                        })
+                    }
+                    // Cell/raster transitions cannot preserve a patchable
+                    // footprint and retain the existing replacement contract.
+                    (_, PaintContent::Cells(image)) => operations.push(Operation::Replace {
+                        id,
+                        image: image.clone(),
+                    }),
+                }
+            }
+            if old.raster_clip != new.raster_clip && matches!(new.content, PaintContent::Raster(_))
+            {
+                operations.push(Operation::SetRasterClip {
                     id,
-                    image: new.image.clone(),
+                    clip: new.raster_clip,
                 });
             }
             if old.position != new.position {
@@ -56,12 +82,28 @@ impl Commit {
             let value = &next[&key];
             if !self.scene.contains_key(&key) {
                 let id = self.image_id(key);
-                operations.push(Operation::Create {
-                    id,
-                    image: value.image.clone(),
-                    position: value.position,
-                    level: value.level,
-                });
+                match &value.content {
+                    PaintContent::Cells(image) => operations.push(Operation::Create {
+                        id,
+                        image: image.clone(),
+                        position: value.position,
+                        level: value.level,
+                    }),
+                    PaintContent::Raster(raster) => operations.push(Operation::CreateRaster {
+                        id,
+                        raster: raster.clone(),
+                        position: value.position,
+                        level: value.level,
+                    }),
+                }
+                if let PaintContent::Raster(_) = value.content
+                    && value.raster_clip.is_some()
+                {
+                    operations.push(Operation::SetRasterClip {
+                        id,
+                        clip: value.raster_clip,
+                    });
+                }
                 operations.push(Operation::SetOrder {
                     id,
                     order: value.order,

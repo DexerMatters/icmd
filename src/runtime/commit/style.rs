@@ -1,9 +1,9 @@
 use crossterm::style::{Attributes, Color};
 
 use crate::basic::common::Attr;
-use crate::{Edges, Overflow, Style};
+use crate::{Edges, ScrollbarVisibility, Style, basic::props::ScrollConfig};
 
-use super::types::{ComputedBorder, ComputedScrollStyle, ComputedStyle, ComputedText, ScrollSpec};
+use super::types::{ComputedBorder, ComputedStyle, ComputedText, ScrollSpec};
 
 pub(super) fn slot<T: Clone>(value: &Attr<T>) -> Option<T> {
     value.clone().into()
@@ -42,13 +42,6 @@ impl ComputedStyle {
             overflow_y: slot(&style.overflow_y)
                 .or_else(|| slot(&style.overflow))
                 .unwrap_or_default(),
-            scroll: ComputedScrollStyle {
-                wheel: style.scroll.enable_wheel.unwrap_or(true),
-                enable_mouse: style.scroll.enable_mouse.unwrap_or(true),
-                wheel_step: style.scroll.wheel_step.unwrap_or(1).max(1),
-                draw_scrollbar: style.scroll.draw_scrollbar.unwrap_or(true),
-                scrollbar: style.scroll.scrollbar.clone().unwrap_or_default(),
-            },
             visibility: slot(&style.visibility).unwrap_or_default(),
             z_index: slot(&style.z_index).unwrap_or_default(),
             background: slot(&style.background),
@@ -70,19 +63,23 @@ impl ComputedStyle {
     }
 }
 
-pub(super) fn scroll_spec(style: &ComputedStyle) -> Option<ScrollSpec<'_>> {
-    let horizontal = matches!(style.overflow_x, Overflow::Auto | Overflow::Scroll);
-    let vertical = matches!(style.overflow_y, Overflow::Auto | Overflow::Scroll);
-    (horizontal || vertical).then_some(ScrollSpec {
-        horizontal,
-        vertical,
-        always_horizontal: style.overflow_x == Overflow::Scroll,
-        always_vertical: style.overflow_y == Overflow::Scroll,
-        draw_scrollbar: style.scroll.draw_scrollbar,
-        wheel_step: style.scroll.wheel_step,
-        wheel: style.scroll.wheel,
-        enable_mouse: style.scroll.enable_mouse,
-        scrollbar: &style.scroll.scrollbar,
+pub(super) fn scroll_spec<'a>(config: Option<&'a ScrollConfig>) -> Option<ScrollSpec<'a>> {
+    let config = config?;
+    Some(ScrollSpec {
+        horizontal: config.horizontal,
+        vertical: config.vertical,
+        always_horizontal: matches!(config.scrollbar_visibility, ScrollbarVisibility::Always)
+            && config.horizontal,
+        always_vertical: matches!(config.scrollbar_visibility, ScrollbarVisibility::Always)
+            && config.vertical,
+        draw_scrollbar: config.scrollbar_visibility != ScrollbarVisibility::Hidden,
+        wheel_step: config.wheel_step,
+        wheel: config.enable_wheel,
+        enable_mouse: config.enable_mouse,
+        enable_keyboard: config.enable_keyboard,
+        controlled: config.offset.is_some(),
+        requested_offset: config.offset,
+        scrollbar: &config.scrollbar,
     })
 }
 
