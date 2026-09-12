@@ -512,3 +512,108 @@ fn controlled_raw_input_accepts_and_rejects_deterministically() {
         "a rejecting owner still observes the draft it ignores"
     );
 }
+
+#[test]
+fn read_only_raw_input_is_focusable_and_selectable_but_does_not_mutate() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let clipboard = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("locked".into()),
+            read_only: Attr::Set(true),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            on_clipboard: Attr::Set(EventListener::new({
+                let clipboard = clipboard.clone();
+                move |event: icmd::TextClipboardEvent| clipboard.lock().unwrap().push(event.text)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(8))
+        .node();
+    let viewport = Size::new(12, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 2)));
+    assert!(
+        dispatcher.focused().is_some(),
+        "a read-only field must still take focus"
+    );
+    // Typing must not change the value.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('x'), KeyModifiers::empty())),
+    );
+    assert!(
+        values.lock().unwrap().is_empty(),
+        "read-only must not mutate"
+    );
+
+    // Selection and copy still work.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+    );
+    assert_eq!(
+        clipboard.lock().unwrap().as_slice(),
+        &["locked".to_string()],
+        "read-only permits copy"
+    );
+}
+
+#[test]
+fn unhandled_keys_bubble_to_ancestors_while_handled_keys_stop() {
+    // The editor consumes keys it handles; anything else must continue to
+    // ancestor listeners.
+    let ancestor_down = Arc::new(Mutex::new(Vec::new()));
+    let field = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("a".into()),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(6))
+        .node();
+    let node = {
+        let mut dom = icmd::DomProps::default();
+        dom.events.key_down = Attr::Set(EventListener::new({
+            let seen = ancestor_down.clone();
+            move |_event| seen.lock().unwrap().push(())
+        }));
+        icmd::Node::element(dom, [field])
+    };
+    let viewport = Size::new(10, 4);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 2)));
+
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('z'), KeyModifiers::empty())),
+    );
+    assert_eq!(
+        ancestor_down.lock().unwrap().len(),
+        0,
+        "a handled character key stops at the input"
+    );
+
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::F(5), KeyModifiers::empty())),
+    );
+    assert_eq!(
+        ancestor_down.lock().unwrap().len(),
+        1,
+        "an unhandled key continues to ancestors"
+    );
+}
