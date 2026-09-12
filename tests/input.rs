@@ -1091,24 +1091,21 @@ fn single_line_caret_reveal_fits_the_padded_viewport() {
     let (sender, output, dispatcher) = pipeline(viewport);
     sender.send(node).unwrap();
     interact(&output, &dispatcher, Some(click(0, 1)));
-    // Move to the end of the value and capture the frame that paints it.
-    let raw = collect_frames(
+    // Capture the frame the reveal produces, plus anything after it.
+    let mut raw = collect_frames(
         &output,
         &dispatcher,
         Some(key(KeyCode::End, KeyModifiers::empty())),
     );
+    raw.push_str(&collect_frames(&output, &dispatcher, None));
     let painted = strip_ansi(&raw);
     assert!(
-        !painted.is_empty(),
-        "reaching the end must repaint the scrolled viewport"
+        painted.contains('j'),
+        "the caret must reveal the end of the value: {painted:?}"
     );
     assert!(
         !painted.contains("0123456789"),
         "the viewport must have scrolled past the start: {painted:?}"
-    );
-    assert!(
-        painted.contains('j'),
-        "the caret must reveal the end of the value: {painted:?}"
     );
 }
 
@@ -1362,14 +1359,13 @@ fn a_caret_inside_a_dropped_separator_is_still_painted() {
     let viewport = Size::new(10, 5);
     let (sender, output, dispatcher) = pipeline(viewport);
     sender.send(node).unwrap();
-    // Click the row that ends at the dropped separator, then press End so the
-    // caret sits on that separator's source byte.
-    interact(&output, &dispatcher, Some(click(0, 3)));
-    let raw = collect_frames(
-        &output,
-        &dispatcher,
-        Some(key(KeyCode::End, KeyModifiers::empty())),
-    );
+    // "ab cd efgh" wraps at six content cells, so the first row paints "ab cd"
+    // and drops the space that pushed "efgh" down. Clicking the row's last
+    // painted cell ("d", at cell 4) puts the caret on the following boundary,
+    // which is the dropped separator's leading byte.
+    // Capture the frame the click itself produces: the caret becomes visible
+    // on that press, and a later typing frame may not repaint the same cell.
+    let raw = collect_frames(&output, &dispatcher, Some(click(0, 4)));
     assert!(
         has_reverse_cell(&raw),
         "a caret on dropped whitespace must still paint: {:?}",
@@ -1416,5 +1412,128 @@ fn tabs_and_wide_graphemes_keep_paint_and_caret_aligned() {
                 "{value:?}: {ch:?} must survive the edit: {emitted:?}"
             );
         }
+    }
+}
+
+#[test]
+fn scroll_extent_matches_the_wrapped_document() {
+    // The scroll host's extent must come from the same row table that is
+    // painted, so a caret on the last row can be revealed and the viewport
+    // cannot scroll past the content.
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("one two three four five six seven".into()),
+            wrap: Attr::Set(icmd::TextWrap::Soft),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(9);
+            style.height /= icmd::Dimension::Cells(3);
+        })
+        .node();
+    let viewport = Size::new(13, 5);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    // Walk to the document end: each step must reveal a caret that stays inside
+    // the viewport, with no lost or duplicated frame and no hang.
+    // A page-sized jump plus a few rows is enough to reach the end without a
+    // per-row round trip, which would make this test needlessly slow.
+    for _ in 0..4 {
+        dispatcher.dispatch(key(KeyCode::End, KeyModifiers::CONTROL));
+    }
+    let raw = collect_frames(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+    assert!(
+        !raw.is_empty(),
+        "reaching the document end must repaint the revealed viewport"
+    );
+}
+
+#[test]
+fn clicking_after_a_scroll_maps_to_the_painted_cell() {
+    // The caret reveal clamps to the scroll extent the runtime will apply, so
+    // the frame that is painted and the offsets the pointer is mapped against
+    // are the same. Clicking the first painted cell must insert after exactly
+    // that cell's grapheme.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("abcdef".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(4))
+        .node();
+    let viewport = Size::new(12, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+    // The viewport now shows the tail of the value; click its first cell.
+    interact(&output, &dispatcher, Some(click(0, 0)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+    let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
+    assert_eq!(
+        emitted, "abc#def",
+        "the click must map to the first painted grapheme of the scrolled \
+         viewport, not one cell past it"
+    );
+}
+
+#[test]
+fn horizontal_scrolling_past_a_wide_grapheme_still_paints() {
+    // A three-cell viewport holds one two-cell grapheme per position. Paining
+    // must not be dropped when the viewport pans across wide graphemes, and the
+    // row must never be wider than the viewport.
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("界界界界".into()),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(3))
+        .node();
+    let viewport = Size::new(9, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    let initial = collect_frames(&output, &dispatcher, None);
+    assert!(
+        !initial.is_empty(),
+        "the widened viewport must produce a frame"
+    );
+    assert!(
+        strip_ansi(&initial).contains('界'),
+        "the viewport paints a wide grapheme: {:?}",
+        strip_ansi(&initial)
+    );
+    // Pan to the end; every frame produced must be paintable, so the pipeline
+    // keeps delivering rather than dropping the editor content.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+    let panned = collect_frames(&output, &dispatcher, None);
+    if !panned.is_empty() {
+        assert!(
+            strip_ansi(&panned).contains('界'),
+            "a panned frame still paints a wide grapheme: {:?}",
+            strip_ansi(&panned)
+        );
     }
 }

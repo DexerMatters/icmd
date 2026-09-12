@@ -660,27 +660,38 @@ fn reconcile_scroll(
 ) {
     let view_width = view_width.max(1);
     let view_height = view_height.max(1);
-    let rows = layout.row_count().max(1);
-    state.scroll_y = state.scroll_y.min(rows.saturating_sub(view_height));
-    let widest = layout.max_row_width();
-    state.scroll_x = state.scroll_x.min(widest.saturating_sub(view_width));
-    if !state.focused || !state.reveal_caret {
-        return;
-    }
-    let (row, cell, caret_width) = layout.caret(state.model.caret().cursor);
-    if row < state.scroll_y {
-        state.scroll_y = row;
-    } else if row >= state.scroll_y.saturating_add(view_height) {
-        state.scroll_y = row + 1 - view_height;
-    }
-    if cell < state.scroll_x {
-        state.scroll_x = cell;
-    } else {
-        let caret_end = cell.saturating_add(caret_width.max(1));
-        if caret_end > state.scroll_x.saturating_add(view_width) {
-            state.scroll_x = caret_end - view_width;
+    // The scroll extent is a property of the layout and the viewport, and this
+    // component owns the offset, so it clamps to exactly the extent the runtime
+    // would apply. That keeps the requested offset equal to the painted one, so
+    // the committed layout and pointer coordinates never disagree.
+    let max_x = layout.max_row_width().saturating_sub(view_width);
+    let max_y = layout.row_count().max(1).saturating_sub(view_height);
+    state.scroll_x = state.scroll_x.min(max_x);
+    state.scroll_y = state.scroll_y.min(max_y);
+
+    if state.focused && state.reveal_caret {
+        let (row, cell, caret_width) = layout.caret(state.model.caret().cursor);
+        if row < state.scroll_y {
+            state.scroll_y = row;
+        } else if row >= state.scroll_y.saturating_add(view_height) {
+            state.scroll_y = row + 1 - view_height;
+        }
+        if cell < state.scroll_x {
+            state.scroll_x = cell;
+        } else {
+            // The caret's cells must be visible; the offset is clamped to the
+            // extent again so a caret at the very end cannot ask for a scroll
+            // the runtime will refuse.
+            let caret_end = cell.saturating_add(caret_width.max(1));
+            if caret_end > state.scroll_x.saturating_add(view_width) {
+                state.scroll_x = caret_end - view_width;
+            }
         }
     }
+    // Final clamp: reveal may have pushed past the extent, and the painted frame
+    // is what the pointer will be mapped against.
+    state.scroll_x = state.scroll_x.min(max_x);
+    state.scroll_y = state.scroll_y.min(max_y);
 }
 
 /// The editor surface keeps auto dimensions so it reports its own width

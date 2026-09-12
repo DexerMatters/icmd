@@ -655,11 +655,15 @@ impl TextLayout {
 
     /// The last source boundary that still belongs to `row`: the end of its
     /// final painted item, or its own start for an empty row.
+    /// The last source boundary a hit inside `row` can resolve to.
+    ///
+    /// This is the end of the row's final item of any kind. Using only painted
+    /// glyphs would make `hit` non-monotonic: the item loop above already
+    /// resolves cells inside a trailing dropped separator, so a hit one cell
+    /// further right must not jump backwards to the last painted glyph.
     fn row_last_boundary(&self, row: usize) -> usize {
         self.row_items(row)
-            .iter()
-            .rev()
-            .find(|item| item.kind == ItemKind::Glyph && !item.symbol.is_empty())
+            .last()
             .map_or_else(|| self.row_start(row), |item| item.source.end)
     }
 
@@ -1594,6 +1598,38 @@ mod property_tests {
                         .map(|i| (i.symbol.clone(), i.cell, i.width))
                         .collect::<Vec<_>>()
                 );
+            }
+        }
+    }
+
+    /// A pointer hit is monotonic in the cell coordinate: moving right inside a
+    /// row never resolves to an earlier source position. This holds across
+    /// dropped separators, whose cells are real even though they are not
+    /// painted.
+    #[test]
+    fn hits_are_monotonic_within_a_row() {
+        for (value, wrap, width) in [
+            ("ab cd efgh", TextWrap::Soft, 6usize),
+            ("hello world again", TextWrap::Soft, 8),
+            ("a b c d e f", TextWrap::Soft, 4),
+        ] {
+            let layout = super::layout_for_test(value, wrap, width);
+            for index in 0..layout.row_count() {
+                // Probe one cell past the painted content to cover a trailing
+                // dropped separator.
+                let cells = layout.row_width(index) + 2;
+                let mut previous = None;
+                for cell in 0..cells {
+                    let hit = layout.hit(index, cell, HitBias::Leading);
+                    if let Some(previous) = previous {
+                        assert!(
+                            hit >= previous,
+                            "{value:?} row {index}: cell {cell} resolved backwards \
+                             ({hit} after {previous})"
+                        );
+                    }
+                    previous = Some(hit);
+                }
             }
         }
     }

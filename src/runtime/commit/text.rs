@@ -454,19 +454,26 @@ fn editor_raster(
             columns += 1;
         }
         // `col_start`/`col_end` are cell columns, so select entries by walking
-        // their widths rather than by vector index.
+        // their widths rather than by vector index. A wide cell that only
+        // partially overlaps the visible span is replaced by blanks: emitting it
+        // whole would make this row wider than the others, and `from_rows`
+        // requires every row to occupy the same cells.
+        let target = visible.width.max(0) as usize;
         let mut visible_row = Vec::new();
+        let mut painted = 0usize;
         let mut column = 0usize;
         for cell in cells {
             let width = cell.width();
             let end = column + width;
-            if end > col_start && column < col_end {
+            if end > col_start && column < col_end && end <= col_end && column >= col_start {
                 visible_row.push(cell);
+                painted += width;
             }
             column = end;
         }
-        while visible_row.iter().map(|cell| cell.width()).sum::<usize>() < visible.width as usize {
+        while painted < target {
             visible_row.push(blank(base));
+            painted += 1;
         }
         rows.push(visible_row);
     }

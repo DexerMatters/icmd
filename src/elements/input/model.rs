@@ -55,13 +55,12 @@ impl Caret {
 /// A draft emitted to a controlled owner that the owner has not yet
 /// acknowledged with a render.
 ///
-/// The draft records the render revision it was produced from. Causality is
-/// decided by comparing revisions, never by comparing the incoming value with
+/// The draft carries only what acceptance needs: the value that was emitted and
+/// the selection that produced it. Acceptance is decided by the owner's next
+/// render republishing that exact value; there is no causality heuristic over
 /// historical strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EmittedDraft {
-    /// The render revision the draft was produced from.
-    pub(crate) from_revision: u64,
     /// The value emitted through `on_change`.
     pub(crate) value: String,
     /// The selection/caret that produced the draft, restored when the owner
@@ -199,12 +198,6 @@ pub(crate) struct EditModel {
     authoritative: String,
     /// Set once the first render has initialized the model.
     initialized: bool,
-    /// A monotonically increasing render revision. Every render increments it;
-    /// a draft records the revision it was produced from, which is how
-    /// acceptance and staleness are decided without comparing values.
-    revision: u64,
-    /// The revision the current `authoritative` value was published at.
-    published_revision: u64,
     /// The open draft for a controlled field, if any.
     draft: Option<EmittedDraft>,
 }
@@ -280,8 +273,6 @@ impl EditModel {
         multiline: bool,
     ) -> Outcome {
         let controlled = value.map(|value| normalize(value, multiline));
-        self.revision = self.revision.wrapping_add(1);
-        let revision = self.revision;
         if !self.initialized {
             self.initialized = true;
             self.value = controlled
@@ -289,7 +280,6 @@ impl EditModel {
                 .unwrap_or_else(|| normalize(default_value.unwrap_or_default(), multiline));
             self.caret = Caret::at(self.value.len());
             self.authoritative = self.value.clone();
-            self.published_revision = revision;
             self.ownership = if controlled.is_some() {
                 ValueOwnership::Controlled
             } else {
@@ -305,18 +295,14 @@ impl EditModel {
 
         match controlled {
             Some(controlled) => {
-                // The owner is authoritative at every render. The render
-                // revision decides causality: a draft produced during the render
-                // this one supersedes has been observable to the owner, whereas
-                // a draft produced during this very render has not. Acceptance
-                // is exactly "the owner republished what we emitted"; every
-                // other value is rejection or external replacement. No other
-                // comparison against historical strings participates.
+                // The owner is authoritative at every render. A draft exists
+                // only for edits made since the render now being superseded, so
+                // this render is always the owner's answer to it: acceptance is
+                // exactly "the owner republished what we emitted", and every
+                // other value is rejection or external replacement. No causality
+                // heuristic over historical strings participates.
                 let draft = self.draft.take();
-                let answered = draft
-                    .as_ref()
-                    .is_some_and(|draft| draft.from_revision < revision);
-                if let Some(draft) = draft.filter(|_| answered) {
+                if let Some(draft) = draft {
                     if draft.value == controlled {
                         // Acceptance: keep the selection that produced it.
                         self.value = controlled;
@@ -328,13 +314,10 @@ impl EditModel {
                         self.caret = self.snap_caret(self.caret);
                     }
                 } else {
-                    // No draft, or one produced during this render and therefore
-                    // not yet answerable: the owner's value simply wins.
                     self.value = controlled;
                     self.caret = self.snap_caret(self.caret);
                 }
                 self.authoritative = self.value.clone();
-                self.published_revision = revision;
                 self.ownership = ValueOwnership::Controlled;
             }
             None => {
@@ -347,7 +330,6 @@ impl EditModel {
                 self.ownership = ValueOwnership::Uncontrolled;
                 self.draft = None;
                 self.authoritative = self.value.clone();
-                self.published_revision = revision;
                 self.caret = self.snap_caret(self.caret);
             }
         }
@@ -673,14 +655,9 @@ impl EditModel {
         if self.ownership != ValueOwnership::Controlled {
             return;
         }
-        // The draft belongs to the render currently on screen, which is the
-        // last published revision. A later render either accepts or discards it.
-        let from_revision = self
-            .draft
-            .as_ref()
-            .map_or(self.published_revision, |draft| draft.from_revision);
+        // Extending an open draft keeps its original value/selection: the draft
+        // bridges every event until the owner's next render answers it.
         self.draft = Some(EmittedDraft {
-            from_revision,
             value: self.value.clone(),
             caret: self.caret,
         });

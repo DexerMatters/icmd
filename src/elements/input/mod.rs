@@ -9,23 +9,25 @@
 //! `value` means *controlled* and `default_value` is read exactly once when the
 //! control is uncontrolled. Supplying both is permitted, and `value` wins.
 //!
-//! A controlled field follows an explicit, revision-based contract with no
-//! value-comparison heuristics:
+//! A controlled field follows an explicit, render-scoped contract:
 //!
 //! 1. At every render the supplied `value` is authoritative. The component
-//!    normalizes it and records a new render revision.
+//!    normalizes it and adopts it, whatever the optimistic state was.
 //! 2. Every input event dispatched before the next render reduces against one
 //!    optimistic draft, so rapid or repeated keystrokes accumulate without
 //!    waiting for the owner.
-//! 3. At the next render, if the supplied value equals the emitted draft the
-//!    draft's selection is restored (*acceptance*). Otherwise the selection is
-//!    clamped into the supplied value (*rejection* or external replacement).
+//! 3. At the next render, the supplied value is compared to that one draft. If
+//!    it equals the emitted draft, the draft's selection snapshot is restored
+//!    (*acceptance*). Anything else is *rejection* or external replacement: the
+//!    owner's value wins and the selection is clamped into it.
 //! 4. Switching from uncontrolled to controlled adopts `value`; switching back
-//!    retains the last authoritative rendered value and resumes local
-//!    ownership.
+//!    retains the last authoritative rendered value - never an unaccepted draft
+//!    - and resumes local ownership.
 //!
-//! The owner therefore has final authority at every render, and rejection is
-//! predictable rather than inferred.
+//! Causality is therefore decided by the render boundary itself, not by
+//! comparing values against a history of previous strings. The owner has final
+//! authority at every render, and rejection is predictable: it happens on the
+//! first render after the edit, with no grace period.
 //!
 //! # Normalization, Unicode, and length
 //!
