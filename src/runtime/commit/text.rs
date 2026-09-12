@@ -701,6 +701,8 @@ mod tests {
     }
 
     /// Painted row strings of an editor surface inside a `width` x `height` box.
+    /// A wide glyph contributes its symbol and one space for each continuation
+    /// column, so the string has exactly one character per cell column.
     fn editor_rows(surface: &EditorSurface, width: usize, height: usize) -> Vec<String> {
         let text = Text::new("").wrap(surface.wrap);
         let rect = RectI::new(0, 0, width as i32, height as i32);
@@ -708,13 +710,10 @@ mod tests {
         (0..image.height())
             .map(|row| {
                 (0..image.width())
-                    .filter(|column| {
-                        !matches!(
-                            image.cell_at(row, *column),
-                            crate::data::CellSlot::Continuation(_)
-                        )
+                    .map(|column| match image.cell_at(row, column) {
+                        crate::data::CellSlot::Continuation(_) => " ".to_string(),
+                        crate::data::CellSlot::Lead(cell) => cell.symbol().to_string(),
                     })
-                    .map(|column| image.cell_at(row, column).cell().symbol())
                     .collect::<String>()
             })
             .collect()
@@ -738,5 +737,200 @@ mod tests {
         // ordinary `Text` of the same width paints.
         let surface = editor_surface("ab界c", "", TextWrap::NoWrap);
         assert_eq!(editor_rows(&surface, 3, 1), ["ab "]);
+    }
+
+    /// The row a canonical layout says must be painted in a `width`-cell box,
+    /// derived from `item.cell` alone. An item that does not fit leaves its
+    /// cells blank, and a separator occupies cells without being drawn. Each
+    /// grapheme is one entry - a wide one keeps its trailing columns blank.
+    fn clipped_row(layout: &TextLayout, row: usize, width: usize) -> String {
+        let mut slots = vec![" ".to_string(); width];
+        for item in layout.row_items(row) {
+            if item.width == 0 || item.kind == ItemKind::Separator {
+                continue;
+            }
+            if item.cell + item.width > width {
+                continue;
+            }
+            if item.symbol == "\t" {
+                // A tab is wider than one cell, so it paints one blank per
+                // expanded column rather than a single symbol.
+                for offset in 0..item.width {
+                    if let Some(slot) = slots.get_mut(item.cell + offset) {
+                        *slot = " ".to_string();
+                    }
+                }
+                continue;
+            }
+            if let Some(slot) = slots.get_mut(item.cell) {
+                *slot = item.symbol.clone();
+            }
+            for offset in 1..item.width {
+                if let Some(slot) = slots.get_mut(item.cell + offset) {
+                    *slot = " ".to_string();
+                }
+            }
+        }
+        slots.concat()
+    }
+
+    /// Painted row strings of an editor surface whose own box is `document`
+    /// cells wide, windowed to `viewport` cells starting at `start`. This is the
+    /// scrolled case: the raster lays the document out and the grid shows one
+    /// window of it.
+    fn editor_window_rows(
+        surface: &EditorSurface,
+        document: usize,
+        start: usize,
+        viewport: usize,
+        height: usize,
+    ) -> Vec<String> {
+        let text = Text::new("").wrap(surface.wrap);
+        let rect = RectI::new(0, 0, document as i32, height as i32);
+        let visible = RectI::new(0, start as i32, viewport as i32, height as i32);
+        let image = editor_raster(&text, surface, rect, visible, Color::Reset).expect("raster");
+        (0..image.height())
+            .map(|row| {
+                (0..image.width())
+                    .map(|column| match image.cell_at(row, column) {
+                        crate::data::CellSlot::Continuation(_) => " ".to_string(),
+                        crate::data::CellSlot::Lead(cell) => cell.symbol().to_string(),
+                    })
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The window of a canonical row that the editor must paint: a glyph
+    /// appears only when its whole span is inside the window, so a grapheme
+    /// clipped at either edge contributes blanks.
+    fn clipped_window(
+        layout: &TextLayout,
+        row: usize,
+        document: usize,
+        start: usize,
+        viewport: usize,
+    ) -> String {
+        let mut leaders: Vec<Option<&text_layout::Item>> = vec![None; document];
+        for item in layout.row_items(row) {
+            if item.width == 0 || item.kind == ItemKind::Separator {
+                continue;
+            }
+            if item.cell + item.width > document {
+                continue;
+            }
+            if let Some(slot) = leaders.get_mut(item.cell) {
+                *slot = Some(item);
+            }
+        }
+        (start..start + viewport)
+            .map(
+                |column| match leaders.get(column).and_then(|item| item.as_ref()) {
+                    Some(item) if column + item.width <= start + viewport => {
+                        if item.symbol == "\t" {
+                            // A tab paints one blank per expanded column, and the
+                            // columns after its leading one are blank either way.
+                            " ".to_string()
+                        } else {
+                            item.symbol.clone()
+                        }
+                    }
+                    _ => " ".to_string(),
+                },
+            )
+            .collect()
+    }
+
+    #[test]
+    fn every_painted_editor_cell_matches_the_canonical_layout() {
+        // The strongest form of the column contract: whatever the layout says a
+        // row's cells are, that is exactly what the editor paints, for every
+        // value, wrap mode, and narrowly granted width.
+        let values = [
+            "a\tb",
+            "a界a",
+            "ab界c",
+            "界界",
+            "abcdef",
+            "a b",
+            "",
+            "\t",
+            "界",
+            "a\u{301}b",
+        ];
+        for wrap in [TextWrap::NoWrap, TextWrap::Soft, TextWrap::Hard] {
+            for value in values {
+                for width in 1..8usize {
+                    let surface = editor_surface(value, "", wrap);
+                    let layout = surface_layout(&surface, width, wrap);
+                    for (index, painted) in editor_rows(&surface, width, layout.row_count())
+                        .iter()
+                        .enumerate()
+                    {
+                        assert_eq!(
+                            *painted,
+                            clipped_row(&layout, index, width),
+                            "value={value:?} wrap={wrap:?} width={width} row={index}"
+                        );
+                    }
+                }
+            }
+        }
+        // The placeholder is shaped by the same engine and painted by the same
+        // column rule, so it gets the same guarantee.
+        for placeholder in ["a\tb", "a界a", "界界", "ab"] {
+            for width in 1..8usize {
+                let surface = editor_surface("", placeholder, TextWrap::Soft);
+                let layout = layout_for(placeholder, width, TextWrap::NoWrap);
+                for (index, painted) in editor_rows(&surface, width, layout.row_count())
+                    .iter()
+                    .enumerate()
+                {
+                    assert_eq!(
+                        *painted,
+                        clipped_row(&layout, index, width),
+                        "placeholder={placeholder:?} width={width} row={index}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_scrolled_editor_window_keeps_the_canonical_columns() {
+        // Scrolling must move the window, not the coordinate space: every
+        // painted column still resolves to the document cell the layout assigns
+        // it, and a grapheme straddling either window edge is blank instead of
+        // sliding its neighbours.
+        for value in ["a界bcdef", "界界界", "a\tbcdef", "ab界"] {
+            for document in [2usize, 3, 4, 6, 12] {
+                let last_start = 6.min(document);
+                for start in 0..last_start {
+                    let max_viewport = (document - start).min(4);
+                    for viewport in 1..=max_viewport {
+                        let mut surface = editor_surface(value, "", TextWrap::NoWrap);
+                        surface.scroll_x = start;
+                        let layout = surface_layout(&surface, document, TextWrap::NoWrap);
+                        for (index, painted) in editor_window_rows(
+                            &surface,
+                            document,
+                            start,
+                            viewport,
+                            layout.row_count(),
+                        )
+                        .iter()
+                        .enumerate()
+                        {
+                            assert_eq!(
+                                *painted,
+                                clipped_window(&layout, index, document, start, viewport),
+                                "value={value:?} document={document} start={start} \
+                                 viewport={viewport} row={index}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
