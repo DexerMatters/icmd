@@ -233,7 +233,6 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         state.reveal_caret = false;
         let focused = state.focused && !config.policy.disabled;
         let scroll_offset = ScrollOffset::new(state.scroll_x as u32, state.scroll_y as u32);
-        let (scroll_x, scroll_y) = (state.scroll_x, state.scroll_y);
         let surface = EditorSurface {
             value: state.model.value.clone(),
             selection: if state.model.caret().is_collapsed() {
@@ -256,12 +255,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let text = Text::from_spans(Vec::new())
             .with_style(surface_style())
             .wrap(config.wrap)
-            .editor_surface(
-                surface,
-                probe.clone(),
-                (scroll_x, scroll_y),
-                state.viewport_height,
-            );
+            .editor_surface(surface, probe.clone(), state.viewport_height);
         (scroll_offset, text)
     };
 
