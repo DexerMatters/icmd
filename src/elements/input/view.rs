@@ -105,10 +105,6 @@ struct InputState {
     scroll_x: usize,
     scroll_y: usize,
     reveal_caret: bool,
-    /// The visible viewport height the last render used, forwarded to the
-    /// commit pass so the scroll extent is measured against the viewport rather
-    /// than the document's own box.
-    viewport_height: Option<usize>,
 }
 
 /// Immutable render-time configuration, shared with event handlers.
@@ -251,11 +247,10 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
             scroll_x: state.scroll_x,
             scroll_y: state.scroll_y,
         };
-        state.viewport_height = Some(view_height);
         let text = Text::from_spans(Vec::new())
             .with_style(surface_style())
             .wrap(config.wrap)
-            .editor_surface(surface, probe.clone(), state.viewport_height);
+            .editor_surface(surface, probe.clone());
         (scroll_offset, text)
     };
 

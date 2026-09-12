@@ -106,9 +106,6 @@ pub struct Text {
     pub(crate) editor: Option<Arc<EditorSurface>>,
     /// Passive channel the commit pass publishes its layout into.
     pub(crate) probe: Option<LayoutProbe>,
-    /// The visible viewport height the parent granted the scroll host, when the
-    /// surface's own document box is taller than it.
-    pub(crate) viewport_height: Option<usize>,
 }
 
 impl fmt::Debug for Text {
@@ -153,21 +150,14 @@ impl Text {
             overflow: TextOverflow::default(),
             editor: None,
             probe: None,
-            viewport_height: None,
         }
     }
 
     /// Attach editor-only paint instructions and the probe the commit pass
     /// publishes its layout into.
-    pub(crate) fn editor_surface(
-        mut self,
-        surface: EditorSurface,
-        probe: LayoutProbe,
-        viewport_height: Option<usize>,
-    ) -> Self {
+    pub(crate) fn editor_surface(mut self, surface: EditorSurface, probe: LayoutProbe) -> Self {
         self.editor = Some(Arc::new(surface));
         self.probe = Some(probe);
-        self.viewport_height = viewport_height;
         self
     }
 
