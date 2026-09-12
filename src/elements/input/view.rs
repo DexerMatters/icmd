@@ -322,6 +322,18 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                         // wrapped rows lands where the user sees it.
                         let outcome = if let Some((direction, steps)) = vertical_steps(&action) {
                             let layout = committed_layout(&probe, &state, &config);
+                            // A page is the viewport the layout actually
+                            // painted, not the requested border box.
+                            let steps = if matches!(
+                                action,
+                                EditAction::PageUp { .. } | EditAction::PageDown { .. }
+                            ) {
+                                probe
+                                    .committed()
+                                    .map_or(steps, |committed| committed.viewport_height.max(1))
+                            } else {
+                                steps
+                            };
                             let extend = event.key.modifiers.contains(KeyModifiers::SHIFT);
                             state.model.vertical_move(
                                 &layout,

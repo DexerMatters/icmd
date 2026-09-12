@@ -176,6 +176,10 @@ where
 {
     let mut shaped = Vec::new();
     let mut text_offset = 0usize;
+    // Source offsets are global to the whole `Text`, so a multi-span value has
+    // non-overlapping ranges just like a single-span one. Each span contributes
+    // its normalized length to the running origin.
+    let mut source_origin = 0usize;
     for span in &text.spans {
         let style = merge(inherited, &span.style);
         let content = span.content.replace("\r\n", "\n").replace('\r', "\n");
@@ -183,7 +187,7 @@ where
             let (symbol, width, kind) = display_glyph(grapheme);
             let text_end = text_offset + symbol.len();
             shaped.push(ShapedGlyph {
-                source: source_index..source_index + grapheme.len(),
+                source: source_origin + source_index..source_origin + source_index + grapheme.len(),
                 text_start: text_offset,
                 text_end,
                 width,
@@ -193,6 +197,7 @@ where
             });
             text_offset = text_end;
         }
+        source_origin += content.len();
     }
     shaped
 }
@@ -1167,6 +1172,7 @@ mod parity {
 mod property_tests {
     use super::parity::normalized;
     use super::*;
+    use crate::Span;
     #[allow(unused_imports)]
     use crate::TextWrap as W;
 
@@ -1471,6 +1477,31 @@ mod property_tests {
         // Moving back up returns to row 2's column 2 and then row 1's.
         let (back, _) = layout.vertical(second, -1, preferred);
         assert_eq!(layout.row_of_source(back), 2);
+    }
+
+    /// A multi-span `Text` produces source ranges that are global and
+    /// non-overlapping, so the layout's coordinate system holds for every
+    /// caller, not only single-span editor surfaces.
+    #[test]
+    fn multi_span_source_ranges_are_global() {
+        let text = Text::from_spans([Span::new("ab"), Span::new("cd"), Span::new("ef")]);
+        let layout = layout_text(
+            &text,
+            80,
+            ComputedText::default(),
+            |parent, _| parent,
+            |style| *style,
+        );
+        let ranges: Vec<Range<usize>> = layout.items().iter().map(|i| i.source.clone()).collect();
+        assert_eq!(
+            ranges,
+            vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6],
+            "spans must not restart source offsets"
+        );
+        assert_eq!(layout.source_len(), 6);
+        // Every returned boundary is still valid and the row owns the range.
+        assert_eq!(layout.row_source_end(0), 6);
+        assert_eq!(layout.caret(4).1, 4);
     }
 
     /// Zero-sized offered geometry is clamped safely and cannot loop.
