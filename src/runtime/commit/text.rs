@@ -322,11 +322,15 @@ fn editor_raster(
     let mut rows = Vec::with_capacity(visible.height as usize);
     for row_index in row_start..row_end {
         let items: &[text_layout::Item] = layout.row_items(row_index);
-        let mut cells = vec![blank(base); rect.width as usize];
+        // Build the row as one entry per grapheme. `Image::from_rows` supplies
+        // the continuation slot for a wide cell, so a row's cell columns are the
+        // running sum of its entries' widths.
+        let mut cells: Vec<Cell> = Vec::with_capacity(rect.width as usize);
+        let mut columns = 0usize;
+        let target = rect.width.max(0) as usize;
         if showing_placeholder {
-            let mut column = 0usize;
             for item in items {
-                if item.width == 0 {
+                if item.width == 0 || columns + item.width > target {
                     continue;
                 }
                 let symbol = if item.symbol == "\t" {
@@ -334,37 +338,53 @@ fn editor_raster(
                 } else {
                     item.symbol.clone()
                 };
-                let style = if surface.focused && column == 0 {
+                let style = if surface.focused && cells.is_empty() {
                     caret_style
                 } else {
                     placeholder_style
                 };
-                let end = column.saturating_add(item.width);
-                if column < rect.width as usize
-                    && end <= rect.width as usize
-                    && let Ok(cell) = Cell::styled(
-                        style.foreground,
-                        style.background.unwrap_or(backdrop),
-                        style.attributes,
-                        symbol,
-                    )
-                {
-                    cells[column] = cell;
+                if let Ok(cell) = Cell::styled(
+                    style.foreground,
+                    style.background.unwrap_or(backdrop),
+                    style.attributes,
+                    symbol,
+                ) {
+                    columns += cell.width();
+                    cells.push(cell);
                 }
-                column = end;
             }
         } else {
-            let mut column = 0usize;
+            let mut caret_painted = false;
             for item in items {
-                if item.width == 0 {
+                if item.width == 0 || columns + item.width > target {
                     continue;
                 }
-                // A separator owns source bytes and cells but is not painted, so
-                // it advances the column without writing a cell. Skipping the
-                // advance would shift every later grapheme out of agreement with
-                // the caret and hit-testing tables.
+                // A separator owns cells but is not painted. A caret inside its
+                // run still belongs to this row, so it is drawn on the first of
+                // the separator's cells rather than lost or pushed to the row's
+                // end.
                 if item.kind == ItemKind::Separator {
-                    column = column.saturating_add(item.width);
+                    let on_caret = surface.focused
+                        && surface.caret >= item.source.start
+                        && surface.caret < item.source.end;
+                    if on_caret {
+                        caret_painted = true;
+                    }
+                    for offset in 0..item.width {
+                        let cell = if on_caret && offset == 0 {
+                            Cell::styled(
+                                caret_style.foreground,
+                                caret_style.background.unwrap_or(backdrop),
+                                caret_style.attributes,
+                                " ",
+                            )
+                            .unwrap_or_else(|_| blank(base))
+                        } else {
+                            blank(base)
+                        };
+                        cells.push(cell);
+                    }
+                    columns += item.width;
                     continue;
                 }
                 let symbol = if item.symbol == "\t" {
@@ -372,10 +392,11 @@ fn editor_raster(
                 } else {
                     item.symbol.clone()
                 };
-                let style = if surface.focused
+                let on_caret = surface.focused
                     && surface.caret >= item.source.start
-                    && surface.caret < item.source.end
-                {
+                    && surface.caret < item.source.end;
+                let style = if on_caret {
+                    caret_painted = true;
                     caret_style
                 } else if surface
                     .selection
@@ -389,19 +410,21 @@ fn editor_raster(
                 } else {
                     base
                 };
-                let end = column.saturating_add(item.width);
-                if column < rect.width as usize
-                    && end <= rect.width as usize
-                    && let Ok(cell) = Cell::styled(
-                        style.foreground,
-                        style.background.unwrap_or(backdrop),
-                        style.attributes,
-                        symbol,
-                    )
-                {
-                    cells[column] = cell;
+                match Cell::styled(
+                    style.foreground,
+                    style.background.unwrap_or(backdrop),
+                    style.attributes,
+                    symbol,
+                ) {
+                    Ok(cell) => {
+                        columns += cell.width();
+                        cells.push(cell);
+                    }
+                    Err(_) => {
+                        columns += item.width;
+                        cells.push(blank(base));
+                    }
                 }
-                column = end;
             }
             // A caret that is not sitting on a grapheme of this row is drawn as
             // a reverse blank just past the row's painted content. This covers
@@ -411,8 +434,9 @@ fn editor_raster(
             let caret_row = layout.caret(surface.caret).0;
             if surface.focused
                 && caret_row == row_index
+                && !caret_painted
                 && surface.caret >= layout.row_end(row_index)
-                && column < rect.width as usize
+                && columns < target
                 && let Ok(cell) = Cell::styled(
                     caret_style.foreground,
                     caret_style.background.unwrap_or(backdrop),
@@ -420,35 +444,34 @@ fn editor_raster(
                     " ",
                 )
             {
-                cells[column] = cell;
+                columns += cell.width();
+                cells.push(cell);
             }
         }
-        // `Image::from_rows` requires every row to occupy the same number of
-        // terminal cells. A row holding a wide grapheme can end up one cell
-        // short of the viewport even though its cell count matches, so pad by
-        // measured cell width rather than by cell count.
-        let start = col_start.min(cells.len());
-        let end = col_end.min(cells.len()).max(start);
-        let target = visible.width.max(0) as usize;
-        let mut visible_row = Vec::with_capacity(target + 1);
-        let mut painted = 0usize;
-        for cell in cells[start..end].iter() {
+        // Pad to the viewport so every row has the same cell width.
+        while columns < target {
+            cells.push(blank(base));
+            columns += 1;
+        }
+        // `col_start`/`col_end` are cell columns, so select entries by walking
+        // their widths rather than by vector index.
+        let mut visible_row = Vec::new();
+        let mut column = 0usize;
+        for cell in cells {
             let width = cell.width();
-            if painted + width > target {
-                break;
+            let end = column + width;
+            if end > col_start && column < col_end {
+                visible_row.push(cell);
             }
-            visible_row.push(cell.clone());
-            painted += width;
+            column = end;
         }
-        while painted < target {
+        while visible_row.iter().map(|cell| cell.width()).sum::<usize>() < visible.width as usize {
             visible_row.push(blank(base));
-            painted += 1;
         }
         rows.push(visible_row);
     }
     Image::from_rows(rows).ok()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1579,6 +1579,25 @@ mod property_tests {
         }
     }
 
+    #[test]
+    fn debug_wide_rows() {
+        for width in [4usize, 5] {
+            let layout = super::layout_for_test("你好世界", TextWrap::Soft, width);
+            eprintln!("width {width}: {} rows", layout.row_count());
+            for index in 0..layout.row_count() {
+                eprintln!(
+                    "  row {index} w={} items={:?}",
+                    layout.row_width(index),
+                    layout
+                        .row_items(index)
+                        .iter()
+                        .map(|i| (i.symbol.clone(), i.cell, i.width))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
     /// Zero-sized offered geometry is clamped safely and cannot loop.
     #[test]
     fn zero_width_geometry_is_clamped() {

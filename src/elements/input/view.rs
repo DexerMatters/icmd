@@ -442,13 +442,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                     let mut state = state_ref.lock().expect("input state poisoned");
                     state.focused = true;
                     let layout = committed_layout(&probe, &state, &config);
-                    let offset = hit_offset(
-                        &layout,
-                        event.local_position,
-                        probe.committed(),
-                        state.scroll_x,
-                        state.scroll_y,
-                    );
+                    let offset = hit_offset(&layout, event.local_position, probe.committed());
                     let extend = event.modifiers.contains(KeyModifiers::SHIFT);
                     state
                         .model
@@ -474,13 +468,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                     return;
                 }
                 let layout = committed_layout(&probe, &state, &config);
-                let offset = hit_offset(
-                    &layout,
-                    event.local_position,
-                    probe.committed(),
-                    state.scroll_x,
-                    state.scroll_y,
-                );
+                let offset = hit_offset(&layout, event.local_position, probe.committed());
                 state.model.reduce(
                     EditAction::PlaceCaret {
                         offset,
@@ -793,21 +781,19 @@ fn hit_offset(
     layout: &text_layout::TextLayout,
     local: crate::ScreenPosition,
     committed: Option<crate::basic::editor_surface::CommittedLayout>,
-    scroll_x: usize,
-    scroll_y: usize,
 ) -> usize {
-    // The pointer is reported in the scrolled child's own content coordinates,
-    // which already exclude the offset the committed frame painted with. The
-    // layout is indexed in unscrolled content coordinates, so that committed
-    // offset is added back exactly once. If this component has since requested
-    // a larger offset that the runtime has not painted yet, that additional
-    // delta applies on top. Padding and borders are never subtracted by hand:
-    // the event system supplies content-box coordinates.
+    // The runtime reports the pointer in the coordinates of the region it hit,
+    // which is the child as painted. That frame was laid out with exactly the
+    // committed applied offset, so adding that offset back once converts the
+    // pointer into the layout's unscrolled content coordinates. The requested
+    // offset is deliberately NOT consulted: the request and the frame that the
+    // user actually clicked on can differ, and the painted frame is the truth.
+    // Padding and borders are never subtracted by hand: the event system
+    // supplies content-box coordinates.
     let (applied_x, applied_y) = committed.as_ref().map_or((0, 0), |committed| {
         (committed.applied_x, committed.applied_y)
     });
-    let row = (local.line.max(0) as usize + applied_y.max(scroll_y))
-        .min(layout.row_count().saturating_sub(1));
-    let cell = local.column.max(0) as usize + applied_x.max(scroll_x);
+    let row = (local.line.max(0) as usize + applied_y).min(layout.row_count().saturating_sub(1));
+    let cell = local.column.max(0) as usize + applied_x;
     layout.hit(row, cell, POINTER_HIT_BIAS)
 }

@@ -1243,48 +1243,136 @@ fn a_dropped_separator_does_not_shift_later_graphemes() {
     // A separator owns cells even though it is not painted. If the painter
     // skipped it without advancing, every later grapheme on the row would be
     // drawn one cell to the left of where the caret and pointer put it.
+    let values = Arc::new(Mutex::new(Vec::new()));
     let node = raw_input
         .props(RawInputProps {
             mode: Attr::Set(RawInputMode::Multiline),
-            default_value: Attr::Set("hello world again".into()),
+            default_value: Attr::Set("ab cd efgh".into()),
+            wrap: Attr::Set(icmd::TextWrap::Soft),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
             ..RawInputProps::default()
         })
         .style(|style| {
-            style.width /= icmd::Dimension::Cells(8);
-            style.height /= icmd::Dimension::Cells(4);
+            style.width /= icmd::Dimension::Cells(6);
+            style.height /= icmd::Dimension::Cells(3);
         })
         .node();
-    let viewport = Size::new(12, 6);
+    let viewport = Size::new(10, 5);
     let (sender, output, dispatcher) = pipeline(viewport);
     sender.send(node).unwrap();
     let raw = collect_frames(&output, &dispatcher, None);
-    let painted = strip_ansi(&raw);
-    // 'world' begins the row after the dropped separator, so it is painted at
-    // the start of its row, and 'again' follows one more row down.
     assert!(
-        painted.contains("hello") && painted.contains("world") && painted.contains("again"),
-        "every word survives wrapping: {painted:?}"
+        raw.contains("\u{1b}[1;4Hcd"),
+        "the internal space occupies its cell, so 'cd' starts at column 4: {}",
+        raw.escape_debug()
     );
-    // Click the first cell of the 'world' row and type: the caret must land at
-    // that row's first boundary, not one cell into it.
-    let row = painted
-        .lines()
-        .position(|line| line.contains("world"))
-        .unwrap_or(1) as u16;
-    let column = painted
-        .lines()
-        .nth(row as usize)
-        .and_then(|line| line.chars().position(|ch| ch == 'w'))
-        .unwrap_or(0) as u16;
-    interact(&output, &dispatcher, Some(click(row, column)));
+
+    // Click the first cell of the 'efgh' row and type. A pointer lands *inside*
+    // a cell, so the caret belongs just after that cell's grapheme - the row's
+    // own second boundary, which is what makes the click position predictable.
+    interact(&output, &dispatcher, Some(click(1, 0)));
     interact(
         &output,
         &dispatcher,
         Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
     );
-    let values = collect_frames(&output, &dispatcher, None);
+    let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
+    assert_eq!(
+        emitted, "ab cd e#fgh",
+        "a click on the wrapped row places the caret after exactly one grapheme, \
+         so no later character is shifted"
+    );
+}
+
+#[test]
+fn wide_graphemes_do_not_truncate_or_shift_their_row() {
+    // A CJK grapheme occupies two terminal cells. It must paint both, and it
+    // must not leave a stray blank that shifts or truncates the rest of the row.
+    for (value, width) in [("你好世界", 4u16), ("界a", 4), ("a界b", 4)] {
+        let node = raw_input
+            .props(RawInputProps {
+                mode: Attr::Set(RawInputMode::Multiline),
+                default_value: Attr::Set(value.into()),
+                wrap: Attr::Set(icmd::TextWrap::Soft),
+                ..RawInputProps::default()
+            })
+            .style(|style| {
+                style.width /= icmd::Dimension::Cells(width);
+                style.height /= icmd::Dimension::Cells(3);
+            })
+            .node();
+        let viewport = Size::new(width + 4, 5);
+        let (sender, output, dispatcher) = pipeline(viewport);
+        sender.send(node).unwrap();
+        let raw = collect_frames(&output, &dispatcher, None);
+        let painted = strip_ansi(&raw);
+        for ch in value.chars() {
+            assert!(
+                painted.contains(ch),
+                "{value:?} at width {width}: {ch:?} must be painted: {painted:?}"
+            );
+        }
+    }
+
+    // A grapheme after a wide one must be addressed at the column the layout's
+    // caret/hit tables use: 'a' follows two cells of '界', so it starts at
+    // terminal column 3 (one-based), never column 2.
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("界a".into()),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(6))
+        .node();
+    let viewport = Size::new(10, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    let raw = collect_frames(&output, &dispatcher, None);
     assert!(
-        !values.is_empty() || true,
-        "interaction completes without a panic"
+        raw.contains("\u{1b}[1;3Ha") || raw.contains("界a"),
+        "'a' must follow the wide grapheme's two cells: {}",
+        raw.escape_debug()
+    );
+    assert!(
+        !raw.contains("\u{1b}[1;2Ha"),
+        "'a' must never be painted over the wide grapheme's continuation cell: {}",
+        raw.escape_debug()
+    );
+}
+
+#[test]
+fn a_caret_inside_a_dropped_separator_is_still_painted() {
+    // The caret can sit on the whitespace that a soft wrap dropped. That
+    // position still belongs to the row, so a focused caret must be visible.
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("ab cd efgh".into()),
+            wrap: Attr::Set(icmd::TextWrap::Soft),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(6);
+            style.height /= icmd::Dimension::Cells(3);
+        })
+        .node();
+    let viewport = Size::new(10, 5);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    // Click the row that ends at the dropped separator, then press End so the
+    // caret sits on that separator's source byte.
+    interact(&output, &dispatcher, Some(click(0, 3)));
+    let raw = collect_frames(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+    assert!(
+        has_reverse_cell(&raw),
+        "a caret on dropped whitespace must still paint: {:?}",
+        strip_ansi(&raw)
     );
 }

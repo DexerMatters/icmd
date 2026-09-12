@@ -306,13 +306,17 @@ impl EditModel {
         match controlled {
             Some(controlled) => {
                 // The owner is authoritative at every render. The render
-                // revision says whether a draft was produced from the render
-                // this one supersedes; the draft is accepted only when the
-                // owner republished exactly what was emitted. There is no
-                // grace period and no comparison against historical strings
-                // beyond that single acceptance test.
+                // revision decides causality: a draft produced during the render
+                // this one supersedes has been observable to the owner, whereas
+                // a draft produced during this very render has not. Acceptance
+                // is exactly "the owner republished what we emitted"; every
+                // other value is rejection or external replacement. No other
+                // comparison against historical strings participates.
                 let draft = self.draft.take();
-                if let Some(draft) = draft {
+                let answered = draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.from_revision < revision);
+                if let Some(draft) = draft.filter(|_| answered) {
                     if draft.value == controlled {
                         // Acceptance: keep the selection that produced it.
                         self.value = controlled;
@@ -324,6 +328,8 @@ impl EditModel {
                         self.caret = self.snap_caret(self.caret);
                     }
                 } else {
+                    // No draft, or one produced during this render and therefore
+                    // not yet answerable: the owner's value simply wins.
                     self.value = controlled;
                     self.caret = self.snap_caret(self.caret);
                 }
@@ -1245,6 +1251,40 @@ mod tests {
         // Local ownership resumes.
         let outcome = insert(&mut model, "!", false);
         assert_eq!(outcome.value.as_deref(), Some("owner!"));
+    }
+
+    #[test]
+    fn the_render_revision_decides_whether_a_draft_was_answerable() {
+        // A draft records the render it was produced from. Only a later render
+        // can have been the owner's response to it, so the caret snapshot is
+        // restored on that render and never on the render that produced it.
+        let mut model = controlled("a", false);
+        model.reduce(
+            EditAction::PlaceCaret {
+                offset: 1,
+                extend: false,
+            },
+            policy(false),
+        );
+        assert_eq!(insert(&mut model, "b", false).value.as_deref(), Some("ab"));
+
+        // The owner republishes the emitted value at the NEXT render: accepted,
+        // and the selection that produced the draft is restored.
+        let outcome = model.render(Some("ab"), None, false);
+        assert_eq!(outcome, Outcome::Unchanged);
+        assert_eq!(model.caret().cursor, 2);
+
+        // The owner then replaces the value entirely: no draft is open, so this
+        // is a plain replacement rather than an acceptance, and the selection is
+        // clamped into the new value rather than restored from a snapshot.
+        model.render(Some("xyz"), None, false);
+        assert_eq!(model.value(), "xyz");
+        assert_eq!(
+            model.caret().cursor,
+            2,
+            "the selection is clamped into the replacement, not reset"
+        );
+        assert!(model.caret().cursor <= model.len());
     }
 
     #[test]
