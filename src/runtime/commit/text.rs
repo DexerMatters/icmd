@@ -283,9 +283,9 @@ fn editor_raster(
             .unwrap_or((surface.scroll_x, surface.scroll_y));
         probe.publish(CommittedLayout {
             layout: std::sync::Arc::new(layout.clone()),
-            width: rect.width.max(0) as usize,
             // The visible viewport is the region the scroll host can actually
-            // paint, which may be shorter than the surface's document box.
+            // paint, which may be smaller than the surface's document box.
+            viewport_width: visible.width.max(1) as usize,
             viewport_height: visible.height.max(1) as usize,
             applied_x,
             applied_y,

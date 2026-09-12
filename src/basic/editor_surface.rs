@@ -47,11 +47,11 @@ pub(crate) struct EditorSurface {
 #[derive(Debug, Clone)]
 pub(crate) struct CommittedLayout {
     pub(crate) layout: Arc<TextLayout>,
-    /// The content width the layout was built for.
-    pub(crate) width: usize,
-    /// The visible viewport height the scroll host could actually paint. This
-    /// drives the caret reveal and the scroll extent, so a document taller than
-    /// its viewport scrolls instead of being clamped away.
+    /// The visible viewport the scroll host could actually paint. Caret reveal
+    /// and scroll extent use this rather than the surface's own document box,
+    /// so a parent that constrains the host cannot put the caret outside the
+    /// viewport.
+    pub(crate) viewport_width: usize,
     pub(crate) viewport_height: usize,
     /// The scroll offsets this frame was laid out with.
     pub(crate) applied_x: usize,

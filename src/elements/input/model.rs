@@ -1145,6 +1145,27 @@ mod tests {
     }
 
     #[test]
+    fn acceptance_then_extension_keeps_the_caret() {
+        let mut model = controlled("a", false);
+        // Click places the caret after 'a'.
+        model.reduce(
+            EditAction::PlaceCaret {
+                offset: 1,
+                extend: false,
+            },
+            policy(false),
+        );
+        assert_eq!(insert(&mut model, "x", false).value.as_deref(), Some("ax"));
+        assert_eq!(model.caret().cursor, 2);
+        // The owner accepts by republishing exactly the draft.
+        model.render(Some("ax"), None, false);
+        assert_eq!(model.value(), "ax");
+        assert_eq!(model.caret().cursor, 2, "acceptance restores the caret");
+        // The next keystroke extends the accepted value.
+        assert_eq!(insert(&mut model, "y", false).value.as_deref(), Some("axy"));
+    }
+
+    #[test]
     fn controlled_external_replacement_discards_the_draft() {
         let mut model = controlled("a", false);
         insert(&mut model, "b", false);

@@ -214,10 +214,10 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         // the commit pass actually painted.
         let committed = probe.committed();
         let (view_width, view_height) = match &committed {
-            Some(committed) if config.multiline => {
-                (committed.width.max(1), committed.viewport_height.max(1))
-            }
-            Some(committed) => (config.width.max(1), committed.viewport_height.max(1)),
+            Some(committed) => (
+                committed.viewport_width.max(1),
+                committed.viewport_height.max(1),
+            ),
             None => (config.width.max(1), config.height.max(1)),
         };
         let layout = build_layout_at(&state.model.value, &config, view_width);
