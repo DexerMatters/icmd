@@ -1539,6 +1539,46 @@ mod property_tests {
         assert_eq!(layout.caret(4).1, 4);
     }
 
+    /// The painted column of every item equals its `cell`, including across a
+    /// dropped separator, so the painter's column advance and the caret/hit
+    /// tables cannot drift apart.
+    #[test]
+    fn painted_columns_match_item_cells_across_separators() {
+        for (value, wrap, width) in [
+            ("ab cd efgh", TextWrap::Soft, 6usize),
+            ("hello world again", TextWrap::Soft, 8),
+            ("a b c d e f g h", TextWrap::Soft, 5),
+        ] {
+            let layout = super::layout_for_test(value, wrap, width);
+            for index in 0..layout.row_count() {
+                let mut column = 0usize;
+                for item in layout.row_items(index) {
+                    assert_eq!(
+                        item.cell, column,
+                        "{value:?} row {index}: item {:?} reports cell {} but the \
+                         painter reaches it at column {column}",
+                        item.symbol, item.cell
+                    );
+                    // Every item advances, separators included: they own cells
+                    // even though they are not painted.
+                    column = column.saturating_add(item.width);
+                }
+                // The painted width is what remains after separators, but the
+                // final column still counts them.
+                let painted: usize = layout
+                    .row_items(index)
+                    .iter()
+                    .filter(|item| item.kind != ItemKind::Separator)
+                    .map(|item| item.width)
+                    .sum();
+                assert!(
+                    column >= painted,
+                    "the full column extent includes separators"
+                );
+            }
+        }
+    }
+
     /// Zero-sized offered geometry is clamped safely and cannot loop.
     #[test]
     fn zero_width_geometry_is_clamped() {

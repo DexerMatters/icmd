@@ -353,7 +353,15 @@ fn editor_raster(
         } else {
             let mut column = 0usize;
             for item in items {
-                if item.kind == ItemKind::Separator || item.width == 0 {
+                if item.width == 0 {
+                    continue;
+                }
+                // A separator owns source bytes and cells but is not painted, so
+                // it advances the column without writing a cell. Skipping the
+                // advance would shift every later grapheme out of agreement with
+                // the caret and hit-testing tables.
+                if item.kind == ItemKind::Separator {
+                    column = column.saturating_add(item.width);
                     continue;
                 }
                 let symbol = if item.symbol == "\t" {

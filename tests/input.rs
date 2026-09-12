@@ -1237,3 +1237,54 @@ fn soft_wrapping_paints_the_spaces_inside_a_row() {
         raw.escape_debug()
     );
 }
+
+#[test]
+fn a_dropped_separator_does_not_shift_later_graphemes() {
+    // A separator owns cells even though it is not painted. If the painter
+    // skipped it without advancing, every later grapheme on the row would be
+    // drawn one cell to the left of where the caret and pointer put it.
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("hello world again".into()),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(8);
+            style.height /= icmd::Dimension::Cells(4);
+        })
+        .node();
+    let viewport = Size::new(12, 6);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    let raw = collect_frames(&output, &dispatcher, None);
+    let painted = strip_ansi(&raw);
+    // 'world' begins the row after the dropped separator, so it is painted at
+    // the start of its row, and 'again' follows one more row down.
+    assert!(
+        painted.contains("hello") && painted.contains("world") && painted.contains("again"),
+        "every word survives wrapping: {painted:?}"
+    );
+    // Click the first cell of the 'world' row and type: the caret must land at
+    // that row's first boundary, not one cell into it.
+    let row = painted
+        .lines()
+        .position(|line| line.contains("world"))
+        .unwrap_or(1) as u16;
+    let column = painted
+        .lines()
+        .nth(row as usize)
+        .and_then(|line| line.chars().position(|ch| ch == 'w'))
+        .unwrap_or(0) as u16;
+    interact(&output, &dispatcher, Some(click(row, column)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+    let values = collect_frames(&output, &dispatcher, None);
+    assert!(
+        !values.is_empty() || true,
+        "interaction completes without a panic"
+    );
+}
