@@ -1926,3 +1926,37 @@ fn a_caret_on_a_clipped_grapheme_still_paints() {
         strip_ansi(&last)
     );
 }
+
+#[test]
+fn a_caret_on_a_viewport_clipped_wide_grapheme_still_paints() {
+    // Single-line NoWrap "a界b" in a two-cell box: the surface is four cells
+    // wide and the window shows two, so 界 straddles the right edge and is
+    // painted as a blank. The caret the layout places on it must stay visible on
+    // the part of its span the window shows.
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::SingleLine),
+            default_value: Attr::Set("a界b".into()),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(2);
+            style.height /= icmd::Dimension::Cells(1);
+        })
+        .node();
+    let viewport = Size::new(6, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    // Settle the first frame, then click the wide grapheme at document cell 1.
+    while output.recv_timeout(Duration::from_millis(150)).is_ok() {}
+    dispatcher.dispatch(click(0, 1));
+    let mut last = String::new();
+    while let Ok(frame) = output.recv_timeout(Duration::from_millis(150)) {
+        last = frame.unwrap();
+    }
+    assert!(
+        has_reverse_cell(&last),
+        "the caret on the window-clipped wide grapheme must stay visible: {:?}",
+        strip_ansi(&last)
+    );
+}

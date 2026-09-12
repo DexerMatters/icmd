@@ -328,10 +328,18 @@ fn editor_raster(
         let mut cells: Vec<Cell> = Vec::with_capacity(rect.width as usize);
         let mut columns = 0usize;
         let target = rect.width.max(0) as usize;
+        // Where the caret style was applied, in document columns. The grid below
+        // rewrites a multi-cell glyph the window clips into a plain blank, which
+        // would drop the style; this span lets the windowing pass tell whether
+        // the user can actually see a caret and repaint it at the visible part
+        // of its span if not.
+        let mut caret_span: Option<(usize, usize)> = None;
+        let caret_row_matches;
         if showing_placeholder {
             // A focused empty control draws its caret on the placeholder's own
             // insertion point, which is the first cell of its first row.
             let caret_here = surface.focused && row_index == 0;
+            caret_row_matches = caret_here;
             let mut caret_painted = false;
             for item in items {
                 if item.width == 0 {
@@ -358,6 +366,7 @@ fn editor_raster(
                 };
                 let style = if caret_here && !caret_painted {
                     caret_painted = true;
+                    caret_span = Some((item.cell, item.width));
                     caret_style
                 } else {
                     placeholder_style
@@ -407,6 +416,7 @@ fn editor_raster(
             {
                 columns += cell.width();
                 cells.push(cell);
+                caret_span = Some((0, 1));
             }
         } else {
             let mut caret_painted = false;
@@ -434,6 +444,7 @@ fn editor_raster(
                         && surface.caret < item.source.end;
                     if on_caret {
                         caret_painted = true;
+                        caret_span = Some((item.cell, 1));
                     }
                     for offset in 0..item.width {
                         let cell = if on_caret && offset == 0 {
@@ -462,6 +473,7 @@ fn editor_raster(
                     && surface.caret < item.source.end;
                 let style = if on_caret {
                     caret_painted = true;
+                    caret_span = Some((item.cell, item.width));
                     caret_style
                 } else if surface
                     .selection
@@ -513,7 +525,8 @@ fn editor_raster(
             // was already reversed above, so painting a second marker would show
             // two carets.
             let (caret_row, caret_cell, _) = layout.caret(surface.caret);
-            if surface.focused && caret_row == row_index && !caret_painted {
+            caret_row_matches = surface.focused && caret_row == row_index;
+            if caret_row_matches && !caret_painted {
                 while columns < caret_cell.min(target) {
                     cells.push(blank(base));
                     columns += 1;
@@ -528,6 +541,7 @@ fn editor_raster(
                 {
                     columns += cell.width();
                     cells.push(cell);
+                    caret_span = Some((caret_cell, 1));
                 }
             }
         }
@@ -577,6 +591,26 @@ fn editor_raster(
                 };
             }
             column = end;
+        }
+        // A caret whose span the window only partly shows lost its style in the
+        // rewrite above: the glyph became a plain blank. The caret is a
+        // coordinate, so it must stay visible on the part of its span the window
+        // does show. A span that is wholly visible needs nothing here, because
+        // the glyph or the fallback blank already carried the style, and
+        // repainting would show two carets. Replacing a slot keeps the row width
+        // unchanged: a partially visible cell only ever fills its slots with
+        // single-cell blanks, and an empty slot would have been padded anyway.
+        if caret_row_matches && let Some((cell, width)) = caret_span {
+            let end = cell.saturating_add(width.max(1));
+            if !(cell >= col_start && end <= col_end) {
+                let first = cell.max(col_start);
+                if first < end.min(col_end) {
+                    let at = first - col_start;
+                    if let Some(slot) = grid.get_mut(at) {
+                        *slot = Slot::Glyph(blank(caret_style));
+                    }
+                }
+            }
         }
         // A glyph's continuation is not a separate cell entry: `from_rows`
         // creates it from the glyph's width. Emitting one blank per slot would
@@ -1075,6 +1109,81 @@ mod tests {
                             painted, expected,
                             "value={value:?} wrap={wrap:?} width={width} offset={offset}"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every `(row, window column)` covered by caret styling when the editor's
+    /// own box is `document` cells wide and the window shows `viewport` cells
+    /// starting at `start`.
+    fn window_caret_cells(
+        surface: &EditorSurface,
+        document: usize,
+        start: usize,
+        viewport: usize,
+        height: usize,
+    ) -> Vec<(usize, usize)> {
+        let text = Text::new("").wrap(surface.wrap);
+        let rect = RectI::new(0, 0, document as i32, height as i32);
+        let visible = RectI::new(0, start as i32, viewport as i32, height as i32);
+        let image = editor_raster(&text, surface, rect, visible, Color::Reset).expect("raster");
+        let mut found = Vec::new();
+        for row in 0..image.height() {
+            for column in 0..image.width() {
+                if image.cell_at(row, column).cell().background() == Color::Magenta {
+                    found.push((row, column));
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_caret_windowed_by_the_viewport_stays_visible() {
+        // The surface's own box can be wider than the window the scroll host
+        // shows. A caret on a wide grapheme straddling a window edge must be
+        // painted on the part of its span the window shows, instead of vanishing
+        // with the blank that replaced the clipped glyph.
+        for value in ["a界b", "界界", "x界y界z"] {
+            for wrap in [TextWrap::NoWrap, TextWrap::Soft, TextWrap::Hard] {
+                for document in 2..8usize {
+                    let layout = surface_layout(&editor_surface(value, "", wrap), document, wrap);
+                    for offset in 0..=value.len() {
+                        if !value.is_char_boundary(offset) {
+                            continue;
+                        }
+                        let (row, cell, width) = layout.caret(offset);
+                        let end = cell + width;
+                        for viewport in 1..=document {
+                            for start in 0..=(document - viewport) {
+                                let surface = focused_surface(value, "", wrap, offset);
+                                let painted = window_caret_cells(
+                                    &surface,
+                                    document,
+                                    start,
+                                    viewport,
+                                    layout.row_count(),
+                                );
+                                let first = cell.max(start);
+                                let last = end.min(start + viewport);
+                                let expected: Vec<(usize, usize)> = if first >= last {
+                                    Vec::new()
+                                } else if cell >= start && end <= start + viewport {
+                                    (first..last).map(|column| (row, column - start)).collect()
+                                } else {
+                                    // Only the leading visible column survives the
+                                    // clipping.
+                                    vec![(row, first - start)]
+                                };
+                                assert_eq!(
+                                    painted, expected,
+                                    "value={value:?} wrap={wrap:?} document={document} \
+                                     start={start} viewport={viewport} offset={offset}"
+                                );
+                            }
+                        }
                     }
                 }
             }
