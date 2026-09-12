@@ -1594,3 +1594,63 @@ fn a_wide_grapheme_straddling_the_left_edge_keeps_later_cells_in_place() {
         "the click must place a usable caret: {emitted:?}"
     );
 }
+
+#[test]
+fn a_disabled_horizontal_axis_never_requests_a_horizontal_offset() {
+    // Wrapped multiline scrolls only vertically, so the editor must not ask for
+    // a horizontal offset the runtime will refuse. If it does, the offset the
+    // probe records and the offset the frame applies disagree, and pointer
+    // clicks land in the wrong cell.
+    //
+    // The viewport is one cell narrower than the two-cell grapheme so a request
+    // for horizontal panning would be tempting; it must still not happen.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("x界y".into()),
+            wrap: Attr::Set(icmd::TextWrap::Soft),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(2);
+            style.height /= icmd::Dimension::Cells(3);
+        })
+        .node();
+    let viewport = Size::new(8, 5);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 0)));
+    let mut rows = collect_frames(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Down, KeyModifiers::empty())),
+    );
+    rows.push_str(&collect_frames(&output, &dispatcher, None));
+    let painted = strip_ansi(&rows);
+    assert!(
+        painted.contains('界') || painted.contains('y'),
+        "the second row must paint its content: {painted:?}"
+    );
+
+    interact(&output, &dispatcher, Some(click(1, 0)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+    let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
+    // The click lands on the left half of the two-cell grapheme that starts row
+    // 1, so the caret belongs just before it: "x#界y". What matters is that the
+    // caret is at the wide grapheme's own boundary and that row 1's content is
+    // intact.
+    assert_eq!(
+        emitted, "x#界y",
+        "a click on row 1's first cell places the caret at that row's leading \
+         boundary"
+    );
+}

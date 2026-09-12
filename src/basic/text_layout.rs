@@ -623,13 +623,18 @@ impl TextLayout {
         let row = row.min(self.rows.len().saturating_sub(1));
         let mut offset = 0usize;
         for item in self.row_items(row) {
+            // Never resolve outside the row that was hit: a boundary shared with
+            // the previous row (the leading edge of this row's first grapheme)
+            // would otherwise place a caret on the wrong visual line.
+            let clamp_to_row =
+                |offset: usize| offset.clamp(self.row_start(row), self.row_last_boundary(row));
             if item.kind == ItemKind::Newline {
                 return item.source.start;
             }
             let end = offset.saturating_add(item.width);
             if item.width > 0 && cell < end {
                 let right_half = (cell - offset) * 2 >= item.width;
-                return match bias {
+                return clamp_to_row(match bias {
                     HitBias::Leading => {
                         if item.width > 1 && right_half {
                             item.source.end
@@ -644,7 +649,7 @@ impl TextLayout {
                             item.source.end
                         }
                     }
-                };
+                });
             }
             offset = end;
         }
