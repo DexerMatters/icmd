@@ -3,6 +3,69 @@
 //! This module owns text-entry behavior. `raw_input` is the single primitive;
 //! `input` and `textarea` are thin policy/theme wrappers over it. Neither
 //! wrapper holds edit state, geometry helpers, or internal event handling.
+//!
+//! # Value ownership
+//!
+//! `value` means *controlled* and `default_value` is read exactly once when the
+//! control is uncontrolled. Supplying both is permitted, and `value` wins.
+//!
+//! A controlled field follows an explicit, revision-based contract with no
+//! value-comparison heuristics:
+//!
+//! 1. At every render the supplied `value` is authoritative. The component
+//!    normalizes it and records a new render revision.
+//! 2. Every input event dispatched before the next render reduces against one
+//!    optimistic draft, so rapid or repeated keystrokes accumulate without
+//!    waiting for the owner.
+//! 3. At the next render, if the supplied value equals the emitted draft the
+//!    draft's selection is restored (*acceptance*). Otherwise the selection is
+//!    clamped into the supplied value (*rejection* or external replacement).
+//! 4. Switching from uncontrolled to controlled adopts `value`; switching back
+//!    retains the last authoritative rendered value and resumes local
+//!    ownership.
+//!
+//! The owner therefore has final authority at every render, and rejection is
+//! predictable rather than inferred.
+//!
+//! # Normalization, Unicode, and length
+//!
+//! Single-line mode maps CR, LF, and tab to spaces and discards other control
+//! characters. Multiline mode canonicalizes CRLF/CR to LF, keeps newlines and
+//! tabs, and discards other control characters. `max_length` counts extended
+//! grapheme clusters in the normalized value *after* the current selection is
+//! replaced, so a combining mark that merges with its base is measured in
+//! context.
+//!
+//! Layout, wrapping, caret placement, and pointer hit-testing all use extended
+//! grapheme clusters and terminal cells; source byte offsets are UTF-8 offsets
+//! that are always valid grapheme boundaries. Wide graphemes split at their
+//! halfway cell for pointer hits, and a width-two grapheme in a one-cell
+//! viewport keeps its leading boundary visible rather than scrolling into a
+//! continuation cell.
+//!
+//! # Extension and styling
+//!
+//! Extension means wrapping `raw_input` in an ordinary function component and
+//! forwarding props, style, and events; there is no subclassing and no private
+//! API. Children passed to `raw_input` are **ignored**, because arbitrary nodes
+//! cannot be mapped to source positions.
+//!
+//! Sizing has exactly one owner: `props.dom.style`. Style dimensions are
+//! border-box dimensions, and caller style overrides component defaults field
+//! by field. Internal handlers and caller observers share one event slot: the
+//! editor reduces state first and the caller's observer then runs on the same
+//! host. Keys the editor handles stop propagation so ancestors do not also act
+//! on them; unrecognized keys continue to ancestors.
+//!
+//! Focus is the standard `DomProps.events.focus_event`; there is no separate
+//! input-specific focus callback.
+//!
+//! # Not supported
+//!
+//! Undo/redo history, validation, form integration, IME composition, terminal
+//! clipboard ownership, password masking, and platform-specific shortcut
+//! remapping are out of scope. The edit model leaves room for them without
+//! claiming support.
 
 pub(crate) mod model;
 pub(crate) mod view;

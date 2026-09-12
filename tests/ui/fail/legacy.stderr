@@ -1,0 +1,19 @@
+error[E0432]: unresolved imports `icmd::TextAreaProps`, `icmd::TextEditHandler`, `icmd::text_area`
+ --> tests/ui/fail/legacy.rs:2:12
+  |
+2 | use icmd::{TextAreaProps, TextEditHandler, text_area};
+  |            ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^ no `text_area` in the root
+  |            |              |
+  |            |              no `TextEditHandler` in the root
+  |            no `TextAreaProps` in the root
+  |
+help: a similar name exists in the module
+  |
+2 - use icmd::{TextAreaProps, TextEditHandler, text_area};
+2 + use icmd::{TextareaProps, TextEditHandler, text_area};
+  |
+help: a similar name exists in the module
+  |
+2 - use icmd::{TextAreaProps, TextEditHandler, text_area};
+2 + use icmd::{TextAreaProps, TextEditHandler, textarea};
+  |

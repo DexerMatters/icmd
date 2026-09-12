@@ -12,8 +12,8 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use icmd::{
-    Attr, Commit, Component, EventDispatcher, EventListener, Lower, Node, RawInputMode,
-    RawInputProps, Renderer, Runtime, Size, TextValueEvent, raw_input,
+    Attr, Commit, Component, ComponentContext, EventDispatcher, EventListener, Lower, Node, Props,
+    RawInputMode, RawInputProps, Renderer, Runtime, Size, TextValueEvent, raw_input,
 };
 
 fn pipeline(
@@ -371,5 +371,144 @@ fn themed_textarea_wraps_and_edits() {
             .any(|value| value.contains('z')),
         "the themed textarea must route through raw_input: {:?}",
         values.lock().unwrap()
+    );
+}
+
+#[test]
+fn a_custom_component_extends_raw_input_without_private_apis() {
+    // The plan's extension story: a user component wraps `raw_input`, forwards
+    // value/events, and adjusts style. It observes pointer events on the same
+    // host that runs the editor's internal handling.
+    #[derive(Clone, Default)]
+    struct CommandFieldProps {
+        value: Attr<String>,
+        on_change: Attr<EventListener<TextValueEvent>>,
+        pointer_hits: Arc<Mutex<usize>>,
+    }
+
+    fn command_field(cx: &mut ComponentContext, props: &Props<CommandFieldProps>) -> Node {
+        let _ = cx;
+        let hits = props.pointer_hits.clone();
+        raw_input
+            .props(RawInputProps {
+                mode: Attr::Set(RawInputMode::SingleLine),
+                value: props.value.clone(),
+                on_change: props.on_change.clone(),
+                ..RawInputProps::default()
+            })
+            .events(move |handlers: &mut icmd::EventHandlers| {
+                handlers.pointer_down = Attr::Set(EventListener::new(move |_event| {
+                    *hits.lock().unwrap() += 1;
+                }));
+            })
+            .style(|style| style.width /= icmd::Dimension::Cells(10))
+            .node()
+    }
+
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let hits = Arc::new(Mutex::new(0usize));
+    let node = command_field
+        .props(CommandFieldProps {
+            value: Attr::Set("go".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            pointer_hits: hits.clone(),
+        })
+        .node();
+    let viewport = Size::new(16, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 2)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('!'), KeyModifiers::empty())),
+    );
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("go!"),
+        "the wrapper must receive the edited value"
+    );
+    assert_eq!(
+        *hits.lock().unwrap(),
+        1,
+        "the caller pointer observer must run on the raw host"
+    );
+}
+
+#[test]
+fn controlled_raw_input_accepts_and_rejects_deterministically() {
+    // The owner is authoritative at every render: an echo of the emitted value
+    // is acceptance; any other value replaces the field.
+    #[derive(Clone, Default)]
+    struct OwnerProps {
+        values: Arc<Mutex<Vec<String>>>,
+        accept: Arc<Mutex<bool>>,
+    }
+
+    fn owner(cx: &mut ComponentContext, props: &Props<OwnerProps>) -> Node {
+        let (value, set_value) = cx.use_state(|| "a".to_string());
+        let values = props.values.clone();
+        let accept = props.accept.clone();
+        raw_input
+            .props(RawInputProps {
+                value: Attr::Set(value),
+                on_change: Attr::Set(EventListener::new(move |event: TextValueEvent| {
+                    values.lock().unwrap().push(event.value.clone());
+                    if *accept.lock().unwrap() {
+                        set_value.set(event.value);
+                    }
+                })),
+                ..RawInputProps::default()
+            })
+            .style(|style| style.width /= icmd::Dimension::Cells(8))
+            .node()
+    }
+
+    // Acceptance keeps editing usable.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = owner
+        .props(OwnerProps {
+            values: values.clone(),
+            accept: Arc::new(Mutex::new(true)),
+        })
+        .node();
+    let viewport = Size::new(12, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 2)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('b'), KeyModifiers::empty())),
+    );
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("ab"),
+        "an accepting owner receives the draft"
+    );
+
+    // Rejection restores the authoritative value at the next render.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = owner
+        .props(OwnerProps {
+            values: values.clone(),
+            accept: Arc::new(Mutex::new(false)),
+        })
+        .node();
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 2)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('c'), KeyModifiers::empty())),
+    );
+    assert_eq!(
+        values.lock().unwrap().as_slice(),
+        &["ac".to_string()],
+        "a rejecting owner still observes the draft it ignores"
     );
 }
