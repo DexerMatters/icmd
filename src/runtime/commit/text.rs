@@ -62,12 +62,16 @@ fn editor_measure(
     // box does not collapse to zero cells. An empty placeholder still occupies
     // one cell, which is the caret.
     if surface.value.is_empty() {
-        let width = if surface.placeholder.is_empty() {
-            1
-        } else {
-            placeholder_width(&surface.placeholder)
-        };
-        return (width as i32, 1);
+        // An empty control sizes to its placeholder so the hint is visible and
+        // the box does not collapse to zero cells. An empty placeholder still
+        // occupies one cell, which is the caret. The placeholder is shaped by
+        // the same engine as the value, so tabs and wide graphemes measure
+        // identically in both.
+        if surface.placeholder.is_empty() {
+            return (1, 1);
+        }
+        let layout = layout_for(&surface.placeholder, usize::MAX / 4, TextWrap::NoWrap);
+        return (layout.max_row_width() as i32, layout.row_count() as i32);
     }
     let natural = surface_layout(surface, usize::MAX / 4, wrap);
     // The document height is whatever the value wraps to. A parent that grants
@@ -92,27 +96,20 @@ fn editor_measure(
     }
 }
 
-fn placeholder_width(placeholder: &str) -> usize {
-    unicode_segmentation::UnicodeSegmentation::graphemes(placeholder, true)
-        .map(|grapheme| {
-            if grapheme == "\t" {
-                4
-            } else {
-                unicode_width::UnicodeWidthStr::width(grapheme).max(1)
-            }
-        })
-        .sum()
-}
-
-/// Build the canonical layout of an editor surface at a content width.
-pub(super) fn surface_layout(surface: &EditorSurface, width: usize, wrap: TextWrap) -> TextLayout {
+/// The canonical layout of an arbitrary string at a content width.
+fn layout_for(value: &str, width: usize, wrap: TextWrap) -> TextLayout {
     text_layout::layout_text(
-        &Text::new(surface.value.as_str()).wrap(wrap),
+        &Text::new(value).wrap(wrap),
         width.max(1),
         ComputedText::default(),
         |parent, _| parent,
         |style| *style,
     )
+}
+
+/// Build the canonical layout of an editor surface at a content width.
+pub(super) fn surface_layout(surface: &EditorSurface, width: usize, wrap: TextWrap) -> TextLayout {
+    layout_for(&surface.value, width, wrap)
 }
 
 pub(super) fn raster_text(
@@ -265,7 +262,18 @@ fn editor_raster(
     backdrop: Color,
 ) -> Option<Image> {
     let wrap = text.wrap;
-    let layout = surface_layout(surface, rect.width.max(1) as usize, wrap);
+    // An empty control paints its placeholder through the same canonical
+    // engine as a value, so tab stops and wide graphemes agree.
+    let showing_placeholder = surface.value.is_empty() && !surface.placeholder.is_empty();
+    let layout = if showing_placeholder {
+        layout_for(
+            &surface.placeholder,
+            rect.width.max(1) as usize,
+            TextWrap::NoWrap,
+        )
+    } else {
+        surface_layout(surface, rect.width.max(1) as usize, wrap)
+    };
     if let Some(probe) = &text.probe {
         // The offsets the paint path actually shifted the surface by: the
         // runtime clamps the requested offset to the real extent, so publishing
@@ -312,31 +320,35 @@ fn editor_raster(
     for row_index in row_start..row_end {
         let items: &[text_layout::Item] = layout.row_items(row_index);
         let mut cells = vec![blank(base); rect.width as usize];
-        if surface.value.is_empty() {
-            if row_index == 0 {
-                let mut column = 0usize;
-                for grapheme in unicode_segmentation::UnicodeSegmentation::graphemes(
-                    surface.placeholder.as_str(),
-                    true,
-                ) {
-                    if column >= rect.width as usize {
-                        break;
-                    }
-                    let style = if surface.focused && column == 0 {
-                        caret_style
-                    } else {
-                        placeholder_style
-                    };
-                    if let Ok(cell) = Cell::styled(
+        if showing_placeholder {
+            let mut column = 0usize;
+            for item in items {
+                if item.width == 0 {
+                    continue;
+                }
+                let symbol = if item.symbol == "\t" {
+                    " ".repeat(item.width)
+                } else {
+                    item.symbol.clone()
+                };
+                let style = if surface.focused && column == 0 {
+                    caret_style
+                } else {
+                    placeholder_style
+                };
+                let end = column.saturating_add(item.width);
+                if column < rect.width as usize
+                    && end <= rect.width as usize
+                    && let Ok(cell) = Cell::styled(
                         style.foreground,
                         style.background.unwrap_or(backdrop),
                         style.attributes,
-                        grapheme,
-                    ) {
-                        cells[column] = cell;
-                    }
-                    column = column.saturating_add(grapheme_width(grapheme));
+                        symbol,
+                    )
+                {
+                    cells[column] = cell;
                 }
+                column = end;
             }
         } else {
             let mut column = 0usize;
@@ -417,14 +429,6 @@ fn editor_raster(
         rows.push(visible_row);
     }
     Image::from_rows(rows).ok()
-}
-
-fn grapheme_width(grapheme: &str) -> usize {
-    if grapheme == "\t" {
-        4
-    } else {
-        unicode_width::UnicodeWidthStr::width(grapheme).max(1)
-    }
 }
 
 #[cfg(test)]
