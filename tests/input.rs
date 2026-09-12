@@ -490,7 +490,9 @@ fn controlled_raw_input_accepts_and_rejects_deterministically() {
         "an accepting owner receives the draft"
     );
 
-    // Rejection restores the authoritative value at the next render.
+    // Rejection restores the authoritative value at every render, so a second
+    // keystroke edits the owner's value and never resurrects the rejected
+    // draft.
     let values = Arc::new(Mutex::new(Vec::new()));
     let node = owner
         .props(OwnerProps {
@@ -504,12 +506,18 @@ fn controlled_raw_input_accepts_and_rejects_deterministically() {
     interact(
         &output,
         &dispatcher,
+        Some(key(KeyCode::Char('b'), KeyModifiers::empty())),
+    );
+    interact(
+        &output,
+        &dispatcher,
         Some(key(KeyCode::Char('c'), KeyModifiers::empty())),
     );
     assert_eq!(
         values.lock().unwrap().as_slice(),
-        &["ac".to_string()],
-        "a rejecting owner still observes the draft it ignores"
+        &["ab".to_string(), "ac".to_string()],
+        "each render rejects back to the owner's value, so the second keystroke \
+         produces 'ac' rather than resurrecting 'ab'"
     );
 }
 

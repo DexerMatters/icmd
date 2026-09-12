@@ -305,44 +305,27 @@ impl EditModel {
 
         match controlled {
             Some(controlled) => {
-                // The render revision decides causality. A draft produced from
-                // the render this one supersedes was either accepted (the owner
-                // republished exactly what we emitted) or ignored (the owner
-                // republished something else). No historical value comparison
-                // participates.
+                // The owner is authoritative at every render. The render
+                // revision says whether a draft was produced from the render
+                // this one supersedes; the draft is accepted only when the
+                // owner republished exactly what was emitted. There is no
+                // grace period and no comparison against historical strings
+                // beyond that single acceptance test.
                 let draft = self.draft.take();
-                match draft {
-                    Some(draft) if draft.from_revision < self.published_revision => {
-                        // This render is the owner's response to the draft: the
-                        // owner saw the value we emitted. Revisions, not value
-                        // comparisons, decide that.
-                        if draft.value == controlled {
-                            // Acceptance: keep the selection that produced it.
-                            self.value = controlled;
-                            self.caret = self.snap_caret(draft.caret);
-                        } else {
-                            // Rejection or external replacement: the owner is
-                            // authoritative and the draft is discarded.
-                            self.value = controlled;
-                            self.caret = self.snap_caret(self.caret);
-                        }
-                    }
-                    Some(draft) => {
-                        // The owner has not yet seen our draft, so this render
-                        // still echoes the value the draft supersedes. Show the
-                        // authoritative value but keep the draft pending for
-                        // the next keystroke.
-                        let mut suspended = draft;
-                        suspended.value = self.value.clone();
-                        suspended.caret = self.caret;
+                if let Some(draft) = draft {
+                    if draft.value == controlled {
+                        // Acceptance: keep the selection that produced it.
                         self.value = controlled;
-                        self.caret = self.snap_caret(self.caret);
-                        self.draft = Some(suspended);
-                    }
-                    None => {
+                        self.caret = self.snap_caret(draft.caret);
+                    } else {
+                        // Rejection or external replacement: the owner's value
+                        // wins and the optimistic draft is discarded.
                         self.value = controlled;
                         self.caret = self.snap_caret(self.caret);
                     }
+                } else {
+                    self.value = controlled;
+                    self.caret = self.snap_caret(self.caret);
                 }
                 self.authoritative = self.value.clone();
                 self.published_revision = revision;
@@ -1117,23 +1100,67 @@ mod tests {
     }
 
     #[test]
-    fn controlled_echo_of_the_base_is_not_a_replacement() {
-        let mut model = controlled("a", false);
+    fn controlled_rejection_clamps_the_selection_into_the_owner_value() {
+        let mut model = controlled("abcd", false);
         model.reduce(
             EditAction::PlaceCaret {
-                offset: 1,
+                offset: 4,
                 extend: false,
             },
             policy(false),
         );
-        insert(&mut model, "b", false);
+        insert(&mut model, "xy", false);
+        assert_eq!(model.value(), "abcdxy");
+        // The owner republishes a shorter value: the draft is discarded and the
+        // selection is clamped into the value the owner supplied.
+        model.render(Some("ab"), None, false);
         assert_eq!(model.value(), "ab");
-        // The owner has not caught up yet and re-renders the old value. The
-        // optimistic draft must survive so held keys keep inserting.
-        model.render(Some("a"), None, false);
-        assert_eq!(model.ownership(), ValueOwnership::Controlled);
+        assert_eq!(model.caret().cursor, 2);
+        // The next keystroke edits the owner's value, never the rejected draft.
         let outcome = insert(&mut model, "c", false);
         assert_eq!(outcome.value.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn controlled_rejection_is_deterministic_per_render() {
+        // The owner ignores every change, so each render republishes "a". The
+        // first keystroke produces "ab"; the next render rejects it back to "a"
+        // and clamps the caret to the end of "a". The following keystroke must
+        // therefore produce "ac", not resurrect the rejected "ab".
+        let mut model = controlled("a", false);
+        let mut emitted = Vec::new();
+        for ch in ["b", "c"] {
+            if let Some(value) = insert(&mut model, ch, false).value {
+                emitted.push(value);
+            }
+            // The owner rejects: it republishes its own authoritative value.
+            model.render(Some("a"), None, false);
+            assert_eq!(model.value(), "a", "rejection must restore the owner value");
+        }
+        assert_eq!(
+            emitted,
+            vec!["ab".to_string(), "ac".to_string()],
+            "a rejected draft must not survive into the next keystroke"
+        );
+    }
+
+    #[test]
+    fn controlled_external_replacement_discards_the_draft() {
+        let mut model = controlled("a", false);
+        insert(&mut model, "b", false);
+        assert_eq!(model.value(), "ab");
+        // The owner publishes an unrelated value. The caret clamps into it at
+        // its previous offset (2), and the rejected draft is gone.
+        model.render(Some("zzz"), None, false);
+        assert_eq!(model.value(), "zzz");
+        assert_eq!(model.caret().cursor, 2);
+        let outcome = insert(&mut model, "!", false);
+        assert_eq!(
+            outcome.value.as_deref(),
+            Some("zz!z"),
+            "editing continues in the owner's value, not the draft"
+        );
+        assert!(!model.value().contains("ab"), "the draft must be discarded");
     }
 
     #[test]
