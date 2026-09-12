@@ -14,10 +14,10 @@ pub use elements::{
     AlertProps, AlertVariant, BadgeProps, BadgeVariant, CanvasContext, CanvasDraw, CanvasError,
     CanvasProps, CheckboxProps, ImageProps, InputProps, ProgressBarProps, RadioProps,
     RawInputAppearance, RawInputMode, RawInputProps, ScrollAreaProps, SkeletonProps, SpinnerProps,
-    SwitchProps, TextAreaProps, TextClipboardAction, TextClipboardEvent, TextEditHandler,
-    TextValueEvent, alert, badge, blockquote, button, canvas, card, center, checkbox, code, column,
-    container, divider, footer, heading, image, input, kbd, label, muted, paragraph, progress_bar,
-    radio, raw_input, row, scroll_area, section, skeleton, spacer, spinner, switch, text_area,
+    SwitchProps, TextClipboardAction, TextClipboardEvent, TextValueEvent, TextareaProps, alert,
+    badge, blockquote, button, canvas, card, center, checkbox, code, column, container, divider,
+    footer, heading, image, input, kbd, label, muted, paragraph, progress_bar, radio, raw_input,
+    row, scroll_area, section, skeleton, spacer, spinner, switch, textarea,
 };
 
 pub use basic::{
@@ -49,9 +49,9 @@ pub mod prelude {
         Attr, Component, ComponentContext, Dimension, DomProps, Edges, ImageLoading, ImageSource,
         InputProps, Layout, Node, Props, RawInputAppearance, RawInputMode, RawInputProps, Ref,
         ScrollAreaProps, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph,
-        ScrollbarStyle, ScrollbarVisibility, Style, StylePatch, TextAreaProps, TextClipboardAction,
-        TextClipboardEvent, TextEditHandler, TextValueEvent, TextWrap, ThemeProviderProps, column,
+        ScrollbarStyle, ScrollbarVisibility, Style, StylePatch, TextClipboardAction,
+        TextClipboardEvent, TextValueEvent, TextWrap, TextareaProps, ThemeProviderProps, column,
         heading, input, progress_bar, provider, raw_input, row, scroll_area, style, style_patch,
-        text, text_area, theme_context, theme_provider, ui, view,
+        text, textarea, theme_context, theme_provider, ui, view,
     };
 }

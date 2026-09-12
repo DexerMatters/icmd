@@ -799,10 +799,8 @@ impl EventDispatcher {
                     }
                 }
 
-                if matches!(kind, PointerEventKind::Down)
-                    && normal_target.is_some_and(|target| state.is_focusable(target))
-                {
-                    focus_target = normal_target;
+                if matches!(kind, PointerEventKind::Down) {
+                    focus_target = normal_target.and_then(|target| state.focus_target_for(target));
                 }
             }
         }
@@ -1447,11 +1445,33 @@ impl EventState {
     ///
     /// Focus is opt-in via [`crate::DomProps::focusable`]; scroll areas remain
     /// focusable so their keyboard scrolling keeps working.
-    fn is_focusable(&self, target: DomId) -> bool {
-        self.regions
-            .iter()
-            .find(|region| region.id == target)
-            .is_some_and(|region| region.focusable || region.scroll.is_some())
+    /// Whether a pointer press on `target` should move keyboard focus to it.
+    ///
+    /// Focus is opt-in via [`crate::DomProps::focusable`]. Scroll containers
+    /// remain focusable by default so their keyboard scrolling keeps working,
+    /// but an explicitly focusable ancestor is preferred: a control that hosts
+    /// a scroll area inside itself is the control's focus target, not the
+    /// scroll area's.
+    fn focus_target_for(&self, target: DomId) -> Option<DomId> {
+        let mut current = Some(target);
+        let mut visited = HashSet::new();
+        let mut first_focusable = None;
+        while let Some(id) = current {
+            if !visited.insert(id) {
+                break;
+            }
+            let Some(region) = self.regions.iter().find(|region| region.id == id) else {
+                break;
+            };
+            if region.focusable {
+                return Some(id);
+            }
+            if first_focusable.is_none() && region.scroll.is_some() {
+                first_focusable = Some(id);
+            }
+            current = region.parent;
+        }
+        first_focusable
     }
 
     fn is_pointer_interactive(&self, target: DomId) -> bool {

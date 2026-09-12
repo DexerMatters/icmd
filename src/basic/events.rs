@@ -30,10 +30,6 @@ impl<E> EventListener<E> {
         let mut callback = self.callback.lock().expect("event listener poisoned");
         callback(event);
     }
-
-    fn call_owned(&self, event: E) {
-        self.call(event);
-    }
 }
 
 impl<E> EventListener<E> {

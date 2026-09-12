@@ -11,13 +11,13 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use unicode_segmentation::UnicodeSegmentation;
 
-use crate::basic::text_layout::{self, ComputedText, HitBias, ItemKind};
+use crate::basic::editor_surface::{EditorSurface, LayoutProbe};
+use crate::basic::text_layout::{self, ComputedText, HitBias};
 use crate::{
     Attr, Dimension, DomProps, Edges, EventListener, FocusEvent, KeyboardEvent, Node, PasteEvent,
-    PointerEvent, Props, ScrollAxes, ScrollEvent, ScrollOffset, ScrollbarVisibility, Span, Style,
-    Text, TextStyle, TextWrap, basic::ComponentContext, scroll_area, ui, view,
+    PointerEvent, Props, ScrollAxes, ScrollEvent, ScrollOffset, ScrollbarVisibility, Style, Text,
+    TextStyle, TextWrap, basic::ComponentContext, scroll_area, ui, view,
 };
 
 use super::model::{EditAction, EditModel, EditPolicy};
@@ -43,6 +43,8 @@ pub struct RawInputAppearance {
     /// Selection painting when the control does not hold focus.
     pub selection_inactive: TextStyle,
     pub caret: TextStyle,
+    /// Border foreground applied while focused, when the theme has one.
+    pub focused_border: Option<crossterm::style::Color>,
 }
 
 impl Default for RawInputAppearance {
@@ -52,6 +54,7 @@ impl Default for RawInputAppearance {
             selection: TextStyle::default().reverse(),
             selection_inactive: TextStyle::default().dim(),
             caret: TextStyle::default().reverse(),
+            focused_border: None,
         }
     }
 }
@@ -115,10 +118,16 @@ struct Config {
 
 impl Config {
     fn scroll_axes(&self) -> ScrollAxes {
-        if self.multiline {
+        if !self.multiline {
+            // A single logical line never wraps, so the viewport pans across it.
+            ScrollAxes::Horizontal
+        } else if self.wrap == TextWrap::NoWrap {
+            // Unwrapped multiline content can overflow both axes.
             ScrollAxes::Both
         } else {
-            ScrollAxes::Horizontal
+            // Wrapped multiline rows are built at the granted width, so only
+            // the vertical axis scrolls.
+            ScrollAxes::Vertical
         }
     }
 }
@@ -139,6 +148,8 @@ fn config_from(props: &Props<RawInputProps>) -> Config {
         Attr::Set(Dimension::Cells(value)) => value as usize,
         _ => 1,
     };
+    // Style dimensions are border-box: padding and borders are laid out around
+    // the editable cells, never taken out of them beyond this inset.
     let padding = props
         .dom
         .style
@@ -146,12 +157,31 @@ fn config_from(props: &Props<RawInputProps>) -> Config {
         .as_ref()
         .copied()
         .unwrap_or(Edges::all(0));
-    let inset = usize::from(padding.left) + usize::from(padding.right);
+    let border = if props.dom.style.border.kind.is_set() {
+        props
+            .dom
+            .style
+            .border
+            .edges
+            .as_ref()
+            .copied()
+            .unwrap_or(Edges::all(false))
+    } else {
+        Edges::all(false)
+    };
+    let inset_x = usize::from(padding.left)
+        + usize::from(padding.right)
+        + u16::from(border.left) as usize
+        + u16::from(border.right) as usize;
+    let inset_y = usize::from(padding.top)
+        + usize::from(padding.bottom)
+        + u16::from(border.top) as usize
+        + u16::from(border.bottom) as usize;
     Config {
         multiline,
         wrap,
-        width: width.saturating_sub(inset).max(1),
-        height: height.max(1),
+        width: width.saturating_sub(inset_x).max(1),
+        height: height.saturating_sub(inset_y).max(1),
         policy: EditPolicy {
             multiline,
             max_length: props.max_length.as_ref().copied(),
@@ -174,8 +204,15 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
     let state_ref = cx.use_ref(InputState::default);
     let (_, redraw) = cx.use_state(|| 0_u64);
 
-    // Reconcile the owner's value, rebuild the layout that pointer handlers
-    // read, and bring the caret into view when it moved.
+    // The commit pass publishes the layout it painted here; this component only
+    // reads it, so wrapping never needs a feedback render.
+    let probe = {
+        let cell = cx.use_ref(LayoutProbe::new);
+        cell.lock().expect("layout probe poisoned").clone()
+    };
+
+    // Reconcile the owner's value, then bring the caret into view using the
+    // layout of the last painted frame.
     let (scroll_offset, text) = {
         let mut state = state_ref.lock().expect("input state poisoned");
         state.model.render(
@@ -187,12 +224,50 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
             state.dragging = false;
             state.reveal_caret = false;
         }
-        let layout = build_layout(&state.model.value, &config);
-        reconcile_scroll(&mut state, &layout, &config);
+        // The value rendered in this frame is the authoritative one, but the
+        // caret and scroll position belong to the model's current (possibly
+        // optimistic) value. Build the layout for the current value at the
+        // width the last frame committed, so the caret reveal always uses the
+        // same row table the pointer will.
+        // The visible viewport, not the surface's own box: a single unwrapped
+        // line is wider than its viewport, and a wrapped line is exactly the
+        // granted width. Height is always the granted content height.
+        let view_width = if config.wrap == TextWrap::NoWrap {
+            config.width.max(1)
+        } else {
+            probe
+                .committed()
+                .map_or(config.width.max(1), |committed| committed.width.max(1))
+        };
+        let view_height = config.height.max(1);
+        let layout = build_layout_at(&state.model.value, &config, view_width);
+        reconcile_scroll(&mut state, &layout, view_width, view_height);
         state.reveal_caret = false;
         let focused = state.focused && !config.policy.disabled;
         let scroll_offset = ScrollOffset::new(state.scroll_x as u32, state.scroll_y as u32);
-        let text = surface_text(&state, &layout, &config, focused);
+        let (scroll_x, scroll_y) = (state.scroll_x, state.scroll_y);
+        let surface = EditorSurface {
+            value: state.model.value.clone(),
+            selection: if state.model.caret().is_collapsed() {
+                None
+            } else {
+                Some(state.model.caret().range())
+            },
+            caret: state.model.caret().cursor,
+            focused,
+            placeholder: config.placeholder.clone(),
+            wrap: config.wrap,
+            placeholder_style: config.appearance.placeholder.clone(),
+            selection_style: config.appearance.selection.clone(),
+            selection_inactive_style: config.appearance.selection_inactive.clone(),
+            caret_style: config.appearance.caret.clone(),
+            scroll_x: state.scroll_x,
+            scroll_y: state.scroll_y,
+        };
+        let text = Text::from_spans(Vec::new())
+            .with_style(surface_style())
+            .wrap(config.wrap)
+            .editor_surface(surface, probe.clone(), (scroll_x, scroll_y));
         (scroll_offset, text)
     };
 
@@ -219,6 +294,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 let mut clipboard_event = None;
                 let mut submit_event = None;
                 let mut focus_gained = false;
+                let mut caret_moved = false;
                 let copy_selection = is_copy(&event);
                 {
                     let mut state = state_ref.lock().expect("input state poisoned");
@@ -234,13 +310,32 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                         submit_event = Some(TextValueEvent {
                             value: state.model.value().to_string(),
                         });
-                    } else if let Some(action) = key_action(&event, &config) {
+                    } else if is_cut(&event) && !state.model.caret().is_collapsed() {
+                        // Cut removes the selection and reports the removed text.
+                        // The model's backspace over a non-collapsed selection is
+                        // exactly that operation.
                         event.stop_propagation();
-                        let outcome = state.model.reduce(action, config.policy);
+                        let outcome = state
+                            .model
+                            .reduce(EditAction::Backspace { word: false }, config.policy);
                         if outcome.changed {
                             state.reveal_caret = true;
                             value_event = outcome.value.map(|value| TextValueEvent { value });
                         }
+                        if let Some(text) = outcome.clipboard {
+                            clipboard_event = Some(TextClipboardEvent {
+                                action: TextClipboardAction::Cut,
+                                text,
+                            });
+                        }
+                    } else if let Some(action) = key_action(&event, &config) {
+                        event.stop_propagation();
+                        let outcome = state.model.reduce(action, config.policy);
+                        if outcome.changed {
+                            value_event = outcome.value.map(|value| TextValueEvent { value });
+                        }
+                        caret_moved = outcome.reveal_caret;
+                        state.reveal_caret |= outcome.reveal_caret;
                         if let Some(text) = outcome.clipboard {
                             clipboard_event = Some(TextClipboardEvent {
                                 action: TextClipboardAction::Cut,
@@ -274,7 +369,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 {
                     listener.call(event);
                 }
-                if value_event.is_some() || focus_gained {
+                if value_event.is_some() || focus_gained || caret_moved {
                     redraw.update(|value| *value += 1);
                 }
             },
@@ -320,6 +415,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let state_ref = state_ref.clone();
         let redraw = redraw.clone();
         let config = config.clone();
+        let probe = probe.clone();
         let caller = caller.pointer_down.as_ref().cloned();
         EventListener::compose(
             move |event: PointerEvent| {
@@ -329,11 +425,11 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 {
                     let mut state = state_ref.lock().expect("input state poisoned");
                     state.focused = true;
-                    let layout = build_layout(&state.model.value, &config);
+                    let layout = committed_layout(&probe, &state, &config);
                     let offset = hit_offset(
                         &layout,
-                        event.local_position.column,
-                        event.local_position.line,
+                        event.local_position,
+                        probe.committed(),
                         state.scroll_x,
                         state.scroll_y,
                     );
@@ -353,6 +449,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let state_ref = state_ref.clone();
         let redraw = redraw.clone();
         let config = config.clone();
+        let probe = probe.clone();
         let caller = caller.pointer_move.as_ref().cloned();
         EventListener::compose(
             move |event: PointerEvent| {
@@ -360,11 +457,11 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 if !state.dragging {
                     return;
                 }
-                let layout = build_layout(&state.model.value, &config);
+                let layout = committed_layout(&probe, &state, &config);
                 let offset = hit_offset(
                     &layout,
-                    event.local_position.column,
-                    event.local_position.line,
+                    event.local_position,
+                    probe.committed(),
                     state.scroll_x,
                     state.scroll_y,
                 );
@@ -411,14 +508,15 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let caller = caller.focus_event.as_ref().cloned();
         EventListener::compose(
             move |event: FocusEvent| {
-                if event == FocusEvent::Lost {
-                    let mut state = state_ref.lock().expect("input state poisoned");
-                    if state.focused {
-                        state.focused = false;
+                let mut state = state_ref.lock().expect("input state poisoned");
+                let next = event == FocusEvent::Gained;
+                if state.focused != next {
+                    state.focused = next;
+                    if !next {
                         state.dragging = false;
-                        drop(state);
-                        redraw.update(|value| *value += 1);
                     }
+                    drop(state);
+                    redraw.update(|value| *value += 1);
                 }
             },
             caller,
@@ -427,32 +525,52 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
 
     let scroll = {
         let state_ref = state_ref.clone();
+        let redraw = redraw.clone();
         let caller = caller.scroll.as_ref().cloned();
         EventListener::compose(
             move |event: ScrollEvent| {
-                let mut state = state_ref.lock().expect("input state poisoned");
-                state.scroll_x = event.offset.x as usize;
-                state.scroll_y = event.offset.y as usize;
-                state.reveal_caret = false;
+                {
+                    let mut state = state_ref.lock().expect("input state poisoned");
+                    state.scroll_x = event.offset.x as usize;
+                    state.scroll_y = event.offset.y as usize;
+                    // Physical scrolling never re-centers on the caret; only a
+                    // later edit or navigation action requests reveal.
+                    state.reveal_caret = false;
+                }
+                redraw.update(|value| *value += 1);
             },
             caller,
         )
     };
 
     // One host: caller DOM props, explicit focusability, and the scroll engine.
-    let mut host = props.host_props(DomProps::default());
-    host.focusable = !config.policy.disabled;
-    let content = if config.policy.disabled {
+    // The caller's observers are composed inside each internal listener, so the
+    // host's own event slots stay free for the `ui!` attributes below.
+    let mut scroll_host = props.host_props(DomProps::default());
+    scroll_host.focusable = !config.policy.disabled;
+    if focus_active(&state_ref, &config)
+        && let Some(color) = config.appearance.focused_border
+    {
+        scroll_host.style.border.foreground = Attr::Set(color);
+    }
+    let scroll_axes = config.scroll_axes();
+    let disabled = config.policy.disabled;
+    // The editable surface itself is the focus target, so it carries the
+    // composed listeners. It is also the scrolling element, so pointer
+    // coordinates stay in one content space.
+    let scrollable = if disabled {
         ui! {
             <view style={|style| {
                 style.width /= Dimension::Max;
                 style.height /= Dimension::Max;
-            }}>{text}</view>
+            }}>
+                {text}
+            </view>
         }
     } else {
         ui! {
             <scroll_area
-                axes={config.scroll_axes()}
+                axes={scroll_axes}
                 scrollbar_visibility={ScrollbarVisibility::Hidden}
                 offset={scroll_offset}
                 enable_keyboard={false}
@@ -466,128 +584,107 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         }
     };
 
-    ui! {
-        <view dom={host}
-            on_key_down={key}
-            on_paste_event={paste}
-            on_pointer_down={pointer_down}
-            on_pointer_move={pointer_move}
-            on_pointer_up={pointer_up}
-            on_pointer_cancel={pointer_cancel}
-            on_focus_event={focus}
-            on_scroll={scroll}
-        >
-            {content}
-        </view>
+    // A disabled control must not retain focus. Rendering the enabled host
+    // under a distinct key removes its DOM id from the region set, which is
+    // what makes the runtime deliver exactly one `Lost` focus event.
+    if disabled {
+        ui! {
+            <view key="raw-input-disabled" dom={scroll_host}>{scrollable}</view>
+        }
+    } else {
+        ui! {
+            <view key="raw-input-enabled" dom={scroll_host}
+                on_key_down={key}
+                on_paste_event={paste}
+                on_pointer_down={pointer_down}
+                on_pointer_move={pointer_move}
+                on_pointer_up={pointer_up}
+                on_pointer_cancel={pointer_cancel}
+                on_focus_event={focus}
+                on_scroll={scroll}
+            >
+                {scrollable}
+            </view>
+        }
     }
 }
 
-fn build_layout(value: &str, config: &Config) -> text_layout::TextLayout {
+fn focus_active(state_ref: &crate::basic::Ref<InputState>, config: &Config) -> bool {
+    let state = state_ref.lock().expect("input state poisoned");
+    state.focused && !config.policy.disabled
+}
+
+/// Lay out `value` at an explicit content width.
+fn build_layout_at(value: &str, config: &Config, width: usize) -> text_layout::TextLayout {
     text_layout::layout_text(
         &Text::new(value).wrap(config.wrap),
-        config.width,
+        width.max(1),
         ComputedText::default(),
         |parent, _| parent,
         |style| *style,
     )
 }
 
+/// Fallback layout used before the first frame has been committed.
+fn build_layout(value: &str, config: &Config) -> text_layout::TextLayout {
+    build_layout_at(value, config, config.width)
+}
+
+/// The layout that produced the last painted frame, falling back to a local
+/// build before the first frame settles.
+fn committed_layout(
+    probe: &LayoutProbe,
+    state: &InputState,
+    config: &Config,
+) -> text_layout::TextLayout {
+    probe
+        .committed()
+        .map(|committed| (*committed.layout).clone())
+        .unwrap_or_else(|| build_layout(&state.model.value, config))
+}
+
 /// Clamp the viewport and, when requested, bring the caret into view.
-fn reconcile_scroll(state: &mut InputState, layout: &text_layout::TextLayout, config: &Config) {
+fn reconcile_scroll(
+    state: &mut InputState,
+    layout: &text_layout::TextLayout,
+    view_width: usize,
+    view_height: usize,
+) {
+    let view_width = view_width.max(1);
+    let view_height = view_height.max(1);
     let rows = layout.row_count().max(1);
-    state.scroll_y = state.scroll_y.min(rows.saturating_sub(config.height));
+    state.scroll_y = state.scroll_y.min(rows.saturating_sub(view_height));
     let widest = layout.max_row_width();
-    state.scroll_x = state.scroll_x.min(widest.saturating_sub(config.width));
+    state.scroll_x = state.scroll_x.min(widest.saturating_sub(view_width));
     if !state.focused || !state.reveal_caret {
         return;
     }
     let (row, cell, caret_width) = layout.caret(state.model.caret().cursor);
     if row < state.scroll_y {
         state.scroll_y = row;
-    } else if row >= state.scroll_y.saturating_add(config.height) {
-        state.scroll_y = row + 1 - config.height;
+    } else if row >= state.scroll_y.saturating_add(view_height) {
+        state.scroll_y = row + 1 - view_height;
     }
     if cell < state.scroll_x {
         state.scroll_x = cell;
     } else {
         let caret_end = cell.saturating_add(caret_width.max(1));
-        if caret_end > state.scroll_x.saturating_add(config.width) {
-            state.scroll_x = caret_end - config.width;
+        if caret_end > state.scroll_x.saturating_add(view_width) {
+            state.scroll_x = caret_end - view_width;
         }
     }
 }
 
-fn surface_text(
-    state: &InputState,
-    layout: &text_layout::TextLayout,
-    config: &Config,
-    focused: bool,
-) -> Text {
-    let value = &state.model.value;
-    let mut spans = Vec::new();
-    if value.is_empty() {
-        if config.placeholder.is_empty() {
-            if focused {
-                spans.push(Span::new(" ").style(config.appearance.caret.clone()));
-            }
-        } else {
-            for (index, grapheme) in config.placeholder.graphemes(true).enumerate() {
-                let mut span = Span::new(grapheme).style(config.appearance.placeholder.clone());
-                if focused && index == 0 {
-                    span = span.style(config.appearance.caret.clone());
-                }
-                spans.push(span);
-            }
-        }
-        return Text::from_spans(spans)
-            .with_style(surface_style())
-            .wrap(TextWrap::NoWrap);
-    }
-    let selection = if state.model.caret().is_collapsed() {
-        None
-    } else {
-        Some(state.model.caret().range())
-    };
-    let selection_style = if focused {
-        config.appearance.selection.clone()
-    } else {
-        config.appearance.selection_inactive.clone()
-    };
-    let caret = state.model.caret().cursor;
-    for item in layout.items() {
-        if item.kind == ItemKind::Separator {
-            continue;
-        }
-        let symbol = if item.symbol == "\t" {
-            " ".repeat(item.width)
-        } else {
-            item.symbol.clone()
-        };
-        let mut style = TextStyle::default();
-        if let Some((start, end)) = selection
-            && item.source.start < end
-            && item.source.end > start
-        {
-            style = selection_style.clone();
-        }
-        if focused && caret >= item.source.start && caret < item.source.end {
-            style = config.appearance.caret.clone();
-        }
-        spans.push(Span::new(symbol).style(style));
-    }
-    if focused && caret == value.len() {
-        spans.push(Span::new(" ").style(config.appearance.caret.clone()));
-    }
-    Text::from_spans(spans)
-        .with_style(surface_style())
-        .wrap(TextWrap::NoWrap)
-}
-
+/// The editor surface keeps auto dimensions so it reports its own width
+/// (intrinsic for `NoWrap`, the granted width for wrapped modes) and its row
+/// count.
 fn surface_style() -> Style {
-    let mut style = Style::default();
-    style.width /= Dimension::Max;
-    style.height /= Dimension::Max;
-    style
+    Style::default()
+}
+
+fn is_cut(event: &KeyboardEvent) -> bool {
+    event.key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(event.key.code, KeyCode::Char('x' | 'X'))
 }
 
 fn is_copy(event: &KeyboardEvent) -> bool {
@@ -652,16 +749,30 @@ fn key_action(event: &KeyboardEvent, config: &Config) -> Option<EditAction> {
 const POINTER_HIT_BIAS: HitBias = HitBias::Trailing;
 
 /// Resolve a pointer hit into a source offset using the canonical layout.
+///
+/// `local_position` already includes the runtime's own scroll offset, and the
+/// model owns a delta the runtime has not applied yet, so the offsets
+/// accumulated before the last committed frame are added back here. This
+/// component never subtracts padding or borders by hand: the event system
+/// supplies content-box coordinates.
 fn hit_offset(
     layout: &text_layout::TextLayout,
-    column: i32,
-    line: i32,
+    local: crate::ScreenPosition,
+    committed: Option<crate::basic::editor_surface::CommittedLayout>,
     scroll_x: usize,
     scroll_y: usize,
 ) -> usize {
-    let row = (line.max(0) as usize)
-        .saturating_add(scroll_y)
-        .min(layout.row_count().saturating_sub(1));
-    let cell = (column.max(0) as usize).saturating_add(scroll_x);
+    // The scroll child's local origin is the visible viewport, but the runtime
+    // reports the pointer relative to the child's painted rectangle, which the
+    // last committed layout already shifted by its applied scroll offset. Add
+    // that offset back so the row and cell index into the layout.
+    let _ = committed;
+    // The runtime reports the pointer in the scrolled child's own content
+    // coordinates, which already exclude the scroll offset the frame applied.
+    // The layout is indexed in unscrolled content coordinates, so the offset is
+    // added back once. Padding and borders are never subtracted by hand: the
+    // event system supplies content-box coordinates.
+    let row = (local.line.max(0) as usize + scroll_y).min(layout.row_count().saturating_sub(1));
+    let cell = local.column.max(0) as usize + scroll_x;
     layout.hit(row, cell, POINTER_HIT_BIAS)
 }

@@ -294,3 +294,82 @@ fn placeholder_paints_when_empty() {
         "the placeholder must paint"
     );
 }
+
+#[test]
+fn themed_input_wrapper_edits_and_submits() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let submitted = Arc::new(Mutex::new(Vec::new()));
+    let node = icmd::input
+        .props(icmd::InputProps {
+            default_value: Attr::Set("ab".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            on_submit: Attr::Set(EventListener::new({
+                let submitted = submitted.clone();
+                move |event: TextValueEvent| submitted.lock().unwrap().push(event.value)
+            })),
+            ..icmd::InputProps::default()
+        })
+        .node();
+    let viewport = Size::new(30, 6);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    // The underline host starts at row 0 and its content row at row 0 with one
+    // padding cell, so column 2 is inside the value.
+    interact(&output, &dispatcher, Some(click(0, 3)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('c'), KeyModifiers::empty())),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Enter, KeyModifiers::empty())),
+    );
+    assert!(
+        values.lock().unwrap().iter().any(|value| value == "abc"),
+        "the themed input must route through raw_input: {:?}",
+        values.lock().unwrap()
+    );
+    assert_eq!(&*submitted.lock().unwrap(), &["abc"]);
+}
+
+#[test]
+fn themed_textarea_wraps_and_edits() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = icmd::textarea
+        .props(icmd::TextareaProps {
+            default_value: Attr::Set("ab".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..icmd::TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(20);
+            style.height /= icmd::Dimension::Cells(6);
+        })
+        .node();
+    let viewport = Size::new(30, 10);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(1, 3)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('z'), KeyModifiers::empty())),
+    );
+    assert!(
+        values
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|value| value.contains('z')),
+        "the themed textarea must route through raw_input: {:?}",
+        values.lock().unwrap()
+    );
+}

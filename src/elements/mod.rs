@@ -5,7 +5,6 @@ pub(crate) mod feedback;
 pub(crate) mod image;
 pub(crate) mod input;
 pub(crate) mod scroll;
-pub(crate) mod text_edit;
 
 use crate::{DomProps, Node, Props, Style, basic::ComponentContext, theme::Theme, ui};
 
@@ -43,8 +42,7 @@ pub use feedback::{
 };
 pub use image::{ImageProps, image};
 pub use input::{
-    RawInputAppearance, RawInputMode, RawInputProps, TextClipboardAction, TextClipboardEvent,
-    TextValueEvent, raw_input,
+    InputProps, RawInputAppearance, RawInputMode, RawInputProps, TextClipboardAction,
+    TextClipboardEvent, TextValueEvent, TextareaProps, input, raw_input, textarea,
 };
 pub use scroll::{ScrollAreaProps, scroll_area};
-pub use text_edit::{InputProps, TextAreaProps, TextEditHandler, input, text_area};

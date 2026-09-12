@@ -89,6 +89,7 @@ impl Default for ComputedText {
 /// same unit inside the layout's normalized string. `symbol` is what the
 /// renderer paints (for example a tab expands to spaces).
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // `text`/`cell`/`row` are the layout's public geometry surface.
 pub(crate) struct Item {
     pub(crate) source: Range<usize>,
     pub(crate) text: Range<usize>,
@@ -114,12 +115,6 @@ pub(crate) struct Row {
     pub(crate) empty_source: Option<usize>,
 }
 
-impl Row {
-    pub(crate) const fn is_empty(self) -> bool {
-        self.len == 0
-    }
-}
-
 /// One shaped grapheme handed to [`TextLayout::layout`].
 #[derive(Debug, Clone)]
 pub(crate) struct ShapedGlyph<S> {
@@ -134,6 +129,7 @@ pub(crate) struct ShapedGlyph<S> {
 
 /// An immutable layout of one styled text value at one cell width.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Operations are the API; storage stays private.
 pub(crate) struct TextLayout {
     text: String,
     items: Vec<Item>,
@@ -369,6 +365,7 @@ impl TextLayout {
     }
 
     /// Number of visual rows this layout occupies.
+    #[allow(dead_code)]
     pub(crate) fn row_count(&self) -> usize {
         self.rows.len()
     }
@@ -379,22 +376,21 @@ impl TextLayout {
     }
 
     /// Total UTF-8 source length the layout owns.
+    #[allow(dead_code)]
     pub(crate) fn source_len(&self) -> usize {
         self.source_len
     }
 
     /// The normalized string the layout was shaped from.
+    #[allow(dead_code)]
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
     /// Layout items in visual order.
+    #[allow(dead_code)]
     pub(crate) fn items(&self) -> &[Item] {
         &self.items
-    }
-
-    pub(crate) fn rows(&self) -> &[Row] {
-        &self.rows
     }
 
     pub(crate) fn row_items(&self, index: usize) -> &[Item] {
@@ -411,6 +407,7 @@ impl TextLayout {
     }
 
     /// End of the UTF-8 source bytes painted on `index`.
+    #[allow(dead_code)]
     ///
     /// Whitespace dropped at a soft-wrap boundary is not painted, so this stops
     /// before it even though [`Self::row_source_end`] owns it.
@@ -490,6 +487,7 @@ impl TextLayout {
     }
 
     /// Source boundary immediately before `source`.
+    #[allow(dead_code)] // Used by the editor's word/character movement.
     pub(crate) fn previous_boundary(&self, source: usize) -> usize {
         if source == 0 {
             return 0;
@@ -504,6 +502,7 @@ impl TextLayout {
     }
 
     /// Source boundary immediately after `source`.
+    #[allow(dead_code)]
     pub(crate) fn next_boundary(&self, source: usize) -> usize {
         let source = self.clamp(source);
         for item in &self.items {
@@ -555,6 +554,11 @@ impl TextLayout {
     }
 
     /// Map a pointer hit at `cell` inside `row` to a source boundary.
+    ///
+    /// [`HitBias::Leading`] resolves to the hit grapheme's leading boundary;
+    /// [`HitBias::Trailing`] resolves to its trailing boundary. A width-two
+    /// grapheme is split at its halfway cell: the left half uses the leading
+    /// boundary and the right half the trailing boundary under either bias.
     pub(crate) fn hit(&self, row: usize, cell: usize, bias: HitBias) -> usize {
         let row = row.min(self.rows.len().saturating_sub(1));
         let mut offset = 0usize;
@@ -564,11 +568,22 @@ impl TextLayout {
             }
             let end = offset.saturating_add(item.width);
             if item.width > 0 && cell < end {
-                let trailing = (cell - offset) * 2 >= item.width;
-                return if item.width > 1 && trailing == (bias == HitBias::Trailing) {
-                    item.source.end
-                } else {
-                    item.source.start
+                let right_half = (cell - offset) * 2 >= item.width;
+                return match bias {
+                    HitBias::Leading => {
+                        if item.width > 1 && right_half {
+                            item.source.end
+                        } else {
+                            item.source.start
+                        }
+                    }
+                    HitBias::Trailing => {
+                        if item.width > 1 && !right_half {
+                            item.source.start
+                        } else {
+                            item.source.end
+                        }
+                    }
                 };
             }
             offset = end;
@@ -577,6 +592,7 @@ impl TextLayout {
     }
 
     /// The cell column of a source boundary inside its visual row.
+    #[allow(dead_code)]
     pub(crate) fn column(&self, source: usize) -> usize {
         let (_, cell, _) = self.caret(source);
         cell
@@ -587,6 +603,7 @@ impl TextLayout {
     ///
     /// Returns the new boundary and the preferred column that should be carried
     /// into the next vertical move.
+    #[allow(dead_code)]
     pub(crate) fn vertical(
         &self,
         source: usize,
@@ -1081,17 +1098,6 @@ pub(crate) mod parity {
         pub source_end: usize,
     }
 
-    pub(crate) fn legacy_visual_rows(value: &str, wrap: PublicWrap, width: u16) -> Vec<LegacyRow> {
-        crate::elements::text_edit::legacy_visual_rows_for_test(value, wrap, width)
-            .into_iter()
-            .map(|(start, end, source_end)| LegacyRow {
-                start,
-                end,
-                source_end,
-            })
-            .collect()
-    }
-
     /// The normalized form both engines lay out (CRLF/CR to LF, controls
     /// discarded). The canonical layout tracks raw-source bytes, so parity
     /// compares shapes over this normalized value.
@@ -1432,44 +1438,6 @@ mod parity_tests {
     }
 
     const WRAPS: [W; 3] = [W::NoWrap, W::Soft, W::Hard];
-
-    /// The legacy editor appends a phantom empty row so a caret at the end of a
-    /// full row can be painted. That is an editor presentation artifact rather
-    /// than layout geometry, so it is not part of the canonical layout.
-    fn strip_phantom_rows(mut rows: Vec<LegacyRow>, wrap: W) -> Vec<LegacyRow> {
-        while rows.len() > 1 {
-            let last = rows[rows.len() - 1];
-            let previous = rows[rows.len() - 2];
-            if last.start == last.end
-                && last.start == previous.source_end
-                && matches!(wrap, W::Soft | W::Hard)
-            {
-                rows.pop();
-            } else {
-                break;
-            }
-        }
-        rows
-    }
-
-    #[test]
-    fn canonical_matches_legacy_editor_row_geometry() {
-        let mut failures = Vec::new();
-        for value in corpus() {
-            for wrap in WRAPS {
-                for width in widths_u16() {
-                    let legacy = strip_phantom_rows(legacy_visual_rows(value, wrap, width), wrap);
-                    let canonical = canonical_rows(value, wrap, width);
-                    if legacy != canonical {
-                        failures.push(format!(
-                            "value={value:?} wrap={wrap:?} width={width}\n  legacy={legacy:?}\n  canonical={canonical:?}"
-                        ));
-                    }
-                }
-            }
-        }
-        report("editor", failures);
-    }
 
     /// Strip whitespace that the canonical layout marks as a separator: it is
     /// not painted, so the painted rows of the two engines agree even when the

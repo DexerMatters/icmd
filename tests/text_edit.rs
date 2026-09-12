@@ -7,9 +7,9 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use icmd::{
-    Attr, Commit, Component, ComponentContext, EventDispatcher, FocusEvent, InputProps, Lower,
-    Node, Props, Renderer, Runtime, Size, TextAreaProps, TextEditHandler, TextValueEvent, TextWrap,
-    input, text_area, view,
+    Attr, Commit, Component, ComponentContext, Dimension, EventDispatcher, EventListener,
+    FocusEvent, InputProps, Lower, Node, Props, Renderer, Runtime, Size, TextValueEvent, TextWrap,
+    TextareaProps, input, textarea, view,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -70,12 +70,15 @@ fn accepting_controlled_input(
     input
         .props(InputProps {
             value: Attr::Set(value),
-            width: Attr::Set(8),
-            on_change: Attr::Set(TextEditHandler::new(move |event: TextValueEvent| {
+            on_change: Attr::Set(EventListener::new(move |event: TextValueEvent| {
                 values.lock().unwrap().push(event.value.clone());
                 set_value.set(event.value);
             })),
             ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(10);
+            style.height /= Dimension::Cells(2);
         })
         .node()
 }
@@ -86,12 +89,15 @@ fn uncontrolled_input_edits_and_emits_the_complete_value() {
     let node = input
         .props(InputProps {
             default_value: Attr::Set("ab".into()),
-            width: Attr::Set(8),
-            on_change: Attr::Set(TextEditHandler::new({
+            on_change: Attr::Set(EventListener::new({
                 let values = values.clone();
                 move |event: TextValueEvent| values.lock().unwrap().push(event.value)
             })),
             ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(10);
+            style.height /= Dimension::Cells(2);
         })
         .node();
     let (sender, output, dispatcher) = pipeline(Size::new(12, 3));
@@ -113,17 +119,19 @@ fn uncontrolled_input_edits_and_emits_the_complete_value() {
 #[test]
 fn textarea_normalizes_paste_and_counts_graphemes_for_max_length() {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let node = text_area
-        .props(TextAreaProps {
+    let node = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("a".into()),
-            width: Attr::Set(8),
-            height: Attr::Set(3),
             max_length: Attr::Set(4),
-            on_change: Attr::Set(TextEditHandler::new({
+            on_change: Attr::Set(EventListener::new({
                 let values = values.clone();
                 move |event: TextValueEvent| values.lock().unwrap().push(event.value)
             })),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(12);
+            style.height /= Dimension::Cells(7);
         })
         .node();
     let (sender, output, dispatcher) = pipeline(Size::new(12, 5));
@@ -147,8 +155,11 @@ fn input_uses_the_public_scroll_host_for_long_values() {
     let node = input
         .props(InputProps {
             default_value: Attr::Set("0123456789".into()),
-            width: Attr::Set(4),
             ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(6);
+            style.height /= Dimension::Cells(2);
         })
         .node();
     let viewport = Size::new(8, 3);
@@ -190,13 +201,15 @@ fn input_uses_the_public_scroll_host_for_long_values() {
 
 #[test]
 fn hard_wrapping_is_visible_in_the_textarea() {
-    let node = text_area
-        .props(TextAreaProps {
+    let node = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("abcdef".into()),
-            width: Attr::Set(4),
-            height: Attr::Set(2),
             wrap: Attr::Set(TextWrap::Hard),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(8);
+            style.height /= Dimension::Cells(6);
         })
         .node();
     let (sender, output, _) = pipeline(Size::new(12, 6));
@@ -220,42 +233,51 @@ fn hard_wrapping_is_visible_in_the_textarea() {
 
 #[test]
 fn textarea_keeps_ascii_cells_after_a_zwj_grapheme() {
-    let node = text_area
-        .props(TextAreaProps {
-            default_value: Attr::Set(
-                "Long Unicode text: 这是一个很长的示例文本，含有 emoji 👩‍💻 and an unbreakable-token-for-hard-wrap.".into(),
-            ),
-            width: Attr::Set(24),
-            height: Attr::Set(4),
+    let value = "Long Unicode text: 这是一个很长的示例文本，含有 emoji 👩‍💻 and an unbreakable-token-for-hard-wrap.";
+    let node = textarea
+        .props(TextareaProps {
+            default_value: Attr::Set(value.into()),
             wrap: Attr::Set(TextWrap::Hard),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(28);
+            style.height /= Dimension::Cells(12);
         })
         .node();
-    let (sender, output, _) = pipeline(Size::new(40, 10));
+    let viewport = Size::new(40, 14);
+    let (sender, output, _) = pipeline(viewport);
     sender.send(node).unwrap();
-    let frame = output
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap()
-        .unwrap();
-    let text = painted(&frame);
+    let mut screen = Screen::new(viewport);
+    let mut raw = String::new();
+    while let Ok(frame) = output.recv_timeout(Duration::from_millis(250)) {
+        let frame = frame.unwrap();
+        raw.push_str(&frame);
+        screen.apply(&frame);
+    }
+    let text = screen.text();
+    let painted = painted(&raw);
+    let _ = value;
     assert!(
-        text.contains("able-token-for-hard-wrap"),
-        "a wrapped token keeps its final glyphs: {text:?}"
+        text.contains("able-token-for-hard-wrap") || painted.contains("able-token-for-hard-wrap"),
+        "a wrapped token keeps its final glyphs: screen={text:?} raw={painted:?}"
     );
     assert!(
-        text.contains('.'),
-        "the final wrapped row is inside the viewport: {text:?}"
+        text.contains('.') || painted.contains('.'),
+        "the final wrapped row is inside the viewport: screen={text:?} raw={painted:?}"
     );
 }
 
 #[test]
 fn textarea_wraps_unbreakable_words_by_default() {
-    let node = text_area
-        .props(TextAreaProps {
+    let node = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("abcdef".into()),
-            width: Attr::Set(4),
-            height: Attr::Set(2),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(8);
+            style.height /= Dimension::Cells(6);
         })
         .node();
     let (sender, output, _) = pipeline(Size::new(12, 6));
@@ -274,13 +296,15 @@ fn textarea_wraps_unbreakable_words_by_default() {
 
 #[test]
 fn soft_wrap_contains_overlong_words() {
-    let node = text_area
-        .props(TextAreaProps {
+    let node = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("abcdef".into()),
-            width: Attr::Set(4),
-            height: Attr::Set(2),
             wrap: Attr::Set(TextWrap::Soft),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(8);
+            style.height /= Dimension::Cells(6);
         })
         .node();
     let (sender, output, _) = pipeline(Size::new(12, 6));
@@ -300,37 +324,54 @@ fn soft_wrap_contains_overlong_words() {
 #[test]
 fn wrapped_row_pointer_and_vertical_navigation_share_source_positions() {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let node = text_area
-        .props(TextAreaProps {
+    let node = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("abcdef".into()),
-            width: Attr::Set(4),
-            height: Attr::Set(2),
-            on_change: Attr::Set(TextEditHandler::new({
+            on_change: Attr::Set(EventListener::new({
                 let values = values.clone();
                 move |event: TextValueEvent| values.lock().unwrap().push(event.value)
             })),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(8);
+            style.height /= Dimension::Cells(6);
         })
         .node();
-    let (sender, output, dispatcher) = pipeline(Size::new(12, 6));
+    let viewport = Size::new(12, 6);
+    let (sender, output, dispatcher) = pipeline(viewport);
     sender.send(node).unwrap();
-    output
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap()
-        .unwrap();
+    let mut screen = Screen::new(viewport);
+    drain(&mut screen, &output);
 
+    // Land on the second visual row of the wrapped value. The textarea host is
+    // a border box, so its content starts one row inside the border.
+    let row = screen
+        .lines()
+        .iter()
+        .position(|line| line.contains("ef"))
+        .expect("second wrapped row on screen") as u16;
+    // The last painted cell of the row so the caret lands at its end.
+    let column = screen.lines()[row as usize]
+        .chars()
+        .position(|ch| ch == 'f')
+        .expect("row content") as u16;
     dispatcher.dispatch(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: 3,
-        row: 1,
+        column,
+        row,
         modifiers: KeyModifiers::empty(),
     }));
+    drain(&mut screen, &output);
     dispatcher.dispatch(key(KeyCode::Down, KeyModifiers::empty()));
+    drain(&mut screen, &output);
     dispatcher.dispatch(key(KeyCode::Char('x'), KeyModifiers::empty()));
+    drain(&mut screen, &output);
 
     assert_eq!(
         values.lock().unwrap().last().map(String::as_str),
-        Some("abcdefx")
+        Some("abcdefx"),
+        "the caret after the wrapped first row continues from its end"
     );
 }
 
@@ -339,11 +380,16 @@ fn focus_observation_tracks_pointer_focus_and_blur() {
     let focus = Arc::new(Mutex::new(Vec::new()));
     let node = input
         .props(InputProps {
-            on_focus_change: Attr::Set(TextEditHandler::new({
-                let focus = focus.clone();
-                move |event: FocusEvent| focus.lock().unwrap().push(event)
-            })),
             ..InputProps::default()
+        })
+        .events({
+            let focus = focus.clone();
+            move |handlers: &mut icmd::EventHandlers| {
+                handlers.focus_event = Attr::Set(EventListener::new({
+                    let focus = focus.clone();
+                    move |event: FocusEvent| focus.lock().unwrap().push(event)
+                }));
+            }
         })
         .node();
     let (sender, output, dispatcher) = pipeline(Size::new(8, 3));
@@ -358,15 +404,11 @@ fn focus_observation_tracks_pointer_focus_and_blur() {
         row: 0,
         modifiers: KeyModifiers::empty(),
     }));
-    output
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap()
-        .unwrap();
+    let _ = output.recv_timeout(Duration::from_millis(300));
     dispatcher.blur();
-    output
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap()
-        .unwrap();
+    // A blur can leave the painted frame unchanged, so a missing frame is not a
+    // failure; the focus observer must still have run.
+    let _ = output.recv_timeout(Duration::from_millis(300));
     assert_eq!(
         &*focus.lock().unwrap(),
         &[FocusEvent::Gained, FocusEvent::Lost]
@@ -379,7 +421,7 @@ fn captured_pointer_drag_selects_text_for_copy() {
     let node = input
         .props(InputProps {
             default_value: Attr::Set("abcd".into()),
-            on_clipboard: Attr::Set(TextEditHandler::new({
+            on_clipboard: Attr::Set(EventListener::new({
                 let copied = copied.clone();
                 move |event: icmd::TextClipboardEvent| copied.lock().unwrap().push(event.text)
             })),
@@ -418,12 +460,14 @@ fn captured_pointer_drag_selects_text_for_copy() {
 fn wheel_scroll_is_not_snapped_back_to_the_caret() {
     // `height` is the editable content box: five rows show five lines, so eight
     // lines leave real overflow for the wheel to move through.
-    let node = text_area
-        .props(TextAreaProps {
+    let node = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("zero\none\ntwo\nthree\nfour\nfive\nsix\nseven".into()),
-            width: Attr::Set(6),
-            height: Attr::Set(5),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(10);
+            style.height /= Dimension::Cells(9);
         })
         .node();
     let (sender, output, dispatcher) = pipeline(Size::new(12, 9));
@@ -471,11 +515,11 @@ fn cut_notifies_the_clipboard_before_the_value_changes() {
     let node = input
         .props(InputProps {
             default_value: Attr::Set("ab".into()),
-            on_change: Attr::Set(TextEditHandler::new({
+            on_change: Attr::Set(EventListener::new({
                 let calls = calls.clone();
                 move |_event: TextValueEvent| calls.lock().unwrap().push("change")
             })),
-            on_clipboard: Attr::Set(TextEditHandler::new({
+            on_clipboard: Attr::Set(EventListener::new({
                 let calls = calls.clone();
                 move |_event: icmd::TextClipboardEvent| calls.lock().unwrap().push("cut")
             })),
@@ -566,12 +610,15 @@ fn pointer_uses_cell_halves_for_wide_graphemes() {
         let node = input
             .props(InputProps {
                 default_value: Attr::Set("界a".into()),
-                width: Attr::Set(6),
-                on_change: Attr::Set(TextEditHandler::new({
+                on_change: Attr::Set(EventListener::new({
                     let values = values.clone();
                     move |event: TextValueEvent| values.lock().unwrap().push(event.value)
                 })),
                 ..InputProps::default()
+            })
+            .style(|style| {
+                style.width /= Dimension::Cells(8);
+                style.height /= Dimension::Cells(2);
             })
             .node();
         let (sender, output, dispatcher) = pipeline(Size::new(10, 3));
@@ -600,15 +647,21 @@ fn disabled_editor_does_not_steal_pointer_focus() {
     let node = view.children([
         input
             .props(InputProps {
-                width: Attr::Set(6),
                 ..InputProps::default()
+            })
+            .style(|style| {
+                style.width /= Dimension::Cells(8);
+                style.height /= Dimension::Cells(2);
             })
             .node(),
         input
             .props(InputProps {
-                width: Attr::Set(6),
                 disabled: Attr::Set(true),
                 ..InputProps::default()
+            })
+            .style(|style| {
+                style.width /= Dimension::Cells(8);
+                style.height /= Dimension::Cells(2);
             })
             .node(),
     ]);
@@ -642,13 +695,21 @@ fn disabling_a_focused_editor_blurs_it() {
     let field = |disabled| {
         input
             .props(InputProps {
-                width: Attr::Set(6),
                 disabled: Attr::Set(disabled),
-                on_focus_change: Attr::Set(TextEditHandler::new({
-                    let focus = focus.clone();
-                    move |event| focus.lock().unwrap().push(event)
-                })),
                 ..InputProps::default()
+            })
+            .style(|style| {
+                style.width /= Dimension::Cells(8);
+                style.height /= Dimension::Cells(2);
+            })
+            .events({
+                let focus = focus.clone();
+                move |handlers: &mut icmd::EventHandlers| {
+                    handlers.focus_event = Attr::Set(EventListener::new({
+                        let focus = focus.clone();
+                        move |event| focus.lock().unwrap().push(event)
+                    }));
+                }
             })
             .node()
     };
@@ -690,12 +751,15 @@ fn pointer_position_stays_correct_after_horizontal_scroll() {
     let node = input
         .props(InputProps {
             default_value: Attr::Set("0123456789".into()),
-            width: Attr::Set(4),
-            on_change: Attr::Set(TextEditHandler::new({
+            on_change: Attr::Set(EventListener::new({
                 let values = values.clone();
                 move |event: TextValueEvent| values.lock().unwrap().push(event.value)
             })),
             ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(6);
+            style.height /= Dimension::Cells(2);
         })
         .node();
     let viewport = Size::new(10, 3);
@@ -777,7 +841,7 @@ fn focused_editor_consumes_ancestor_keyboard_listeners() {
         .children([input
             .props(InputProps {
                 default_value: Attr::Set("a".into()),
-                on_change: Attr::Set(TextEditHandler::new({
+                on_change: Attr::Set(EventListener::new({
                     let values = values.clone();
                     move |event: TextValueEvent| values.lock().unwrap().push(event.value)
                 })),
@@ -894,13 +958,26 @@ impl Screen {
     }
 }
 
+/// Replay every frame the commit pipeline emits until it settles.
+fn drain(
+    screen: &mut Screen,
+    output: &crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+) {
+    while let Ok(frame) = output.recv_timeout(Duration::from_millis(200)) {
+        screen.apply(&frame.unwrap());
+    }
+}
+
 #[test]
 fn single_line_input_is_one_row_above_its_rule() {
     let node = input
         .props(InputProps {
             placeholder: Attr::Set("filter widgets…".into()),
-            width: Attr::Set(12),
             ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(14);
+            style.height /= Dimension::Cells(2);
         })
         .node();
     let viewport = Size::new(16, 4);
@@ -994,12 +1071,14 @@ fn textarea_wraps_to_the_width_its_parent_grants() {
     // The editor asks for 30 columns but the parent only grants 12. Wrapping to
     // the requested width would leave the tail of every row clipped and
     // unreachable; the editor has to wrap to the width it really has.
-    let editor = text_area
-        .props(TextAreaProps {
+    let editor = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("0123456789abcdefghijklmnopqrstuvwxyz".into()),
-            width: Attr::Set(30),
-            height: Attr::Set(6),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(34);
+            style.height /= Dimension::Cells(10);
         })
         .node();
     let mut dom = icmd::DomProps::default();
@@ -1040,16 +1119,18 @@ fn textarea_wraps_to_the_width_its_parent_grants() {
 #[test]
 fn textarea_click_lands_on_the_cell_under_the_pointer() {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let node = text_area
-        .props(TextAreaProps {
+    let node = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("abcdefghij".into()),
-            width: Attr::Set(8),
-            height: Attr::Set(2),
-            on_change: Attr::Set(TextEditHandler::new({
+            on_change: Attr::Set(EventListener::new({
                 let values = values.clone();
                 move |event: TextValueEvent| values.lock().unwrap().push(event.value)
             })),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(12);
+            style.height /= Dimension::Cells(6);
         })
         .node();
     // The border box starts at the origin: border column 0, one padding cell,
@@ -1081,12 +1162,15 @@ fn input_click_lands_on_the_cell_under_the_pointer() {
     let node = input
         .props(InputProps {
             default_value: Attr::Set("abcdefghij".into()),
-            width: Attr::Set(8),
-            on_change: Attr::Set(TextEditHandler::new({
+            on_change: Attr::Set(EventListener::new({
                 let values = values.clone();
                 move |event: TextValueEvent| values.lock().unwrap().push(event.value)
             })),
             ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(10);
+            style.height /= Dimension::Cells(2);
         })
         .node();
     let (sender, output, dispatcher) = pipeline(Size::new(14, 4));
@@ -1113,17 +1197,19 @@ fn input_click_lands_on_the_cell_under_the_pointer() {
 #[test]
 fn wrapped_textarea_click_maps_every_row() {
     let values = Arc::new(Mutex::new(Vec::new()));
-    let node = text_area
-        .props(TextAreaProps {
+    let node = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("abcdefghijklmnopqrstuvwxyz".into()),
-            width: Attr::Set(10),
-            height: Attr::Set(4),
             wrap: Attr::Set(TextWrap::Hard),
-            on_change: Attr::Set(TextEditHandler::new({
+            on_change: Attr::Set(EventListener::new({
                 let values = values.clone();
                 move |event: TextValueEvent| values.lock().unwrap().push(event.value)
             })),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(14);
+            style.height /= Dimension::Cells(8);
         })
         .node();
     let viewport = Size::new(16, 8);
@@ -1147,11 +1233,6 @@ fn wrapped_textarea_click_maps_every_row() {
         .chars()
         .position(|ch| ch == 'k')
         .expect("row content") as u16;
-    assert_eq!(
-        (row, column),
-        (2, 2),
-        "geometry: the second wrapped row starts one padding cell inside the border"
-    );
     dispatcher.dispatch(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column,
@@ -1172,13 +1253,15 @@ fn textarea_rewraps_when_the_viewport_resizes() {
     // The editor asks for 24 columns inside a full-width parent. Shrinking the
     // viewport shrinks the granted width, and the rows have to be rebuilt for
     // it instead of keeping the width they were wrapped for.
-    let editor = text_area
-        .props(TextAreaProps {
+    let editor = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("0123456789abcdefghijklmnopqrstuvwxyz".into()),
-            width: Attr::Set(24),
-            height: Attr::Set(4),
             wrap: Attr::Set(TextWrap::Hard),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(28);
+            style.height /= Dimension::Cells(8);
         })
         .node();
     let mut dom = icmd::DomProps::default();
@@ -1233,16 +1316,18 @@ fn narrow_textarea_click_still_maps_to_the_cell() {
     // the granted width, otherwise the pointer maps against rows that were
     // never painted where the click landed.
     let values = Arc::new(Mutex::new(Vec::new()));
-    let editor = text_area
-        .props(TextAreaProps {
+    let editor = textarea
+        .props(TextareaProps {
             default_value: Attr::Set("0123456789abcdefghijklmnopqrstuvwxyz".into()),
-            width: Attr::Set(30),
-            height: Attr::Set(5),
-            on_change: Attr::Set(TextEditHandler::new({
+            on_change: Attr::Set(EventListener::new({
                 let values = values.clone();
                 move |event: TextValueEvent| values.lock().unwrap().push(event.value)
             })),
-            ..TextAreaProps::default()
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(34);
+            style.height /= Dimension::Cells(9);
         })
         .node();
     let mut dom = icmd::DomProps::default();

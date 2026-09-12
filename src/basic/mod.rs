@@ -1,6 +1,7 @@
 pub(crate) mod common;
 pub(crate) mod context;
 mod dom;
+pub(crate) mod editor_surface;
 pub(crate) mod events;
 pub(crate) mod props;
 mod text;

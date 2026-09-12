@@ -122,15 +122,6 @@ impl Commit {
                     order,
                 );
                 let content = rect.inset(content_insets(style.border.insets(), style.padding));
-                if let Some(report) = text.measured_width.as_ref()
-                    && let Some(visible) = clip.intersection(content)
-                {
-                    // The editor surface wraps its own rows, so it has to know
-                    // how wide a row can actually be painted: a parent may have
-                    // clamped the box it asked for, and rows wrapped for the
-                    // requested width then lose their tail.
-                    report(visible.width.min(content.width).max(0) as u16);
-                }
                 if let Some(content_visible) = clip.intersection(content)
                     && let Some(image) = self.raster_text_cached(
                         *id,
@@ -254,6 +245,7 @@ impl Commit {
                     // position with the offset it owns, and its children are
                     // already drawn shifted by that offset.
                     let (origin_line, origin_column) = (base_content.line, base_content.column);
+
                     event_regions.push(EventRegion {
                         id: *id,
                         parent,

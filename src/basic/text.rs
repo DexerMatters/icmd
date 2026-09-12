@@ -2,6 +2,7 @@ use std::{fmt, sync::Arc};
 
 use crossterm::style::Color;
 
+use super::editor_surface::{EditorSurface, LayoutProbe};
 use super::props::{Style, TextStyle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -91,9 +92,6 @@ impl Span {
     );
 }
 
-/// Reports the content width a self-formatting surface was granted.
-pub(crate) type MeasuredWidth = Arc<dyn Fn(u16) + Send + Sync>;
-
 #[derive(Clone)]
 pub struct Text {
     pub(crate) spans: Vec<Span>,
@@ -102,10 +100,14 @@ pub struct Text {
     pub(crate) wrap: TextWrap,
     pub(crate) align: TextAlign,
     pub(crate) overflow: TextOverflow,
-    /// Set by an editor surface that formats its own rows, so the committed
-    /// content width - which a parent may have clamped - can flow back to the
-    /// component that produced the rows. `None` for ordinary text.
-    pub(crate) measured_width: Option<MeasuredWidth>,
+    /// Editor-only decorations (selection, caret, placeholder) painted from the
+    /// canonical layout at the committed content width. `None` for ordinary
+    /// text.
+    pub(crate) editor: Option<Arc<EditorSurface>>,
+    /// Passive channel the commit pass publishes its layout into.
+    pub(crate) probe: Option<LayoutProbe>,
+    /// The scroll offsets this text was rendered with.
+    pub(crate) applied_scroll: Option<(usize, usize)>,
 }
 
 impl fmt::Debug for Text {
@@ -119,9 +121,7 @@ impl fmt::Debug for Text {
     }
 }
 
-/// Equality describes the rendered content only. `measured_width` is a
-/// feedback channel for the component that built the text, so it never
-/// participates in the retained-text cache key.
+/// Equality describes the rendered content only.
 impl PartialEq for Text {
     fn eq(&self, other: &Self) -> bool {
         self.spans == other.spans
@@ -130,6 +130,8 @@ impl PartialEq for Text {
             && self.wrap == other.wrap
             && self.align == other.align
             && self.overflow == other.overflow
+            && self.editor == other.editor
+            && self.probe == other.probe
     }
 }
 
@@ -148,18 +150,23 @@ impl Text {
             wrap: TextWrap::default(),
             align: TextAlign::default(),
             overflow: TextOverflow::default(),
-            measured_width: None,
+            editor: None,
+            probe: None,
+            applied_scroll: None,
         }
     }
 
-    /// Report the width this text was finally laid out in.
-    ///
-    /// Self-formatting editors need the committed width so they can wrap to it
-    /// rather than to the width they asked for, which a parent can clamp. The
-    /// callback fires only when the width actually changes, so adopting it does
-    /// not spin render passes.
-    pub(crate) fn on_measure_width(mut self, report: MeasuredWidth) -> Self {
-        self.measured_width = Some(report);
+    /// Attach editor-only paint instructions and the probe the commit pass
+    /// publishes its layout into.
+    pub(crate) fn editor_surface(
+        mut self,
+        surface: EditorSurface,
+        probe: LayoutProbe,
+        applied_scroll: (usize, usize),
+    ) -> Self {
+        self.editor = Some(Arc::new(surface));
+        self.probe = Some(probe);
+        self.applied_scroll = Some(applied_scroll);
         self
     }
 

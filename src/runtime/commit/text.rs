@@ -1,7 +1,8 @@
 use crossterm::style::Color;
 
+use crate::basic::editor_surface::{CommittedLayout, EditorSurface};
 use crate::basic::text_layout::{self, ItemKind, TextLayout};
-use crate::{Cell, Image, Text, TextAlign, TextOverflow};
+use crate::{Cell, Image, Text, TextAlign, TextOverflow, TextWrap};
 
 use super::geometry::RectI;
 use super::style::slot;
@@ -27,6 +28,9 @@ pub(super) fn text_measure(
     offered_width: Option<i32>,
     inherited: ComputedText,
 ) -> (i32, i32) {
+    if let Some(surface) = &text.editor {
+        return editor_measure(surface, offered_width, text.wrap);
+    }
     // The intrinsic width is the widest unwrapped logical line. `NoWrap` at a
     // large width breaks only at explicit newlines, so its widest row is
     // exactly that intrinsic width.
@@ -41,6 +45,68 @@ pub(super) fn text_measure(
     (width, wrapped.row_count() as i32)
 }
 
+/// Measure an editor surface.
+///
+/// `NoWrap` reports the intrinsic width of the widest logical line so a scroll
+/// host can pan across it. Wrapped modes report the offered width: their rows
+/// are built at whatever width the parent finally grants, so wrapping is
+/// correct in the same frame with no measurement feedback.
+fn editor_measure(
+    surface: &EditorSurface,
+    offered_width: Option<i32>,
+    wrap: TextWrap,
+) -> (i32, i32) {
+    // An empty control sizes to its placeholder so the hint is visible and the
+    // box does not collapse to zero cells. An empty placeholder still occupies
+    // one cell, which is the caret.
+    if surface.value.is_empty() {
+        let width = if surface.placeholder.is_empty() {
+            1
+        } else {
+            placeholder_width(&surface.placeholder)
+        };
+        return (width as i32, 1);
+    }
+    let natural = surface_layout(surface, usize::MAX / 4, wrap);
+    match wrap {
+        // An unwrapped editor reports the intrinsic width of its widest logical
+        // line so a scroll host can pan across it.
+        TextWrap::NoWrap => (natural.max_row_width() as i32, natural.row_count() as i32),
+        // A wrapped editor reports the offered content width. With no offer yet
+        // it reports its natural width; the parent's offer then drives the wrap.
+        TextWrap::Soft | TextWrap::Hard => match offered_width.filter(|width| *width > 0) {
+            Some(width) => {
+                let layout = surface_layout(surface, width as usize, wrap);
+                (width, layout.row_count() as i32)
+            }
+            None => (natural.max_row_width() as i32, natural.row_count() as i32),
+        },
+    }
+}
+
+fn placeholder_width(placeholder: &str) -> usize {
+    unicode_segmentation::UnicodeSegmentation::graphemes(placeholder, true)
+        .map(|grapheme| {
+            if grapheme == "\t" {
+                4
+            } else {
+                unicode_width::UnicodeWidthStr::width(grapheme).max(1)
+            }
+        })
+        .sum()
+}
+
+/// Build the canonical layout of an editor surface at a content width.
+pub(super) fn surface_layout(surface: &EditorSurface, width: usize, wrap: TextWrap) -> TextLayout {
+    text_layout::layout_text(
+        &Text::new(surface.value.as_str()).wrap(wrap),
+        width.max(1),
+        ComputedText::default(),
+        |parent, _| parent,
+        |style| *style,
+    )
+}
+
 pub(super) fn raster_text(
     text: &Text,
     rect: RectI,
@@ -48,6 +114,9 @@ pub(super) fn raster_text(
     inherited: ComputedText,
     backdrop: Color,
 ) -> Option<Image> {
+    if let Some(surface) = &text.editor {
+        return editor_raster(text, surface, rect, visible, backdrop);
+    }
     let visible = rect.intersection(visible)?;
     if rect.width <= 0 || rect.height <= 0 {
         return None;
@@ -175,6 +244,176 @@ fn cell_symbol(item: &text_layout::Item) -> String {
         " ".repeat(item.width)
     } else {
         item.symbol.clone()
+    }
+}
+
+/// Rasterize an editor surface from the canonical layout at the committed
+/// content width, and publish that layout into the surface's probe.
+fn editor_raster(
+    text: &Text,
+    surface: &EditorSurface,
+    rect: RectI,
+    visible: RectI,
+    backdrop: Color,
+) -> Option<Image> {
+    let wrap = text.wrap;
+    let layout = surface_layout(surface, rect.width.max(1) as usize, wrap);
+    if let Some(probe) = &text.probe {
+        // The offsets the paint path actually shifted the surface by: the
+        // runtime clamps the requested offset to the real extent, so publishing
+        // the requested value would double-count what the pointer already sees.
+        let (applied_x, applied_y) = text
+            .applied_scroll
+            .unwrap_or((surface.scroll_x, surface.scroll_y));
+        probe.publish(CommittedLayout {
+            layout: std::sync::Arc::new(layout.clone()),
+            width: rect.width.max(0) as usize,
+            height: rect.height.max(0) as usize,
+            wrap,
+            applied_x,
+            applied_y,
+            content_line: 0,
+            content_column: 0,
+        });
+    }
+    let visible = rect.intersection(visible)?;
+    if rect.width <= 0 || rect.height <= 0 {
+        return None;
+    }
+    let base = merge_text(ComputedText::default(), &text.style);
+    let placeholder_style = merge_text(base, &surface.placeholder_style);
+    let selection_style = merge_text(base, &surface.selection_style);
+    let selection_inactive_style = merge_text(base, &surface.selection_inactive_style);
+    let caret_style = merge_text(base, &surface.caret_style);
+    let blank = |style: ComputedText| {
+        Cell::styled(
+            style.foreground,
+            style.background.unwrap_or(backdrop),
+            style.attributes,
+            " ",
+        )
+        .expect("space is valid")
+    };
+    let row_start = (visible.line - rect.line) as usize;
+    let row_end = (visible.bottom() - rect.line) as usize;
+    let col_start = (visible.column - rect.column).max(0) as usize;
+    let col_end = col_start + visible.width as usize;
+    let mut rows = Vec::with_capacity(visible.height as usize);
+    for row_index in row_start..row_end {
+        let items: &[text_layout::Item] = layout.row_items(row_index);
+        let mut cells = vec![blank(base); rect.width as usize];
+        if surface.value.is_empty() {
+            if row_index == 0 {
+                let mut column = 0usize;
+                for grapheme in unicode_segmentation::UnicodeSegmentation::graphemes(
+                    surface.placeholder.as_str(),
+                    true,
+                ) {
+                    if column >= rect.width as usize {
+                        break;
+                    }
+                    let style = if surface.focused && column == 0 {
+                        caret_style
+                    } else {
+                        placeholder_style
+                    };
+                    if let Ok(cell) = Cell::styled(
+                        style.foreground,
+                        style.background.unwrap_or(backdrop),
+                        style.attributes,
+                        grapheme,
+                    ) {
+                        cells[column] = cell;
+                    }
+                    column = column.saturating_add(grapheme_width(grapheme));
+                }
+            }
+        } else {
+            let mut column = 0usize;
+            for item in items {
+                if item.kind == ItemKind::Separator || item.width == 0 {
+                    continue;
+                }
+                let symbol = if item.symbol == "\t" {
+                    " ".repeat(item.width)
+                } else {
+                    item.symbol.clone()
+                };
+                let style = if surface.focused
+                    && surface.caret >= item.source.start
+                    && surface.caret < item.source.end
+                {
+                    caret_style
+                } else if surface
+                    .selection
+                    .is_some_and(|(start, end)| item.source.start < end && item.source.end > start)
+                {
+                    if surface.focused {
+                        selection_style
+                    } else {
+                        selection_inactive_style
+                    }
+                } else {
+                    base
+                };
+                let end = column.saturating_add(item.width);
+                if column < rect.width as usize
+                    && end <= rect.width as usize
+                    && let Ok(cell) = Cell::styled(
+                        style.foreground,
+                        style.background.unwrap_or(backdrop),
+                        style.attributes,
+                        symbol,
+                    )
+                {
+                    cells[column] = cell;
+                }
+                column = end;
+            }
+            if surface.focused
+                && surface.caret >= layout.source_len()
+                && column < rect.width as usize
+                && let Ok(cell) = Cell::styled(
+                    caret_style.foreground,
+                    caret_style.background.unwrap_or(backdrop),
+                    caret_style.attributes,
+                    " ",
+                )
+            {
+                cells[column] = cell;
+            }
+        }
+        // `Image::from_rows` requires every row to occupy the same number of
+        // terminal cells. A row holding a wide grapheme can end up one cell
+        // short of the viewport even though its cell count matches, so pad by
+        // measured cell width rather than by cell count.
+        let start = col_start.min(cells.len());
+        let end = col_end.min(cells.len()).max(start);
+        let target = visible.width.max(0) as usize;
+        let mut visible_row = Vec::with_capacity(target + 1);
+        let mut painted = 0usize;
+        for cell in cells[start..end].iter() {
+            let width = cell.width();
+            if painted + width > target {
+                break;
+            }
+            visible_row.push(cell.clone());
+            painted += width;
+        }
+        while painted < target {
+            visible_row.push(blank(base));
+            painted += 1;
+        }
+        rows.push(visible_row);
+    }
+    Image::from_rows(rows).ok()
+}
+
+fn grapheme_width(grapheme: &str) -> usize {
+    if grapheme == "\t" {
+        4
+    } else {
+        unicode_width::UnicodeWidthStr::width(grapheme).max(1)
     }
 }
 

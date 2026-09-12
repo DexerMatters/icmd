@@ -21,7 +21,7 @@ use icmd::{
 use icmd::{
     alert, badge, blockquote, button, canvas, card, center, checkbox, code, column, divider,
     heading, input, kbd, label, muted, paragraph, progress_bar, radio, row, scroll_area, skeleton,
-    spacer, spinner, switch, text_area,
+    spacer, spinner, switch, textarea,
 };
 
 const TABS: [&str; 4] = ["Overview", "Components", "Data", "Theme"];
@@ -181,10 +181,12 @@ fn components_page(
                         on_change={move |event: TextValueEvent| query_setter.set(event.value)}
                     />
                     <label>"Uncontrolled textarea"</label>
-                    <text_area
-                        width={24}
-                        height={4}
+                    <textarea
                         wrap={wrap}
+                        style={|style| {
+                            style.width /= Dimension::Cells(30);
+                            style.height /= Dimension::Cells(8);
+                        }}
                         default_value={"Long Unicode text: 这是一个很长的示例文本，含有 emoji 👩‍💻 and an unbreakable-token-for-hard-wrap."}
                         on_clipboard={move |event: TextClipboardEvent| eprintln!("host clipboard {:?}: {:?}", event.action, event.text)}
                     />

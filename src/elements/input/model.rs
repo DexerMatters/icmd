@@ -208,16 +208,19 @@ impl EditModel {
         self.caret
     }
 
+    #[allow(dead_code)] // Ownership inspection is part of the model's contract.
     pub(crate) fn ownership(&self) -> ValueOwnership {
         self.ownership
     }
 
     /// The model's normalized value is the selection coordinate space.
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.value.len()
     }
 
     /// Grapheme boundaries in the current value, including 0 and `len`.
+    #[allow(dead_code)]
     pub(crate) fn boundaries(&self) -> Vec<usize> {
         let mut boundaries = vec![0usize];
         boundaries.extend(
@@ -497,6 +500,7 @@ impl EditModel {
 
     /// Apply a vertical move whose target boundary was resolved by the caller
     /// from the canonical layout.
+    #[allow(dead_code)] // The component resolves rows from the layout.
     pub(crate) fn move_vertical(&mut self, target: usize, extend: bool, preferred: Option<usize>) {
         let target = self.clamp(target);
         if extend {
@@ -507,6 +511,7 @@ impl EditModel {
         self.preferred_column = preferred;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn preferred_column(&self) -> Option<usize> {
         self.preferred_column
     }
