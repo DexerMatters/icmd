@@ -41,7 +41,8 @@ pub(crate) struct EditorSurface {
 /// One committed frame's layout, as painted.
 ///
 /// `width` and `height` are the content box the commit pass granted, and
-/// `applied_x`/`applied_y` are the scroll offsets that frame was laid out with.
+/// `applied_x`/`applied_y` are the scroll offsets that frame was actually
+/// painted with: the runtime's clamped value, not the component's request.
 /// Pointer hit-testing and caret reveal read them so both resolve against
 /// exactly the row table that produced the visible frame.
 #[derive(Debug, Clone)]
