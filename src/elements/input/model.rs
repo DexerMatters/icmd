@@ -488,19 +488,20 @@ impl EditModel {
                 self.preferred_column = None;
                 EditOutcome::handled()
             }
-            // Vertical movement needs the rendered layout, so the component
-            // resolves the target row and calls `PlaceCaret`-style movement
-            // through `move_vertical`.
+            // Vertical movement needs the rendered row table, so the component
+            // resolves the target boundary from the canonical layout and calls
+            // `move_vertical`. Reporting it as unhandled here would let the key
+            // bubble while the caret silently stayed put.
             EditAction::MoveUp { .. }
             | EditAction::MoveDown { .. }
             | EditAction::PageUp { .. }
-            | EditAction::PageDown { .. } => EditOutcome::default(),
+            | EditAction::PageDown { .. } => EditOutcome::handled(),
         }
     }
 
     /// Apply a vertical move whose target boundary was resolved by the caller
-    /// from the canonical layout.
-    #[allow(dead_code)] // The component resolves rows from the layout.
+    /// from the canonical layout, carrying the preferred terminal-cell column
+    /// forward so a caret crossing short rows returns to its column.
     pub(crate) fn move_vertical(&mut self, target: usize, extend: bool, preferred: Option<usize>) {
         let target = self.clamp(target);
         if extend {
@@ -511,9 +512,41 @@ impl EditModel {
         self.preferred_column = preferred;
     }
 
-    #[allow(dead_code)]
     pub(crate) fn preferred_column(&self) -> Option<usize> {
         self.preferred_column
+    }
+
+    /// Resolve a vertical movement against the row table and apply it.
+    ///
+    /// `direction` is a signed row delta and `page` repeats the move for
+    /// PageUp/PageDown. Returns the outcome the caller should act on.
+    pub(crate) fn vertical_move(
+        &mut self,
+        layout: &crate::basic::text_layout::TextLayout,
+        direction: i32,
+        steps: usize,
+        extend: bool,
+        policy: EditPolicy,
+    ) -> EditOutcome {
+        if policy.disabled || !policy.multiline {
+            return EditOutcome::default();
+        }
+        let mut target = self.caret.cursor;
+        let mut preferred = self.preferred_column;
+        for _ in 0..steps.max(1) {
+            let (next, column) = layout.vertical(target, direction, preferred);
+            if next == target {
+                break;
+            }
+            target = next;
+            preferred = column;
+        }
+        self.move_vertical(target, extend, preferred);
+        EditOutcome {
+            handled: true,
+            reveal_caret: true,
+            ..EditOutcome::default()
+        }
     }
 
     fn insert(&mut self, inserted: &str, policy: EditPolicy) -> EditOutcome {

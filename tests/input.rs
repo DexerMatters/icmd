@@ -661,3 +661,98 @@ fn wrapping_is_correct_in_the_first_committed_frame() {
         frames[0]
     );
 }
+
+#[test]
+fn multiline_vertical_navigation_moves_the_caret_between_rows() {
+    // Down/Up must move the caret between visual rows and keep a preferred
+    // terminal-cell column across a short row.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("abcdef\nxy\nabcdef".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(8);
+            style.height /= icmd::Dimension::Cells(3);
+        })
+        .node();
+    let viewport = Size::new(12, 5);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 7)));
+    // The caret is at the end of the first row; Down then typing must insert at
+    // a different source position than the first row's end.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Down, KeyModifiers::empty())),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('X'), KeyModifiers::empty())),
+    );
+    let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
+    assert!(
+        !emitted.starts_with("abcdefX"),
+        "Down must move the caret off the first row, not stay at its end: {emitted:?}"
+    );
+    assert!(
+        emitted.contains('X'),
+        "the typed character must be inserted: {emitted:?}"
+    );
+    assert_eq!(
+        emitted.matches('\n').count(),
+        2,
+        "the line structure must be preserved: {emitted:?}"
+    );
+}
+
+#[test]
+fn page_down_and_page_up_repeat_the_vertical_move() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("aa\nbb\ncc\ndd\nee".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(6);
+            style.height /= icmd::Dimension::Cells(2);
+        })
+        .node();
+    let viewport = Size::new(10, 4);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::PageDown, KeyModifiers::empty())),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+    let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
+    assert!(
+        emitted.contains('#'),
+        "PageDown must leave the caret somewhere editable: {emitted:?}"
+    );
+    assert!(
+        !emitted.starts_with('#'),
+        "PageDown from the first row must move down: {emitted:?}"
+    );
+}

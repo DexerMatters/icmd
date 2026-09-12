@@ -281,6 +281,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let state_ref = state_ref.clone();
         let redraw = redraw.clone();
         let config = config.clone();
+        let probe = probe.clone();
         let on_change = on_change.clone();
         let on_submit = on_submit.clone();
         let on_clipboard = on_clipboard.clone();
@@ -330,7 +331,22 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                         }
                     } else if let Some(action) = key_action(&event, &config) {
                         event.stop_propagation();
-                        let outcome = state.model.reduce(action, config.policy);
+                        // Vertical movement is resolved from the same row table
+                        // the pointer and the painter use, so a caret crossing
+                        // wrapped rows lands where the user sees it.
+                        let outcome = if let Some((direction, steps)) = vertical_steps(&action) {
+                            let layout = committed_layout(&probe, &state, &config);
+                            let extend = event.key.modifiers.contains(KeyModifiers::SHIFT);
+                            state.model.vertical_move(
+                                &layout,
+                                direction,
+                                steps,
+                                extend,
+                                config.policy,
+                            )
+                        } else {
+                            state.model.reduce(action, config.policy)
+                        };
                         if outcome.changed {
                             value_event = outcome.value.map(|value| TextValueEvent { value });
                         }
@@ -690,6 +706,17 @@ fn is_cut(event: &KeyboardEvent) -> bool {
 fn is_copy(event: &KeyboardEvent) -> bool {
     event.key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(event.key.code, KeyCode::Char('c' | 'C'))
+}
+
+/// The signed row delta and repeat count for a vertical navigation action.
+fn vertical_steps(action: &EditAction) -> Option<(i32, usize)> {
+    match action {
+        EditAction::MoveUp { .. } => Some((-1, 1)),
+        EditAction::MoveDown { .. } => Some((1, 1)),
+        EditAction::PageUp { rows, .. } => Some((-1, (*rows).max(1))),
+        EditAction::PageDown { rows, .. } => Some((1, (*rows).max(1))),
+        _ => None,
+    }
 }
 
 /// The edit action a key press maps to, or `None` when the key does not belong
