@@ -914,51 +914,40 @@ fn drag_selection_extends_and_release_keeps_the_selection() {
 
 #[test]
 fn extreme_values_and_widths_do_not_panic() {
-    // Guard against panics and runaway loops in the canonical layout across the
-    // edge cases the plan calls out.
-    let cases: [&str; 12] = [
-        "",
-        "\n",
-        "\n\n\n",
-        "a\n",
-        "\n\na",
-        "   ",
-        "\t\t\t",
-        "界",
-        "界界界",
-        "e\u{301}\u{301}\u{301}",
-        "👩‍💻🇺🇸👍🏽",
-        "a\r\nb\rc\td",
-    ];
-    for value in cases {
-        for width in [1u16, 2, 3, 5] {
-            let node = raw_input
-                .props(RawInputProps {
-                    mode: Attr::Set(RawInputMode::Multiline),
-                    default_value: Attr::Set(value.into()),
-                    wrap: Attr::Set(icmd::TextWrap::Soft),
-                    ..RawInputProps::default()
-                })
-                .style(|style| {
-                    style.width /= icmd::Dimension::Cells(width);
-                    style.height /= icmd::Dimension::Cells(2);
-                })
-                .node();
-            let viewport = Size::new(width.max(4) as u16 + 2, 5);
-            let (sender, output, dispatcher) = pipeline(viewport);
-            sender.send(node).unwrap();
-            interact(&output, &dispatcher, Some(click(0, 1)));
-            interact(
-                &output,
-                &dispatcher,
-                Some(key(KeyCode::End, KeyModifiers::empty())),
-            );
-            interact(
-                &output,
-                &dispatcher,
-                Some(key(KeyCode::Char('x'), KeyModifiers::empty())),
-            );
-            // Reaching here without a hang or panic is the assertion.
-        }
-    }
+    // One end-to-end pass over the nastiest value: reaching the end without a
+    // panic, hang, or lost frame is the assertion. The width matrix for the
+    // canonical layout itself lives in the unit property tests, which do not
+    // need a runtime per case.
+    let value = "a\r\nb\rc\td\n\n界界 👩‍💻 e\u{301}";
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set(value.into()),
+            wrap: Attr::Set(icmd::TextWrap::Soft),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(3);
+            style.height /= icmd::Dimension::Cells(2);
+        })
+        .node();
+    let viewport = Size::new(6, 5);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('x'), KeyModifiers::empty())),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Backspace, KeyModifiers::empty())),
+    );
 }
