@@ -1010,3 +1010,66 @@ fn every_painted_character_round_trips_through_a_pointer_click() {
     }
     assert_eq!(checked, row_width);
 }
+
+#[test]
+fn the_caret_is_painted_at_every_row_end() {
+    // A caret at the end of a non-final line must be visible. The caret is a
+    // styled blank, so this checks the sequence of frames for a reverse-video
+    // cell rather than the printable text: the caret cell can be painted in an
+    // earlier frame and simply not repeat in a later diff.
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("ab\ncd".into()),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(8);
+            style.height /= icmd::Dimension::Cells(4);
+        })
+        .node();
+    let viewport = Size::new(12, 6);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+
+    // Click row 0 (focus, caret after cell 1), then End: the caret ends the
+    // first line, which is not the end of the value. Every frame is inspected,
+    // not just the last one.
+    let mut all = collect_frames(&output, &dispatcher, Some(click(0, 1)));
+    all.push_str(&collect_frames(&output, &dispatcher, None));
+    all.push_str(&collect_frames(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    ));
+    assert!(
+        has_reverse_cell(&all),
+        "a focused caret must paint a reverse-video cell somewhere in the frame \
+         stream: {:?}",
+        strip_ansi(&all)
+    );
+}
+
+/// Drain every pending frame and return the concatenated raw stream.
+fn collect_frames(
+    output: &crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+    dispatcher: &EventDispatcher,
+    event: Option<Event>,
+) -> String {
+    let mut raw = String::new();
+    while let Ok(frame) = output.recv_timeout(Duration::from_millis(150)) {
+        raw.push_str(&frame.unwrap());
+    }
+    if let Some(event) = event {
+        dispatcher.dispatch(event);
+        while let Ok(frame) = output.recv_timeout(Duration::from_millis(150)) {
+            raw.push_str(&frame.unwrap());
+        }
+    }
+    raw
+}
+
+/// Whether a frame contains a reverse-video SGR sequence.
+fn has_reverse_cell(frame: &str) -> bool {
+    frame.contains("\u{1b}[7m") || frame.contains(";7m") || frame.contains("\u{1b}[7;")
+}
