@@ -951,3 +951,54 @@ fn extreme_values_and_widths_do_not_panic() {
         Some(key(KeyCode::Backspace, KeyModifiers::empty())),
     );
 }
+
+#[test]
+fn every_painted_character_round_trips_through_a_pointer_click() {
+    // For each character of a wrapped value, clicking its cell and typing must
+    // insert at that character's boundary - never a cell earlier or later.
+    let value = "abcdefghijklmnop";
+    let mut checked = 0usize;
+    // The editor wraps at eight content cells, so both painted rows are
+    // exercised. Each row maps its own cells back to its own source range.
+    let row_width = 8usize;
+    for cell in 0..row_width as u16 {
+        let values = Arc::new(Mutex::new(Vec::new()));
+        let node = raw_input
+            .props(RawInputProps {
+                mode: Attr::Set(RawInputMode::Multiline),
+                default_value: Attr::Set(value.into()),
+                wrap: Attr::Set(icmd::TextWrap::Hard),
+                on_change: Attr::Set(EventListener::new({
+                    let values = values.clone();
+                    move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+                })),
+                ..RawInputProps::default()
+            })
+            .style(|style| {
+                style.width /= icmd::Dimension::Cells(8);
+                style.height /= icmd::Dimension::Cells(4);
+            })
+            .node();
+        let viewport = Size::new(12, 6);
+        let (sender, output, dispatcher) = pipeline(viewport);
+        sender.send(node).unwrap();
+        interact(&output, &dispatcher, Some(click(0, cell)));
+        interact(
+            &output,
+            &dispatcher,
+            Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+        );
+        let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
+        let position = emitted.find('#').expect("the click must place a caret");
+        // A pointer lands inside a cell, so the caret belongs *after* that
+        // cell's character - never a cell earlier or later. Cell 0 of the first
+        // row is therefore boundary 1.
+        let expected = cell as usize + 1;
+        assert_eq!(
+            position, expected,
+            "clicking cell {cell} must insert at {expected}, got {position} in {emitted:?}"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, row_width);
+}
