@@ -607,7 +607,18 @@ fn editor_raster(
                 if first < end.min(col_end) {
                     let at = first - col_start;
                     if let Some(slot) = grid.get_mut(at) {
-                        *slot = Slot::Glyph(blank(caret_style));
+                        // The column belongs to the caret's own cell, which is
+                        // only partly visible and so filled its slots with
+                        // single-cell blanks. Guard anyway: replacing a
+                        // continuation slot would make the row wider than the
+                        // viewport, which `from_rows` rejects.
+                        debug_assert!(
+                            !matches!(slot, Slot::Continuation),
+                            "a partly visible cell never emits a continuation"
+                        );
+                        if !matches!(slot, Slot::Continuation) {
+                            *slot = Slot::Glyph(blank(caret_style));
+                        }
                     }
                 }
             }
