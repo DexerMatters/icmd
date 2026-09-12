@@ -392,11 +392,15 @@ fn editor_raster(
                 }
                 column = end;
             }
-            // The caret belongs to this row whenever its row table says so, not
-            // only at the end of the value: a caret at a soft-wrap boundary or
-            // at the end of any non-final line must still be painted.
+            // A caret that is not sitting on a grapheme of this row is drawn as
+            // a reverse blank just past the row's painted content. This covers
+            // the end of a non-final line and a soft-wrap boundary; a caret that
+            // did land on a grapheme was already reversed above, so painting a
+            // second marker would show two carets.
+            let caret_row = layout.caret(surface.caret).0;
             if surface.focused
-                && layout.caret(surface.caret).0 == row_index
+                && caret_row == row_index
+                && surface.caret >= layout.row_end(row_index)
                 && column < rect.width as usize
                 && let Ok(cell) = Cell::styled(
                     caret_style.foreground,

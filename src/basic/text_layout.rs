@@ -766,13 +766,21 @@ fn hard_pieces(widths: &[usize], first: usize, last: usize) -> Vec<Piece> {
 /// trailing whitespace on the last row both stay painted.
 fn item_is_dropped_separator(pieces: &[Piece], index: usize, is_last_row: bool) -> bool {
     if is_last_row {
+        // The last row of a logical line paints its trailing whitespace.
         return false;
     }
     let position = pieces.partition_point(|piece| piece.start <= index);
     let Some(piece) = position.checked_sub(1).and_then(|at| pieces.get(at)) else {
         return false;
     };
-    index >= piece.content_end
+    // `pieces` holds only the pieces packed onto THIS row. Whitespace is
+    // dropped only when its piece is the row's LAST piece: that whitespace is
+    // what pushed the following piece onto a later row. Whitespace inside the
+    // row - a piece that is followed by another piece on the same row - is
+    // ordinary painted content, and dropping it would shift every later
+    // grapheme out of agreement with the caret and hit-testing tables.
+    let is_last_piece = position >= pieces.len();
+    is_last_piece && index >= piece.content_end
 }
 
 /// Painted cell width of a row. Separators are excluded: they own source bytes
@@ -1133,6 +1141,33 @@ mod tests {
         // Carrying the preferred column forward reaches column 2 of row 2.
         let (moved, _) = layout.vertical(moved, 1, preferred);
         assert_eq!(layout.column(moved), 2);
+    }
+
+    /// A row that packs several wrapping pieces paints the whitespace between
+    /// them: only the whitespace that pushed a piece to a later row is dropped.
+    #[test]
+    fn separators_inside_a_row_are_painted() {
+        let layout = build("ab cd efgh", TextWrap::Soft, 6);
+        let painted: Vec<String> = (0..layout.row_count())
+            .map(|index| {
+                layout
+                    .row_items(index)
+                    .iter()
+                    .filter(|item| item.kind != ItemKind::Separator)
+                    .map(|item| item.symbol.clone())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            painted,
+            ["ab cd", "efgh"],
+            "the space inside the first row is painted; only the trailing one \
+             that pushed 'efgh' onto the next row is dropped"
+        );
+        // The caret table and the painted cells agree: 'c' is at cell 3 because
+        // the space before it occupies cell 2.
+        assert_eq!(layout.caret(3).1, 3, "'c' follows the painted space");
+        assert_eq!(layout.hit(0, 2, HitBias::Leading), 2);
     }
 
     #[test]

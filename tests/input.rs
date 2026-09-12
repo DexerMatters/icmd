@@ -1159,3 +1159,81 @@ fn change_observer_may_edit_other_state_without_deadlocking() {
         "the observer must see multi-character values: {seen:?}"
     );
 }
+
+#[test]
+fn a_caret_on_a_grapheme_does_not_also_paint_a_second_marker() {
+    // The caret reverses the grapheme it sits on. It must not additionally
+    // paint a reverse blank at the row end, which would show two carets.
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("abc".into()),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(6))
+        .node();
+    let viewport = Size::new(10, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    // Click cell 0: the caret sits on 'a' (a pointer lands after the cell's
+    // grapheme, so this selects boundary 1 only when clicking cell 0 of an
+    // empty prefix). Use Home instead to place the caret before 'a'.
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    let raw = collect_frames(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Home, KeyModifiers::empty())),
+    );
+    // Count the reverse-video SGR sequences: a single caret means the reversed
+    // grapheme only, never an extra reversed blank at the end of the row.
+    let reverse_count = raw.matches("\u{1b}[7m").count() + raw.matches(";7m").count();
+    assert!(
+        reverse_count <= 2,
+        "one caret must not paint two markers (reverse sequences: {reverse_count}): {:?}",
+        strip_ansi(&raw)
+    );
+}
+
+#[test]
+fn soft_wrapping_paints_the_spaces_inside_a_row() {
+    // A row that packs more than one wrapping piece keeps the spaces between
+    // them; only the space that pushed the next word to a later row is dropped.
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("ab cd efgh".into()),
+            wrap: Attr::Set(icmd::TextWrap::Soft),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(6);
+            style.height /= icmd::Dimension::Cells(3);
+        })
+        .node();
+    let viewport = Size::new(10, 5);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    let raw = collect_frames(&output, &dispatcher, None);
+    let painted = strip_ansi(&raw);
+    assert!(
+        painted.contains("ab") && painted.contains("cd") && painted.contains("efgh"),
+        "every grapheme is painted: {painted:?}"
+    );
+    // The internal space occupies its cell, so 'c' is addressed at column 4. It
+    // would be column 3 if the space were dropped and the row painted "abcd".
+    assert!(
+        raw.contains("\u{1b}[1;4Hcd"),
+        "the space between the two pieces occupies its cell: {}",
+        raw.escape_debug()
+    );
+    assert!(
+        !raw.contains("\u{1b}[1;3Hcd"),
+        "'cd' must never start at column 3, which is where dropping the \
+         internal space would put it: {}",
+        raw.escape_debug()
+    );
+    assert!(
+        raw.contains("\u{1b}[2;1Hefgh"),
+        "the wrapped word starts the next row: {}",
+        raw.escape_debug()
+    );
+}
