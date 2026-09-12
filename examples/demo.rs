@@ -3,20 +3,21 @@
 use std::{
     error::Error,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
 
-use crossterm::event::KeyCode;
+use crossterm::{event::KeyCode, style::Color};
 use icmd::theme::{Theme, ThemeMode, ThemePreset};
 use icmd::{
-    AlertVariant, Align, BadgeVariant, Component, ComponentContext, Dimension, Edges, Justify,
-    KeyboardEvent, Layout, Node, Percent, Props, RuntimeConfig, ScrollAxes, ScrollEvent,
-    ScrollOffset, StateSetter, Text, TextClipboardEvent, TextOverflow, TextValueEvent, TextWrap,
-    render, theme_provider, ui, view,
+    AlertVariant, Align, Attr, BadgeVariant, Component, ComponentContext, Dimension, Edges,
+    EventListener, Justify, KeyboardEvent, Layout, Node, Percent, Props, RawInputMode,
+    RawInputProps, RuntimeConfig, ScrollAxes, ScrollEvent, ScrollOffset, StateSetter, Text,
+    TextClipboardEvent, TextOverflow, TextValueEvent, TextWrap, raw_input, render, theme_provider,
+    ui, view,
 };
 use icmd::{
     alert, badge, blockquote, button, canvas, card, center, checkbox, code, column, divider,
@@ -25,6 +26,63 @@ use icmd::{
 };
 
 const TABS: [&str; 4] = ["Overview", "Components", "Data", "Theme"];
+
+/// Props for the demo's custom field.
+#[derive(Clone, Default)]
+pub struct CommandFieldProps {
+    pub value: Attr<String>,
+    pub on_change: Attr<EventListener<TextValueEvent>>,
+}
+
+/// A user-defined field built by wrapping `raw_input`.
+///
+/// It chooses single-line policy, forwards the caller's value and change
+/// observer, and restyles the host. The caller's pointer observer runs on the
+/// same host that performs the editing, so it sees every press while the caret
+/// still moves.
+pub fn command_field(cx: &mut ComponentContext, props: &Props<CommandFieldProps>) -> Node {
+    let hits = Arc::new(Mutex::new(String::new()));
+    let label = hits.clone();
+    let _ = cx;
+    raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::SingleLine),
+            value: props.value.clone(),
+            placeholder: Attr::Set("command…".into()),
+            on_change: props.on_change.clone(),
+            ..RawInputProps::default()
+        })
+        .events({
+            let label = label.clone();
+            move |handlers: &mut icmd::EventHandlers| {
+                handlers.pointer_down = Attr::Set(EventListener::new(move |_event| {
+                    let mut slot = label.lock().unwrap();
+                    *slot = "command field focused".to_string();
+                }));
+            }
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(24);
+            style.border.foreground /= Color::Yellow;
+        })
+        .node()
+}
+
+fn custom_field_demo() -> Node {
+    ui! {
+        <view style={|style| {
+            style.layout /= Layout::Vertical;
+            style.width /= Dimension::Max;
+        }}>
+            <label>"Custom wrapper over raw_input"</label>
+            <command_field
+                value={"run --all"}
+                on_change={move |_event: TextValueEvent| {}}
+            />
+            <muted>"Wraps raw_input; forwards props, style, and events"</muted>
+        </view>
+    }
+}
 
 fn overview(theme: &Theme, tick: usize) -> Node {
     let progress_value = 42 + tick as u64 % 49;
@@ -196,6 +254,7 @@ fn components_page(
                         </button>
                         <muted>"Ctrl+C / Ctrl+X uses host clipboard"</muted>
                     </row>
+                    {custom_field_demo()}
                     {check}
                     {radio}
                     {toggle}
