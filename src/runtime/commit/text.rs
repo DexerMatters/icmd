@@ -961,8 +961,9 @@ mod tests {
         }
     }
 
-    /// Every `(row, column)` painted in the caret style. The surface's caret
-    /// style uses a distinctive background so the marker is unambiguous.
+    /// Every `(row, column)` covered by caret styling. A wide grapheme's caret
+    /// covers its continuation column too, so this is the set of columns the
+    /// layout's caret span occupies.
     fn caret_cells(surface: &EditorSurface, width: usize, height: usize) -> Vec<(usize, usize)> {
         let text = Text::new("").wrap(surface.wrap);
         let rect = RectI::new(0, 0, width as i32, height as i32);
@@ -970,12 +971,8 @@ mod tests {
         let mut found = Vec::new();
         for row in 0..image.height() {
             for column in 0..image.width() {
-                match image.cell_at(row, column) {
-                    crate::data::CellSlot::Continuation(_) => {}
-                    crate::data::CellSlot::Lead(cell) if cell.background() == Color::Magenta => {
-                        found.push((row, column));
-                    }
-                    _ => {}
+                if image.cell_at(row, column).cell().background() == Color::Magenta {
+                    found.push((row, column));
                 }
             }
         }
@@ -1028,14 +1025,59 @@ mod tests {
     #[test]
     fn an_empty_control_keeps_its_caret_when_the_placeholder_is_clipped() {
         // A tab placeholder in a two-cell box paints blanks, and the focused
-        // empty control must still show its caret on that first cell.
-        for placeholder in ["\t", "界"] {
+        // empty control must still show its caret on that first cell. A wide
+        // grapheme that fits is reversed across both of its cells.
+        for (placeholder, expected) in [
+            ("\t", vec![(0, 0)]),
+            ("界", vec![(0, 0), (0, 1)]),
+            ("a\tb", vec![(0, 0)]),
+        ] {
             let surface = focused_surface("", placeholder, TextWrap::Soft, 0);
             assert_eq!(
                 caret_cells(&surface, 2, 1),
-                [(0, 0)],
-                "placeholder={placeholder:?}: the caret must stay on the first cell"
+                expected,
+                "placeholder={placeholder:?}: the caret must stay on the cell the \
+                 layout gives it"
             );
+        }
+    }
+
+    #[test]
+    fn the_painted_caret_covers_exactly_the_layouts_caret_span() {
+        // The caret is a coordinate too: for every offset the painted caret must
+        // start in the cell the canonical layout reports and cover exactly the
+        // span that layout gives it, and it must not appear at all when its cell
+        // is outside the box.
+        let values = ["a\tb", "ab界c", "界界", "abc", "a\nb", "", "\t"];
+        for wrap in [TextWrap::NoWrap, TextWrap::Soft, TextWrap::Hard] {
+            for value in values {
+                for width in 1..7usize {
+                    let layout = surface_layout(&editor_surface(value, "", wrap), width, wrap);
+                    for offset in 0..=value.len() {
+                        if !value.is_char_boundary(offset) {
+                            continue;
+                        }
+                        let surface = focused_surface(value, "", wrap, offset);
+                        let (row, cell, caret_width) = layout.caret(offset);
+                        let painted = caret_cells(&surface, width, layout.row_count());
+                        let expected: Vec<(usize, usize)> = if cell >= width {
+                            Vec::new()
+                        } else if cell + caret_width <= width {
+                            (cell..cell + caret_width)
+                                .map(|column| (row, column))
+                                .collect()
+                        } else {
+                            // A caret whose span the box clips keeps its leading
+                            // cell and drops the rest.
+                            vec![(row, cell)]
+                        };
+                        assert_eq!(
+                            painted, expected,
+                            "value={value:?} wrap={wrap:?} width={width} offset={offset}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
