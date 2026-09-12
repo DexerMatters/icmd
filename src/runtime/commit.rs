@@ -110,6 +110,7 @@ impl Commit {
         self.event_dispatcher.clone()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn raster_text_cached(
         &mut self,
         id: DomId,
@@ -118,6 +119,7 @@ impl Commit {
         visible: RectI,
         inherited: ComputedText,
         backdrop: Color,
+        scroll: (i32, i32),
     ) -> Option<Image> {
         self.text_seen.insert(id);
         self.text_cache_tick = self.text_cache_tick.saturating_add(1);
@@ -140,7 +142,7 @@ impl Commit {
             entry.used = used;
             return Some(entry.image.clone());
         }
-        let image = text::raster_text(text, content, visible, inherited, backdrop)?;
+        let image = text::raster_text(text, content, visible, inherited, backdrop, scroll)?;
         if entries.len() >= 2 {
             let oldest = entries
                 .iter()
@@ -204,6 +206,7 @@ impl Commit {
             &mut event_regions,
             None,
             &mut event_order,
+            (0, 0),
         );
         self.event_dispatcher
             .publish(event_regions, &retained_scroll_ids);

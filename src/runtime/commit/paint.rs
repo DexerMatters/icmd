@@ -35,6 +35,12 @@ impl Commit {
         event_regions: &mut Vec<EventRegion>,
         parent: Option<DomId>,
         event_order: &mut u64,
+        // How far this node's rect has been shifted by the scroll containers
+        // around it, in `(line, column)` order. It is the offset the frame is
+        // really painted with - the runtime's clamped value, not the request -
+        // so consumers that map painted coordinates back to layout coordinates
+        // can agree with the pixels.
+        scroll: (i32, i32),
     ) {
         if clip.is_empty() {
             // Eager file sources are retained even when an ancestor's
@@ -130,6 +136,7 @@ impl Commit {
                         content_visible,
                         style.text,
                         current_backdrop.unwrap_or(Color::Reset),
+                        scroll,
                     )
                 {
                     Self::insert(
@@ -278,10 +285,16 @@ impl Commit {
                     ),
                 };
                 for (child, mut child_rect) in scroll_layout.children {
-                    if spec.is_some() {
+                    let child_scroll = if spec.is_some() {
                         child_rect.line = child_rect.line.saturating_sub(offset.y);
                         child_rect.column = child_rect.column.saturating_sub(offset.x);
-                    }
+                        (
+                            scroll.0.saturating_add(offset.y),
+                            scroll.1.saturating_add(offset.x),
+                        )
+                    } else {
+                        scroll
+                    };
                     self.paint_node(
                         child,
                         child_rect,
@@ -294,6 +307,7 @@ impl Commit {
                         event_regions,
                         Some(*id),
                         event_order,
+                        child_scroll,
                     );
                 }
                 if let Some(spec) = spec {

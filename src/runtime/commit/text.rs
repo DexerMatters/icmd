@@ -118,9 +118,10 @@ pub(super) fn raster_text(
     visible: RectI,
     inherited: ComputedText,
     backdrop: Color,
+    scroll: (i32, i32),
 ) -> Option<Image> {
     if let Some(surface) = &text.editor {
-        return editor_raster(text, surface, rect, visible, backdrop);
+        return editor_raster(text, surface, rect, visible, backdrop, scroll);
     }
     let visible = rect.intersection(visible)?;
     if rect.width <= 0 || rect.height <= 0 {
@@ -263,6 +264,7 @@ fn editor_raster(
     rect: RectI,
     visible: RectI,
     backdrop: Color,
+    scroll: (i32, i32),
 ) -> Option<Image> {
     let wrap = text.wrap;
     // An empty control paints its placeholder through the same canonical
@@ -278,20 +280,20 @@ fn editor_raster(
         surface_layout(surface, rect.width.max(1) as usize, wrap)
     };
     if let Some(probe) = &text.probe {
-        // The offsets the paint path actually shifted the surface by: the
-        // runtime clamps the requested offset to the real extent, so publishing
-        // the requested value would double-count what the pointer already sees.
-        let (applied_x, applied_y) = text
-            .applied_scroll
-            .unwrap_or((surface.scroll_x, surface.scroll_y));
+        // The offset the frame is really painted with: the scroll containers
+        // around this surface shifted it by the values the runtime *applied*,
+        // which are the component's request clamped to the current extent.
+        // Publishing the request instead would disagree with the pixels as soon
+        // as a resize shrinks the extent, and the first pointer interaction
+        // after that resize would land in the wrong column. `visible.width` and
+        // `visible.height` stay the clip the scroll host can paint, which may be
+        // smaller than the surface's document box.
         probe.publish(CommittedLayout {
             layout: std::sync::Arc::new(layout.clone()),
-            // The visible viewport is the region the scroll host can actually
-            // paint, which may be smaller than the surface's document box.
             viewport_width: visible.width.max(1) as usize,
             viewport_height: visible.height.max(1) as usize,
-            applied_x,
-            applied_y,
+            applied_x: scroll.1.max(0) as usize,
+            applied_y: scroll.0.max(0) as usize,
         });
     }
     let visible = rect.intersection(visible)?;
@@ -778,7 +780,8 @@ mod tests {
     fn editor_rows(surface: &EditorSurface, width: usize, height: usize) -> Vec<String> {
         let text = Text::new("").wrap(surface.wrap);
         let rect = RectI::new(0, 0, width as i32, height as i32);
-        let image = editor_raster(&text, surface, rect, rect, Color::Reset).expect("raster");
+        let image =
+            editor_raster(&text, surface, rect, rect, Color::Reset, (0, 0)).expect("raster");
         (0..image.height())
             .map(|row| {
                 (0..image.width())
@@ -860,7 +863,15 @@ mod tests {
         let text = Text::new("").wrap(surface.wrap);
         let rect = RectI::new(0, 0, document as i32, height as i32);
         let visible = RectI::new(0, start as i32, viewport as i32, height as i32);
-        let image = editor_raster(&text, surface, rect, visible, Color::Reset).expect("raster");
+        let image = editor_raster(
+            &text,
+            surface,
+            rect,
+            visible,
+            Color::Reset,
+            (0, start as i32),
+        )
+        .expect("raster");
         (0..image.height())
             .map(|row| {
                 (0..image.width())
@@ -1012,7 +1023,8 @@ mod tests {
     fn caret_cells(surface: &EditorSurface, width: usize, height: usize) -> Vec<(usize, usize)> {
         let text = Text::new("").wrap(surface.wrap);
         let rect = RectI::new(0, 0, width as i32, height as i32);
-        let image = editor_raster(&text, surface, rect, rect, Color::Reset).expect("raster");
+        let image =
+            editor_raster(&text, surface, rect, rect, Color::Reset, (0, 0)).expect("raster");
         let mut found = Vec::new();
         for row in 0..image.height() {
             for column in 0..image.width() {
@@ -1139,7 +1151,15 @@ mod tests {
         let text = Text::new("").wrap(surface.wrap);
         let rect = RectI::new(0, 0, document as i32, height as i32);
         let visible = RectI::new(0, start as i32, viewport as i32, height as i32);
-        let image = editor_raster(&text, surface, rect, visible, Color::Reset).expect("raster");
+        let image = editor_raster(
+            &text,
+            surface,
+            rect,
+            visible,
+            Color::Reset,
+            (0, start as i32),
+        )
+        .expect("raster");
         let mut found = Vec::new();
         for row in 0..image.height() {
             for column in 0..image.width() {

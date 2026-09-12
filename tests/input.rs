@@ -1960,3 +1960,119 @@ fn a_caret_on_a_viewport_clipped_wide_grapheme_still_paints() {
         strip_ansi(&last)
     );
 }
+
+#[test]
+fn a_pointer_click_after_a_resize_maps_to_the_painted_cell() {
+    // An 18-cell value in a 10-cell viewport pans to offset 8 at the end.
+    // Growing the viewport to 12 cells shrinks the extent to 6, so the runtime
+    // clamps the offset it paints with. The component must reconcile pointer
+    // coordinates against that clamped offset rather than the one it asked for,
+    // or the first click after the resize lands on a column the frame does not
+    // even show.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::SingleLine),
+            default_value: Attr::Set("abcdefghijklmnop界".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Max;
+            style.height /= icmd::Dimension::Cells(1);
+        })
+        .node();
+    let viewport = Size::new(10, 3);
+    let (commit, resize, dispatcher) = Commit::new_with_events(viewport);
+    let (sender, output) = Runtime::new(Lower::default())
+        .then(commit)
+        .then(Renderer::new(viewport).unwrap())
+        .start();
+    sender.send(node).unwrap();
+    // Focus and pan to the end of the value.
+    interact(&output, &dispatcher, Some(click(0, 0)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+
+    // Grow the viewport, which shrinks the scrollable extent.
+    resize.set(Size::new(12, 3));
+    let _ = collect_frames(&output, &dispatcher, None);
+
+    // Click the first painted cell, which is document column 6 ('g').
+    interact(&output, &dispatcher, Some(click(0, 0)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+
+    let values = values.lock().unwrap();
+    let last = values.last().map(String::as_str).unwrap_or_default();
+    assert_eq!(
+        last, "abcdefg#hijklmnop界",
+        "the click must land on the cell the resized frame painted: {values:?}"
+    );
+}
+
+#[test]
+fn a_pointer_click_after_a_vertical_resize_maps_to_the_painted_row() {
+    // The same contract on the vertical axis: growing the viewport clamps the
+    // offset the frame is painted with, and a click on the first painted row
+    // must resolve to that row.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("0\n1\n2\n3\n4\n5\n6\n7\n8\n9".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(4);
+            style.height /= icmd::Dimension::Max;
+        })
+        .node();
+    let viewport = Size::new(8, 7);
+    let (commit, resize, dispatcher) = Commit::new_with_events(viewport);
+    let (sender, output) = Runtime::new(Lower::default())
+        .then(commit)
+        .then(Renderer::new(viewport).unwrap())
+        .start();
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 0)));
+    // Pan to the end: the textarea scrolls down to the last row.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::CONTROL)),
+    );
+
+    // Grow the viewport, which grows the host and shrinks the vertical extent
+    // from 3 to 0.
+    resize.set(Size::new(8, 11));
+    let _ = collect_frames(&output, &dispatcher, None);
+
+    // Click the first painted row, which is document row 0 after the clamp.
+    interact(&output, &dispatcher, Some(click(0, 0)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+
+    let values = values.lock().unwrap();
+    let last = values.last().map(String::as_str).unwrap_or_default();
+    assert_eq!(
+        last, "0#\n1\n2\n3\n4\n5\n6\n7\n8\n9",
+        "the click must land on the row the resized frame painted first: {values:?}"
+    );
+}
