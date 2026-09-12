@@ -1567,9 +1567,14 @@ fn a_wide_grapheme_straddling_the_left_edge_keeps_later_cells_in_place() {
     );
     raw.push_str(&collect_frames(&output, &dispatcher, None));
     let painted = strip_ansi(&raw);
+    // The viewport starts one cell into the two-cell grapheme, so its first
+    // painted cell is the grapheme's hidden half: a blank before 'a'. Without
+    // that placeholder 'a' would shift into column 0 and stop matching the cell
+    // the hit table assigns it.
     assert!(
-        painted.contains("ab"),
-        "the cells after the partial wide grapheme stay visible: {painted:?}"
+        painted.contains(" ab") || raw.contains("\u{1b}[1;2Ha"),
+        "the partial wide grapheme leaves a blank before 'a': {painted:?} {}",
+        raw.escape_debug()
     );
     // Clicking the first painted cell must insert after exactly that grapheme,
     // so the value keeps its order.
