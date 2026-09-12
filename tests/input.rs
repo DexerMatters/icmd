@@ -1891,3 +1891,38 @@ fn a_clipped_item_keeps_later_cells_blank_in_the_painted_frame() {
         }
     }
 }
+
+#[test]
+fn a_caret_on_a_clipped_grapheme_still_paints() {
+    // "a\tb" in a two-cell box: 'a' occupies the first row and the tab owns the
+    // second, where it is clipped to blanks. Clicking the first cell puts the
+    // caret on the tab, and the caret the canonical layout places there must
+    // still be visible: it follows the layout, not whatever happened to fit.
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("a\tb".into()),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(2);
+            style.height /= icmd::Dimension::Cells(3);
+        })
+        .node();
+    let viewport = Size::new(6, 5);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    // Settle the first frame, then focus through the pointer.
+    while output.recv_timeout(Duration::from_millis(150)).is_ok() {}
+    dispatcher.dispatch(click(0, 0));
+    let mut last = String::new();
+    while let Ok(frame) = output.recv_timeout(Duration::from_millis(150)) {
+        last = frame.unwrap();
+    }
+    assert!(
+        has_reverse_cell(&last),
+        "the caret sitting on the clipped tab must still paint a reverse cell \
+         in its own column: {:?}",
+        strip_ansi(&last)
+    );
+}

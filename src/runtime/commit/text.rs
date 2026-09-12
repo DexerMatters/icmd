@@ -329,6 +329,10 @@ fn editor_raster(
         let mut columns = 0usize;
         let target = rect.width.max(0) as usize;
         if showing_placeholder {
+            // A focused empty control draws its caret on the placeholder's own
+            // insertion point, which is the first cell of its first row.
+            let caret_here = surface.focused && row_index == 0;
+            let mut caret_painted = false;
             for item in items {
                 if item.width == 0 {
                     continue;
@@ -352,7 +356,8 @@ fn editor_raster(
                 } else {
                     item.symbol.clone()
                 };
-                let style = if surface.focused && cells.is_empty() {
+                let style = if caret_here && !caret_painted {
+                    caret_painted = true;
                     caret_style
                 } else {
                     placeholder_style
@@ -385,6 +390,23 @@ fn editor_raster(
                         }
                     }
                 }
+            }
+            // The first placeholder item was clipped by the box, so its cell is
+            // a blank. The caret must still be visible there instead of
+            // disappearing with the hint it sat on.
+            if caret_here
+                && !caret_painted
+                && columns == 0
+                && target > 0
+                && let Ok(cell) = Cell::styled(
+                    caret_style.foreground,
+                    caret_style.background.unwrap_or(backdrop),
+                    caret_style.attributes,
+                    " ",
+                )
+            {
+                columns += cell.width();
+                cells.push(cell);
             }
         } else {
             let mut caret_painted = false;
@@ -482,26 +504,31 @@ fn editor_raster(
                     }
                 }
             }
-            // A caret that is not sitting on a grapheme of this row is drawn as
-            // a reverse blank just past the row's painted content. This covers
-            // the end of a non-final line and a soft-wrap boundary; a caret that
-            // did land on a grapheme was already reversed above, so painting a
-            // second marker would show two carets.
-            let caret_row = layout.caret(surface.caret).0;
-            if surface.focused
-                && caret_row == row_index
-                && !caret_painted
-                && surface.caret >= layout.row_end(row_index)
-                && columns < target
-                && let Ok(cell) = Cell::styled(
-                    caret_style.foreground,
-                    caret_style.background.unwrap_or(backdrop),
-                    caret_style.attributes,
-                    " ",
-                )
-            {
-                columns += cell.width();
-                cells.push(cell);
+            // A caret that is not sitting on a painted grapheme of this row is
+            // drawn as a reverse blank in the caret's own cell. That covers the
+            // end of a non-final line, a soft-wrap boundary, and a caret on a
+            // grapheme the box clipped: the caret keeps the column the canonical
+            // layout gives it, and it must stay visible even when the grapheme
+            // under it did not fit. A caret that did land on a painted grapheme
+            // was already reversed above, so painting a second marker would show
+            // two carets.
+            let (caret_row, caret_cell, _) = layout.caret(surface.caret);
+            if surface.focused && caret_row == row_index && !caret_painted {
+                while columns < caret_cell.min(target) {
+                    cells.push(blank(base));
+                    columns += 1;
+                }
+                if columns < target
+                    && let Ok(cell) = Cell::styled(
+                        caret_style.foreground,
+                        caret_style.background.unwrap_or(backdrop),
+                        caret_style.attributes,
+                        " ",
+                    )
+                {
+                    columns += cell.width();
+                    cells.push(cell);
+                }
             }
         }
         // Pad to the viewport so every row has the same cell width.
@@ -931,6 +958,84 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Every `(row, column)` painted in the caret style. The surface's caret
+    /// style uses a distinctive background so the marker is unambiguous.
+    fn caret_cells(surface: &EditorSurface, width: usize, height: usize) -> Vec<(usize, usize)> {
+        let text = Text::new("").wrap(surface.wrap);
+        let rect = RectI::new(0, 0, width as i32, height as i32);
+        let image = editor_raster(&text, surface, rect, rect, Color::Reset).expect("raster");
+        let mut found = Vec::new();
+        for row in 0..image.height() {
+            for column in 0..image.width() {
+                match image.cell_at(row, column) {
+                    crate::data::CellSlot::Continuation(_) => {}
+                    crate::data::CellSlot::Lead(cell) if cell.background() == Color::Magenta => {
+                        found.push((row, column));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        found
+    }
+
+    fn focused_surface(
+        value: &str,
+        placeholder: &str,
+        wrap: TextWrap,
+        caret: usize,
+    ) -> EditorSurface {
+        let mut surface = editor_surface(value, placeholder, wrap);
+        surface.focused = true;
+        surface.caret = caret;
+        surface.caret_style = crate::TextStyle::default().background(Color::Magenta);
+        surface
+    }
+
+    #[test]
+    fn a_caret_on_a_clipped_grapheme_is_still_painted() {
+        // A tab or wide grapheme that does not fit in the box leaves its cells
+        // blank, but the caret the canonical layout places on it must stay
+        // visible in the column the layout assigns it.
+        let cases: [(&str, TextWrap, usize, usize, usize); 3] = [
+            // value, wrap, box width, caret offset, expected caret row
+            ("a\tb", TextWrap::Soft, 2, 1, 1),
+            ("界", TextWrap::Soft, 1, 0, 0),
+            ("\t", TextWrap::Soft, 2, 0, 0),
+        ];
+        for (value, wrap, width, offset, row) in cases {
+            let surface = focused_surface(value, "", wrap, offset);
+            let layout = surface_layout(&surface, width, wrap);
+            let (caret_row, caret_cell, _) = layout.caret(offset);
+            assert_eq!(caret_row, row, "value={value:?} offset={offset}");
+            assert!(
+                caret_cell < width,
+                "the caret must be inside the box for this case: {value:?}"
+            );
+            assert_eq!(
+                caret_cells(&surface, width, layout.row_count()),
+                [(row, caret_cell)],
+                "value={value:?} width={width}: the caret must be painted at the \
+                 column the layout gives it, even when the grapheme under it was \
+                 clipped"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_control_keeps_its_caret_when_the_placeholder_is_clipped() {
+        // A tab placeholder in a two-cell box paints blanks, and the focused
+        // empty control must still show its caret on that first cell.
+        for placeholder in ["\t", "界"] {
+            let surface = focused_surface("", placeholder, TextWrap::Soft, 0);
+            assert_eq!(
+                caret_cells(&surface, 2, 1),
+                [(0, 0)],
+                "placeholder={placeholder:?}: the caret must stay on the first cell"
+            );
         }
     }
 }
