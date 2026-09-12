@@ -24,6 +24,7 @@ mod types;
 
 struct CachedTextRaster {
     text: Text,
+    scroll: Option<(usize, usize)>,
     inherited: ComputedText,
     content_size: (i32, i32),
     visible_local: RectI,
@@ -130,6 +131,7 @@ impl Commit {
         let entries = self.text_cache.entry(id).or_default();
         if let Some(entry) = entries.iter_mut().find(|entry| {
             &entry.text == text
+                && entry.scroll == text.applied_scroll
                 && entry.inherited == inherited
                 && entry.content_size == (content.width, content.height)
                 && entry.visible_local == visible_local
@@ -150,6 +152,7 @@ impl Commit {
         }
         entries.push(CachedTextRaster {
             text: text.clone(),
+            scroll: text.applied_scroll,
             inherited,
             content_size: (content.width, content.height),
             visible_local,

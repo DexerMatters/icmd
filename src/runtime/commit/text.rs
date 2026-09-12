@@ -26,10 +26,11 @@ pub(super) fn layout(text: &Text, width: usize, inherited: ComputedText) -> Text
 pub(super) fn text_measure(
     text: &Text,
     offered_width: Option<i32>,
+    offered_height: Option<i32>,
     inherited: ComputedText,
 ) -> (i32, i32) {
     if let Some(surface) = &text.editor {
-        return editor_measure(surface, offered_width, text.wrap);
+        return editor_measure(surface, offered_width, offered_height, text.wrap);
     }
     // The intrinsic width is the widest unwrapped logical line. `NoWrap` at a
     // large width breaks only at explicit newlines, so its widest row is
@@ -54,6 +55,7 @@ pub(super) fn text_measure(
 fn editor_measure(
     surface: &EditorSurface,
     offered_width: Option<i32>,
+    offered_height: Option<i32>,
     wrap: TextWrap,
 ) -> (i32, i32) {
     // An empty control sizes to its placeholder so the hint is visible and the
@@ -68,17 +70,23 @@ fn editor_measure(
         return (width as i32, 1);
     }
     let natural = surface_layout(surface, usize::MAX / 4, wrap);
+    // The document height is whatever the value wraps to. A parent that grants
+    // a shorter box clips and scrolls it (that is the scroll host's job); a
+    // parent that leaves the height auto gets the whole document, so multiline
+    // content is visible without scrolling.
+    let rows = |width: i32| surface_layout(surface, width.max(1) as usize, wrap).row_count() as i32;
     match wrap {
         // An unwrapped editor reports the intrinsic width of its widest logical
         // line so a scroll host can pan across it.
-        TextWrap::NoWrap => (natural.max_row_width() as i32, natural.row_count() as i32),
-        // A wrapped editor reports the offered content width. With no offer yet
-        // it reports its natural width; the parent's offer then drives the wrap.
+        TextWrap::NoWrap => {
+            let _ = offered_height;
+            (natural.max_row_width() as i32, natural.row_count() as i32)
+        }
+        // A wrapped editor reports the offered content width; with no offer yet
+        // it reports its natural width and the parent's offer then drives the
+        // wrap.
         TextWrap::Soft | TextWrap::Hard => match offered_width.filter(|width| *width > 0) {
-            Some(width) => {
-                let layout = surface_layout(surface, width as usize, wrap);
-                (width, layout.row_count() as i32)
-            }
+            Some(width) => (width, rows(width)),
             None => (natural.max_row_width() as i32, natural.row_count() as i32),
         },
     }
@@ -268,12 +276,11 @@ fn editor_raster(
         probe.publish(CommittedLayout {
             layout: std::sync::Arc::new(layout.clone()),
             width: rect.width.max(0) as usize,
-            height: rect.height.max(0) as usize,
-            wrap,
+            // The visible viewport is the region the scroll host can actually
+            // paint, which may be shorter than the surface's document box.
+            viewport_height: visible.height.max(1) as usize,
             applied_x,
             applied_y,
-            content_line: 0,
-            content_column: 0,
         });
     }
     let visible = rect.intersection(visible)?;
@@ -294,8 +301,11 @@ fn editor_raster(
         )
         .expect("space is valid")
     };
+    // The scroll host already shifts this surface's painted rectangle by the
+    // applied offset, so `visible` is expressed in document coordinates and the
+    // first visible row is read directly from it.
     let row_start = (visible.line - rect.line) as usize;
-    let row_end = (visible.bottom() - rect.line) as usize;
+    let row_end = row_start + visible.height.max(0) as usize;
     let col_start = (visible.column - rect.column).max(0) as usize;
     let col_end = col_start + visible.width as usize;
     let mut rows = Vec::with_capacity(visible.height as usize);
@@ -507,15 +517,16 @@ mod tests {
 
     #[test]
     fn measure_uses_the_widest_unwrapped_line() {
-        let (width, height) = text_measure(&Text::new("ab\ncdef"), None, inherited());
+        let (width, height) = text_measure(&Text::new("ab\ncdef"), None, None, inherited());
         assert_eq!((width, height), (4, 2));
         // Without a wrap policy the text stays one row and is clipped to the
         // offered width; with soft wrapping it grows to two rows.
-        let (width, height) = text_measure(&Text::new("abcdef"), Some(3), inherited());
+        let (width, height) = text_measure(&Text::new("abcdef"), Some(3), None, inherited());
         assert_eq!((width, height), (3, 1));
         let (width, height) = text_measure(
             &Text::new("abcdef").wrap(crate::TextWrap::Soft),
             Some(3),
+            None,
             inherited(),
         );
         assert_eq!((width, height), (3, 2));
@@ -525,7 +536,7 @@ mod tests {
     fn measure_counts_graphemes_not_bytes() {
         let value = "e\u{301}x";
         assert_eq!(value.graphemes(true).count(), 2);
-        let (width, height) = text_measure(&Text::new(value), None, inherited());
+        let (width, height) = text_measure(&Text::new(value), None, None, inherited());
         assert_eq!((width, height), (2, 1));
     }
 }

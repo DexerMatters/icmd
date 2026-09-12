@@ -108,6 +108,9 @@ pub struct Text {
     pub(crate) probe: Option<LayoutProbe>,
     /// The scroll offsets this text was rendered with.
     pub(crate) applied_scroll: Option<(usize, usize)>,
+    /// The visible viewport height the parent granted the scroll host, when the
+    /// surface's own document box is taller than it.
+    pub(crate) viewport_height: Option<usize>,
 }
 
 impl fmt::Debug for Text {
@@ -132,6 +135,7 @@ impl PartialEq for Text {
             && self.overflow == other.overflow
             && self.editor == other.editor
             && self.probe == other.probe
+            && self.applied_scroll == other.applied_scroll
     }
 }
 
@@ -153,6 +157,7 @@ impl Text {
             editor: None,
             probe: None,
             applied_scroll: None,
+            viewport_height: None,
         }
     }
 
@@ -163,10 +168,12 @@ impl Text {
         surface: EditorSurface,
         probe: LayoutProbe,
         applied_scroll: (usize, usize),
+        viewport_height: Option<usize>,
     ) -> Self {
         self.editor = Some(Arc::new(surface));
         self.probe = Some(probe);
         self.applied_scroll = Some(applied_scroll);
+        self.viewport_height = viewport_height;
         self
     }
 

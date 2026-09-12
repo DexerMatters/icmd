@@ -15,7 +15,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crate::basic::editor_surface::{EditorSurface, LayoutProbe};
 use crate::basic::text_layout::{self, ComputedText, HitBias};
 use crate::{
-    Attr, Dimension, DomProps, Edges, EventListener, FocusEvent, KeyboardEvent, Node, PasteEvent,
+    Attr, Dimension, DomProps, EventListener, FocusEvent, KeyboardEvent, Node, PasteEvent,
     PointerEvent, Props, ScrollAxes, ScrollEvent, ScrollOffset, ScrollbarVisibility, Style, Text,
     TextStyle, TextWrap, basic::ComponentContext, scroll_area, ui, view,
 };
@@ -103,12 +103,17 @@ struct InputState {
     scroll_x: usize,
     scroll_y: usize,
     reveal_caret: bool,
+    /// The visible viewport height the last render used, forwarded to the
+    /// commit pass so the scroll extent is measured against the viewport rather
+    /// than the document's own box.
+    viewport_height: Option<usize>,
 }
 
 /// Immutable render-time configuration, shared with event handlers.
 struct Config {
     multiline: bool,
     wrap: TextWrap,
+    /// The requested content box, used only until the first frame commits.
     width: usize,
     height: usize,
     policy: EditPolicy,
@@ -148,40 +153,15 @@ fn config_from(props: &Props<RawInputProps>) -> Config {
         Attr::Set(Dimension::Cells(value)) => value as usize,
         _ => 1,
     };
-    // Style dimensions are border-box: padding and borders are laid out around
-    // the editable cells, never taken out of them beyond this inset.
-    let padding = props
-        .dom
-        .style
-        .padding
-        .as_ref()
-        .copied()
-        .unwrap_or(Edges::all(0));
-    let border = if props.dom.style.border.kind.is_set() {
-        props
-            .dom
-            .style
-            .border
-            .edges
-            .as_ref()
-            .copied()
-            .unwrap_or(Edges::all(false))
-    } else {
-        Edges::all(false)
-    };
-    let inset_x = usize::from(padding.left)
-        + usize::from(padding.right)
-        + u16::from(border.left) as usize
-        + u16::from(border.right) as usize;
-    let inset_y = usize::from(padding.top)
-        + usize::from(padding.bottom)
-        + u16::from(border.top) as usize
-        + u16::from(border.bottom) as usize;
+    // These are only the *requested* size, used to bootstrap the first frame
+    // before the commit pass has published a content box. The editor never
+    // derives its own content geometry: the committed box is authoritative, so
+    // padding and borders are never subtracted here.
     Config {
         multiline,
         wrap,
-        width: width.saturating_sub(inset_x).max(1),
-        height: height.saturating_sub(inset_y).max(1),
+        width: width.max(1),
+        height: height.max(1),
         policy: EditPolicy {
             multiline,
             max_length: props.max_length.as_ref().copied(),
@@ -224,22 +204,22 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
             state.dragging = false;
             state.reveal_caret = false;
         }
-        // The value rendered in this frame is the authoritative one, but the
-        // caret and scroll position belong to the model's current (possibly
-        // optimistic) value. Build the layout for the current value at the
-        // width the last frame committed, so the caret reveal always uses the
-        // same row table the pointer will.
-        // The visible viewport, not the surface's own box: a single unwrapped
-        // line is wider than its viewport, and a wrapped line is exactly the
-        // granted width. Height is always the granted content height.
-        let view_width = if config.wrap == TextWrap::NoWrap {
-            config.width.max(1)
-        } else {
-            probe
-                .committed()
-                .map_or(config.width.max(1), |committed| committed.width.max(1))
+        // The caret and scroll position belong to the model's current (possibly
+        // optimistic) value, and the geometry must be exactly what the last
+        // committed frame painted. The commit pass publishes that content box;
+        // the requested size only bootstraps the very first frame.
+        // A single unwrapped line is horizontally scrollable, so its viewport
+        // width is the granted box rather than the document's own width; a
+        // wrapped or multiline document scrolls vertically inside the viewport
+        // the commit pass actually painted.
+        let committed = probe.committed();
+        let (view_width, view_height) = match &committed {
+            Some(committed) if config.multiline => {
+                (committed.width.max(1), committed.viewport_height.max(1))
+            }
+            Some(committed) => (config.width.max(1), committed.viewport_height.max(1)),
+            None => (config.width.max(1), config.height.max(1)),
         };
-        let view_height = config.height.max(1);
         let layout = build_layout_at(&state.model.value, &config, view_width);
         reconcile_scroll(&mut state, &layout, view_width, view_height);
         state.reveal_caret = false;
@@ -264,10 +244,16 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
             scroll_x: state.scroll_x,
             scroll_y: state.scroll_y,
         };
+        state.viewport_height = Some(view_height);
         let text = Text::from_spans(Vec::new())
             .with_style(surface_style())
             .wrap(config.wrap)
-            .editor_surface(surface, probe.clone(), (scroll_x, scroll_y));
+            .editor_surface(
+                surface,
+                probe.clone(),
+                (scroll_x, scroll_y),
+                state.viewport_height,
+            );
         (scroll_offset, text)
     };
 
@@ -694,6 +680,9 @@ fn reconcile_scroll(
 /// The editor surface keeps auto dimensions so it reports its own width
 /// (intrinsic for `NoWrap`, the granted width for wrapped modes) and its row
 /// count.
+/// The editor surface reports both dimensions itself: intrinsic width for
+/// `NoWrap`, the granted width for wrapped modes, and its full document height
+/// so the scroll host can see the overflow and pan across it.
 fn surface_style() -> Style {
     Style::default()
 }
@@ -789,17 +778,18 @@ fn hit_offset(
     scroll_x: usize,
     scroll_y: usize,
 ) -> usize {
-    // The scroll child's local origin is the visible viewport, but the runtime
-    // reports the pointer relative to the child's painted rectangle, which the
-    // last committed layout already shifted by its applied scroll offset. Add
-    // that offset back so the row and cell index into the layout.
-    let _ = committed;
-    // The runtime reports the pointer in the scrolled child's own content
-    // coordinates, which already exclude the scroll offset the frame applied.
-    // The layout is indexed in unscrolled content coordinates, so the offset is
-    // added back once. Padding and borders are never subtracted by hand: the
-    // event system supplies content-box coordinates.
-    let row = (local.line.max(0) as usize + scroll_y).min(layout.row_count().saturating_sub(1));
-    let cell = local.column.max(0) as usize + scroll_x;
+    // The pointer is reported in the scrolled child's own content coordinates,
+    // which already exclude the offset the committed frame applied. The layout
+    // is indexed in unscrolled content coordinates, so the committed applied
+    // offset is added back exactly once; the part this component has requested
+    // but the runtime has not painted yet is added on top. Padding and borders
+    // are never subtracted by hand: the event system supplies content-box
+    // coordinates.
+    let (applied_x, applied_y) = committed.as_ref().map_or((0, 0), |committed| {
+        (committed.applied_x, committed.applied_y)
+    });
+    let row = (local.line.max(0) as usize + applied_y + scroll_y.saturating_sub(applied_y))
+        .min(layout.row_count().saturating_sub(1));
+    let cell = local.column.max(0) as usize + applied_x + scroll_x.saturating_sub(applied_x);
     layout.hit(row, cell, POINTER_HIT_BIAS)
 }

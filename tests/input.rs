@@ -641,23 +641,24 @@ fn wrapping_is_correct_in_the_first_committed_frame() {
 
     // Collect every frame before quiescence. A settling loop would show a
     // first frame with rows wrapped for the wrong width and a later correction;
-    // instead the union of painted characters must be complete and the first
-    // frame must already carry content.
+    // instead the very first committed frame must already wrap at the granted
+    // content width (18 cells inside the border and padding), not at the
+    // requested 20-cell border box.
     let mut frames: Vec<String> = Vec::new();
     while let Ok(frame) = output.recv_timeout(Duration::from_millis(250)) {
         frames.push(strip_ansi(&frame.unwrap()));
     }
     assert!(!frames.is_empty(), "at least one frame must be committed");
-    let painted = frames.concat();
-    for ch in "0123456789abcdefghij".chars() {
-        assert!(
-            painted.contains(ch),
-            "character {ch:?} must be painted: {painted:?}"
-        );
-    }
     assert!(
-        frames[0].contains("0123456789"),
-        "the first committed frame must already wrap at the granted width: {:?}",
+        frames[0].contains("0123456789abcdef"),
+        "the first committed frame must wrap at the committed content width: {:?}",
+        frames[0]
+    );
+    // Sixteen characters fit the first row, so the row must not have been
+    // wrapped for the un-inset 20-cell box (which would fit all twenty).
+    assert!(
+        !frames[0].contains("0123456789abcdefghij"),
+        "rows must not be wrapped for the un-inset box: {:?}",
         frames[0]
     );
 }

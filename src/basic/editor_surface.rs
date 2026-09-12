@@ -40,26 +40,22 @@ pub(crate) struct EditorSurface {
 
 /// One committed frame's layout, as painted.
 ///
-/// The width and height are the surface's own content box; the applied scroll
-/// and content offsets describe how the frame was shifted inside it. Pointer
-/// hit-testing reads all of them so a click resolves against exactly the table
-/// that produced the visible rows.
+/// `width` and `height` are the content box the commit pass granted, and
+/// `applied_x`/`applied_y` are the scroll offsets that frame was laid out with.
+/// Pointer hit-testing and caret reveal read them so both resolve against
+/// exactly the row table that produced the visible frame.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Geometry read by the editor's pointer/focus adapters.
 pub(crate) struct CommittedLayout {
     pub(crate) layout: Arc<TextLayout>,
     /// The content width the layout was built for.
     pub(crate) width: usize,
-    /// The content height the surface was granted.
-    pub(crate) height: usize,
-    /// The wrapping policy used for this layout.
-    pub(crate) wrap: TextWrap,
+    /// The visible viewport height the scroll host could actually paint. This
+    /// drives the caret reveal and the scroll extent, so a document taller than
+    /// its viewport scrolls instead of being clamped away.
+    pub(crate) viewport_height: usize,
     /// The scroll offsets this frame was laid out with.
     pub(crate) applied_x: usize,
     pub(crate) applied_y: usize,
-    /// The content-box offset inside the painted rect.
-    pub(crate) content_line: usize,
-    pub(crate) content_column: usize,
 }
 
 /// A passive channel from the commit pipeline back to the component that owns a
