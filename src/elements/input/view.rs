@@ -1,8 +1,10 @@
 //! `raw_input`: the one primitive that owns text-entry behavior.
 //!
-//! The component renders a single scroll-capable host. That host is the focus
-//! target, receives caller `DomProps`, and carries composed internal-plus-caller
-//! event listeners. `input` and `textarea` are thin policy wrappers over it.
+//! The component renders one semantic host: it receives caller `DomProps`, is
+//! the focus target, and carries the composed internal-plus-caller event
+//! listeners. A `scroll_area` nested inside that host supplies the scrolling
+//! mechanism, so there is no second event or focus identity. `input` and
+//! `textarea` are thin policy wrappers over it.
 //!
 //! Geometry - wrapping, caret placement, pointer hit-testing, and scroll
 //! extents - comes from the canonical layout in [`crate::basic::text_layout`];
