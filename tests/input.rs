@@ -1654,3 +1654,87 @@ fn a_disabled_horizontal_axis_never_requests_a_horizontal_offset() {
          boundary"
     );
 }
+
+#[test]
+fn a_right_edge_clipped_wide_glyph_does_not_blank_the_editor() {
+    // A wide grapheme whose continuation falls past the right edge must not make
+    // a row wider than the viewport, which would fail the image assembly and
+    // leave the whole editor unpainted.
+    for (value, width) in [("a\n界", 1u16), ("界\na", 1), ("abc\nx界", 2)] {
+        let node = raw_input
+            .props(RawInputProps {
+                mode: Attr::Set(RawInputMode::Multiline),
+                default_value: Attr::Set(value.into()),
+                wrap: Attr::Set(icmd::TextWrap::NoWrap),
+                ..RawInputProps::default()
+            })
+            .style(|style| {
+                style.width /= icmd::Dimension::Cells(width);
+                style.height /= icmd::Dimension::Cells(3);
+            })
+            .node();
+        let viewport = Size::new(width + 6, 5);
+        let (sender, output, dispatcher) = pipeline(viewport);
+        sender.send(node).unwrap();
+        let raw = collect_frames(&output, &dispatcher, None);
+        let painted = strip_ansi(&raw);
+        assert!(
+            !painted.trim().is_empty(),
+            "{value:?} at width {width} must paint something: {painted:?}"
+        );
+        // The one-cell row's own glyph must appear, which is what proves the
+        // whole surface was not dropped by the image assembly.
+        if value.contains('a') {
+            assert!(
+                painted.contains('a'),
+                "{value:?} at width {width}: the one-cell row must paint: {painted:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_real_tab_in_multiline_keeps_later_cells_in_place() {
+    // Multiline preserves tabs, and a tab expands to its tab-stop width. The
+    // cells after it must be painted where the layout says they are, so a click
+    // on a painted glyph places the caret at that glyph.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("a\tb".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(6))
+        .node();
+    let viewport = Size::new(10, 4);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    let raw = collect_frames(&output, &dispatcher, None);
+    // 'b' begins at the next tab stop, so it is addressed at terminal column 5
+    // (cell 4). The exact cursor address is asserted because stripped text
+    // collapses the blanks a tab expands into.
+    assert!(
+        raw.contains("\u{1b}[1;5Hb"),
+        "the glyph after a tab must keep its expanded column: {}",
+        raw.escape_debug()
+    );
+    // Clicking the cell that paints 'b' places the caret just after it, which is
+    // the same trailing bias every other grapheme gets.
+    interact(&output, &dispatcher, Some(click(0, 4)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+    let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
+    assert_eq!(
+        emitted, "a\tb#",
+        "a click on the painted glyph must place the caret after it, and the tab \
+         must keep its expanded width"
+    );
+}
