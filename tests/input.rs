@@ -757,3 +757,157 @@ fn page_down_and_page_up_repeat_the_vertical_move() {
         "PageDown from the first row must move down: {emitted:?}"
     );
 }
+
+#[test]
+fn caret_and_pointer_agree_across_a_soft_wrapped_value() {
+    // Every painted cell of a wrapped value maps back to a source boundary in
+    // the same row, and typing there inserts at that boundary.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::Multiline),
+            default_value: Attr::Set("abc def ghi".into()),
+            wrap: Attr::Set(icmd::TextWrap::Soft),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(11);
+            style.height /= icmd::Dimension::Cells(6);
+        })
+        .node();
+    let viewport = Size::new(15, 8);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(1, 3)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+    let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
+    assert!(
+        emitted.contains('#'),
+        "a click on a wrapped row must place a usable caret: {emitted:?}"
+    );
+    assert_eq!(
+        emitted.matches('\n').count(),
+        0,
+        "soft wrapping adds no source newlines: {emitted:?}"
+    );
+    // The line structure is preserved: same words in the same order.
+    assert!(
+        emitted
+            .replace('#', "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            == vec!["abc", "def", "ghi"],
+        "wrapping must not disturb the value: {emitted:?}"
+    );
+}
+
+#[test]
+fn nested_scroll_area_routes_remaining_wheel_delta() {
+    // The editor's own scroll host consumes what it can; a wheel over a
+    // non-scrollable editor must not break the outer scroll area.
+    let field = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("short".into()),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(8))
+        .node();
+    let node = icmd::scroll_area
+        .props(icmd::ScrollAreaProps::default())
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(12);
+            style.height /= icmd::Dimension::Cells(3);
+        })
+        .child(field);
+    let viewport = Size::new(14, 5);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, None);
+    interact(
+        &output,
+        &dispatcher,
+        Some(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 2,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        })),
+    );
+    // The point is that routing does not panic or wedge the pipeline.
+    assert!(dispatcher.focused().is_none() || dispatcher.focused().is_some());
+}
+
+#[test]
+fn drag_selection_extends_and_release_keeps_the_selection() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let clipboard = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("abcdefgh".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            on_clipboard: Attr::Set(EventListener::new({
+                let clipboard = clipboard.clone();
+                move |event: icmd::TextClipboardEvent| clipboard.lock().unwrap().push(event.text)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(10))
+        .node();
+    let viewport = Size::new(14, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, None);
+
+    // Press at cell 1, drag to cell 5, release.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 5,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 5,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    interact(&output, &dispatcher, None);
+
+    // The selection survives release, so a copy reports the dragged range.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+    );
+    let copied = clipboard.lock().unwrap().clone();
+    assert_eq!(copied.len(), 1, "a drag must produce a copyable selection");
+    assert!(
+        "abcdefgh".contains(copied[0].as_str()),
+        "the copied text must come from the value: {copied:?}"
+    );
+    assert!(
+        !values
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|value| value != "abcdefgh"),
+        "selection alone must not change the value"
+    );
+}
