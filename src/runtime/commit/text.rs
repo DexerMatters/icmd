@@ -196,7 +196,10 @@ fn raster_line(
             continue;
         }
         let glyph_end = visual.saturating_add(item.width);
-        if visual < rect_width && glyph_end <= rect_width {
+        // A separator occupies cells but is deliberately not painted; the cell
+        // is left blank. Recording it here would draw the whitespace that the
+        // wrap decision removed, which the editor surface never draws.
+        if item.kind != ItemKind::Separator && visual < rect_width && glyph_end <= rect_width {
             glyphs_at[visual] = Some(item);
         }
         visual = glyph_end;
