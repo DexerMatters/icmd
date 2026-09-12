@@ -333,7 +333,11 @@ impl EditModel {
             }
             None => {
                 // Switching to uncontrolled retains the last authoritative
-                // value and then resumes local ownership.
+                // rendered value - not a speculative draft the owner never
+                // accepted - and then resumes local ownership.
+                if self.draft.is_some() {
+                    self.value = self.authoritative.clone();
+                }
                 self.ownership = ValueOwnership::Uncontrolled;
                 self.draft = None;
                 self.authoritative = self.value.clone();
@@ -1202,6 +1206,34 @@ mod tests {
         model.render(Some("owner"), None, false);
         assert_eq!(model.value(), "owner");
         assert_eq!(model.ownership(), ValueOwnership::Controlled);
+    }
+
+    #[test]
+    fn switching_to_uncontrolled_discards_an_unaccepted_draft() {
+        // The owner published "a" and never accepted the speculative "ab".
+        // Switching to uncontrolled must resume from "a", not from a draft the
+        // owner rejected by staying silent.
+        let mut model = controlled("a", false);
+        model.reduce(
+            EditAction::PlaceCaret {
+                offset: 1,
+                extend: false,
+            },
+            policy(false),
+        );
+        insert(&mut model, "b", false);
+        assert_eq!(model.value(), "ab");
+        // The component stops supplying a value before the owner responded.
+        model.render(None, None, false);
+        assert_eq!(
+            model.value(),
+            "a",
+            "the unaccepted draft must not become the uncontrolled value"
+        );
+        assert_eq!(model.ownership(), ValueOwnership::Uncontrolled);
+        // Local ownership resumes from that value.
+        let outcome = insert(&mut model, "!", false);
+        assert_eq!(outcome.value.as_deref(), Some("a!"));
     }
 
     #[test]

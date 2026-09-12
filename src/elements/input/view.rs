@@ -797,17 +797,17 @@ fn hit_offset(
     scroll_y: usize,
 ) -> usize {
     // The pointer is reported in the scrolled child's own content coordinates,
-    // which already exclude the offset the committed frame applied. The layout
-    // is indexed in unscrolled content coordinates, so the committed applied
-    // offset is added back exactly once; the part this component has requested
-    // but the runtime has not painted yet is added on top. Padding and borders
-    // are never subtracted by hand: the event system supplies content-box
-    // coordinates.
+    // which already exclude the offset the committed frame painted with. The
+    // layout is indexed in unscrolled content coordinates, so that committed
+    // offset is added back exactly once. If this component has since requested
+    // a larger offset that the runtime has not painted yet, that additional
+    // delta applies on top. Padding and borders are never subtracted by hand:
+    // the event system supplies content-box coordinates.
     let (applied_x, applied_y) = committed.as_ref().map_or((0, 0), |committed| {
         (committed.applied_x, committed.applied_y)
     });
-    let row = (local.line.max(0) as usize + applied_y + scroll_y.saturating_sub(applied_y))
+    let row = (local.line.max(0) as usize + applied_y.max(scroll_y))
         .min(layout.row_count().saturating_sub(1));
-    let cell = local.column.max(0) as usize + applied_x + scroll_x.saturating_sub(applied_x);
+    let cell = local.column.max(0) as usize + applied_x.max(scroll_x);
     layout.hit(row, cell, POINTER_HIT_BIAS)
 }
