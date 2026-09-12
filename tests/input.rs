@@ -1738,3 +1738,49 @@ fn a_real_tab_in_multiline_keeps_later_cells_in_place() {
          must keep its expanded width"
     );
 }
+
+#[test]
+fn a_grapheme_wider_than_the_viewport_never_breaks_the_frame() {
+    // A two-cell grapheme in a one-cell viewport cannot be shown whole. The
+    // editor must still produce a valid frame for every row rather than dropping
+    // the surface, and it must not paint more cells than the viewport holds.
+    for (value, width, height) in [
+        ("界", 1u16, 1u16),
+        ("界界", 1, 2),
+        ("a界", 1, 2),
+        ("界a", 1, 2),
+        ("ab\n界", 1, 3),
+        ("界\nab", 1, 3),
+    ] {
+        let node = raw_input
+            .props(RawInputProps {
+                mode: Attr::Set(RawInputMode::Multiline),
+                default_value: Attr::Set(value.into()),
+                wrap: Attr::Set(icmd::TextWrap::NoWrap),
+                ..RawInputProps::default()
+            })
+            .style(|style| {
+                style.width /= icmd::Dimension::Cells(width);
+                style.height /= icmd::Dimension::Cells(height);
+            })
+            .node();
+        let viewport = Size::new(width + 6, height + 3);
+        let (sender, output, dispatcher) = pipeline(viewport);
+        sender.send(node).unwrap();
+        // Every value here has at least one row that fits the viewport (a
+        // one-cell ASCII row, or the wide grapheme alone), so a frame must be
+        // produced: dropping the surface would leave nothing painted.
+        let raw = collect_frames(&output, &dispatcher, None);
+        assert!(
+            !raw.is_empty(),
+            "{value:?} at {width}x{height} must produce a frame"
+        );
+        // And the editor stays usable afterwards.
+        interact(&output, &dispatcher, Some(click(0, 0)));
+        interact(
+            &output,
+            &dispatcher,
+            Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+        );
+    }
+}
