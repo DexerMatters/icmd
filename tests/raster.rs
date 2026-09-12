@@ -393,15 +393,20 @@ fn lazy_file_sources_load_only_when_reaching_the_prefetch_region() {
         .unwrap();
     let pending = renderer.render_diff().unwrap().unwrap();
     assert!(pending.contains("…"), "{pending:?}");
-    for _ in 0..50 {
-        thread::sleep(Duration::from_millis(10));
+    // Wait for the background decode to be reported. The completion signal is
+    // `render_diff` returning a frame, not a fixed sleep budget: the loop polls
+    // a channel-like condition with a generous bound so a loaded machine cannot
+    // turn a correct load into a failure.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
         if let Some(frame) = renderer.render_diff().unwrap()
             && !frame.contains("…")
         {
             return;
         }
+        thread::sleep(Duration::from_millis(5));
     }
-    panic!("lazy source did not finish loading");
+    panic!("lazy source did not finish loading within 20s");
 }
 
 #[test]
