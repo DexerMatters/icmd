@@ -330,8 +330,22 @@ fn editor_raster(
         let target = rect.width.max(0) as usize;
         if showing_placeholder {
             for item in items {
-                if item.width == 0 || columns + item.width > target {
+                if item.width == 0 {
                     continue;
+                }
+                // An item that does not fit inside the box is clipped, and every
+                // later item sits further right, so none of them fit either.
+                // Breaking here keeps the items before it in their canonical
+                // columns; skipping just this item would leave the running column
+                // count short, so everything after an over-wide tab or grapheme
+                // would slide left into the wrong cell.
+                if item.cell + item.width > target {
+                    break;
+                }
+                // A clipped item's cells stay blank rather than closing the gap.
+                while columns < item.cell {
+                    cells.push(blank(base));
+                    columns += 1;
                 }
                 let symbol = if item.symbol == "\t" {
                     " ".repeat(item.width)
@@ -375,8 +389,18 @@ fn editor_raster(
         } else {
             let mut caret_painted = false;
             for item in items {
-                if item.width == 0 || columns + item.width > target {
+                if item.width == 0 {
                     continue;
+                }
+                // Clipped at the box edge: see the placeholder path above. The
+                // item and everything after it stay blank instead of shifting
+                // left, so painted columns keep matching `item.cell`.
+                if item.cell + item.width > target {
+                    break;
+                }
+                while columns < item.cell {
+                    cells.push(blank(base));
+                    columns += 1;
                 }
                 // A separator owns cells but is not painted. A caret inside its
                 // run still belongs to this row, so it is drawn on the first of
@@ -657,5 +681,62 @@ mod tests {
         assert_eq!(value.graphemes(true).count(), 2);
         let (width, height) = text_measure(&Text::new(value), None, None, inherited());
         assert_eq!((width, height), (2, 1));
+    }
+
+    fn editor_surface(value: &str, placeholder: &str, wrap: TextWrap) -> EditorSurface {
+        EditorSurface {
+            value: value.into(),
+            selection: None,
+            caret: 0,
+            focused: false,
+            placeholder: placeholder.into(),
+            wrap,
+            placeholder_style: crate::TextStyle::default(),
+            selection_style: crate::TextStyle::default(),
+            selection_inactive_style: crate::TextStyle::default(),
+            caret_style: crate::TextStyle::default(),
+            scroll_x: 0,
+            scroll_y: 0,
+        }
+    }
+
+    /// Painted row strings of an editor surface inside a `width` x `height` box.
+    fn editor_rows(surface: &EditorSurface, width: usize, height: usize) -> Vec<String> {
+        let text = Text::new("").wrap(surface.wrap);
+        let rect = RectI::new(0, 0, width as i32, height as i32);
+        let image = editor_raster(&text, surface, rect, rect, Color::Reset).expect("raster");
+        (0..image.height())
+            .map(|row| {
+                (0..image.width())
+                    .filter(|column| {
+                        !matches!(
+                            image.cell_at(row, *column),
+                            crate::data::CellSlot::Continuation(_)
+                        )
+                    })
+                    .map(|column| image.cell_at(row, column).cell().symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_clipped_item_leaves_its_cells_blank_instead_of_shifting_later_items() {
+        // Every painted glyph must sit in the cell the canonical layout gives it,
+        // even when an earlier item does not fit in the box. Skipping such an
+        // item used to leave the running column count short, so everything after
+        // it slid left.
+        //
+        // "a\tb" in a two-cell box: the tab covers cells 1..4 and is clipped, so
+        // 'b' belongs at cell 4 and must not appear at column 1.
+        let surface = editor_surface("", "a\tb", TextWrap::Soft);
+        assert_eq!(editor_rows(&surface, 2, 1), ["a "]);
+        // A wide grapheme that does not fit leaves its columns blank too.
+        let surface = editor_surface("", "a界a", TextWrap::Soft);
+        assert_eq!(editor_rows(&surface, 2, 1), ["a "]);
+        // The value path shares the rule, so the clipped value matches what an
+        // ordinary `Text` of the same width paints.
+        let surface = editor_surface("ab界c", "", TextWrap::NoWrap);
+        assert_eq!(editor_rows(&surface, 3, 1), ["ab "]);
     }
 }

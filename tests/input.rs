@@ -1844,3 +1844,50 @@ fn ordinary_text_and_the_editor_agree_on_wide_glyph_columns() {
         let _ = viewport;
     }
 }
+
+#[test]
+fn a_clipped_item_keeps_later_cells_blank_in_the_painted_frame() {
+    // A tab or wide grapheme that does not fit in the granted box is clipped.
+    // The cells it would have occupied stay blank; a later glyph must not slide
+    // left into them, because the caret and pointer tables still place it in its
+    // canonical column.
+    let cases: [(RawInputMode, &str, &str, u16, &str); 3] = [
+        // Placeholder "a\tb": the tab covers cells 1..4 in a two-cell box, so
+        // 'b' (cell 4) must not appear at column 1.
+        (RawInputMode::Multiline, "", "a\tb", 2, "ab"),
+        // Placeholder "a界a": the wide grapheme covers cells 1..3, so the
+        // trailing 'a' (cell 3) must not appear at column 1.
+        (RawInputMode::Multiline, "", "a界a", 2, "aa"),
+        // Value "ab界c" at three cells: 界 covers cells 2..4, so 'c' (cell 4)
+        // must not appear at column 2, exactly as ordinary text clips it.
+        (RawInputMode::SingleLine, "ab界c", "", 3, "abc"),
+    ];
+    for (mode, value, placeholder, width, forbidden) in cases {
+        for disabled in [false, true] {
+            let node = raw_input
+                .props(RawInputProps {
+                    mode: Attr::Set(mode),
+                    default_value: Attr::Set(value.into()),
+                    placeholder: Attr::Set(placeholder.into()),
+                    disabled: Attr::Set(disabled),
+                    ..RawInputProps::default()
+                })
+                .style(move |style| {
+                    style.width /= icmd::Dimension::Cells(width);
+                    style.height /= icmd::Dimension::Cells(1);
+                })
+                .node();
+            let viewport = Size::new(width + 4, 3);
+            let (sender, output, dispatcher) = pipeline(viewport);
+            sender.send(node).unwrap();
+            let painted = strip_ansi(&collect_frames(&output, &dispatcher, None));
+            assert!(
+                !painted.contains(forbidden),
+                "value={value:?} placeholder={placeholder:?} width={width} \
+                 disabled={disabled}: a clipped item must leave its cells blank \
+                 rather than shift the next glyph left (must not contain \
+                 {forbidden:?}): {painted:?}"
+            );
+        }
+    }
+}
