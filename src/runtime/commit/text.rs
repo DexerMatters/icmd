@@ -453,27 +453,53 @@ fn editor_raster(
             cells.push(blank(base));
             columns += 1;
         }
-        // `col_start`/`col_end` are cell columns, so select entries by walking
-        // their widths rather than by vector index. A wide cell that only
-        // partially overlaps the visible span is replaced by blanks: emitting it
-        // whole would make this row wider than the others, and `from_rows`
-        // requires every row to occupy the same cells.
+        // Place each cell into the visible grid by cell column. A wide cell
+        // that only partially overlaps the visible span contributes a blank for
+        // the part that is visible, so the cells after it keep the columns the
+        // caret and hit tables give them, and every row ends up the same width.
         let target = visible.width.max(0) as usize;
-        let mut visible_row = Vec::new();
-        let mut painted = 0usize;
+        // One slot per visible cell column. A wide cell fills its own slot with
+        // the glyph and the next with a continuation marker, so the row's total
+        // measured width equals the viewport.
+        enum Slot {
+            Empty,
+            Glyph(Cell),
+            Continuation,
+        }
+        let mut grid: Vec<Slot> = (0..target).map(|_| Slot::Empty).collect();
         let mut column = 0usize;
         for cell in cells {
             let width = cell.width();
-            let end = column + width;
-            if end > col_start && column < col_end && end <= col_end && column >= col_start {
-                visible_row.push(cell);
-                painted += width;
+            let end = column.saturating_add(width);
+            for visible_column in column.max(col_start)..end.min(col_end) {
+                let at = visible_column - col_start;
+                if at >= target {
+                    continue;
+                }
+                // Only the cell's leading column carries the glyph; the rest of
+                // its cells are its continuation.
+                grid[at] = if visible_column == column && column >= col_start {
+                    Slot::Glyph(cell.clone())
+                } else {
+                    Slot::Continuation
+                };
             }
             column = end;
         }
-        while painted < target {
+        // A glyph's continuation is not a separate cell entry: `from_rows`
+        // creates it from the glyph's width. Emitting one blank per slot would
+        // double-count the wide grapheme's second column.
+        let mut visible_row: Vec<Cell> = Vec::with_capacity(target);
+        for slot in grid {
+            match slot {
+                Slot::Glyph(cell) => visible_row.push(cell),
+                Slot::Continuation => {}
+                Slot::Empty => visible_row.push(blank(base)),
+            }
+        }
+        // Pad any trailing columns the grid did not fill.
+        while visible_row.iter().map(|cell| cell.width()).sum::<usize>() < target {
             visible_row.push(blank(base));
-            painted += 1;
         }
         rows.push(visible_row);
     }

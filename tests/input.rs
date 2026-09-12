@@ -1537,3 +1537,55 @@ fn horizontal_scrolling_past_a_wide_grapheme_still_paints() {
         );
     }
 }
+
+#[test]
+fn a_wide_grapheme_straddling_the_left_edge_keeps_later_cells_in_place() {
+    // Panning so that a two-cell grapheme is only half visible must leave a
+    // blank for the visible half. Otherwise every later glyph shifts left and
+    // the painted cells no longer match the caret and hit tables.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("界ab".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(3))
+        .node();
+    let viewport = Size::new(12, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    // Focus at the end so the viewport pans one cell past the wide grapheme.
+    interact(&output, &dispatcher, Some(click(0, 2)));
+    let mut raw = collect_frames(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Right, KeyModifiers::empty())),
+    );
+    raw.push_str(&collect_frames(&output, &dispatcher, None));
+    let painted = strip_ansi(&raw);
+    assert!(
+        painted.contains("ab"),
+        "the cells after the partial wide grapheme stay visible: {painted:?}"
+    );
+    // Clicking the first painted cell must insert after exactly that grapheme,
+    // so the value keeps its order.
+    interact(&output, &dispatcher, Some(click(0, 0)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+    let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
+    assert!(
+        emitted.starts_with("界"),
+        "the wide grapheme must not be displaced: {emitted:?}"
+    );
+    assert!(
+        emitted.contains('#'),
+        "the click must place a usable caret: {emitted:?}"
+    );
+}

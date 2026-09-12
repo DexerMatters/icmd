@@ -223,7 +223,13 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
             None => (config.width.max(1), config.height.max(1)),
         };
         let layout = build_layout_at(&state.model.value, &config, view_width);
-        reconcile_scroll(&mut state, &layout, view_width, view_height);
+        reconcile_scroll(
+            &mut state,
+            &layout,
+            view_width,
+            view_height,
+            config.scroll_axes(),
+        );
         state.reveal_caret = false;
         let focused = state.focused && !config.policy.disabled;
         let scroll_offset = ScrollOffset::new(state.scroll_x as u32, state.scroll_y as u32);
@@ -657,15 +663,27 @@ fn reconcile_scroll(
     layout: &text_layout::TextLayout,
     view_width: usize,
     view_height: usize,
+    axes: ScrollAxes,
 ) {
     let view_width = view_width.max(1);
     let view_height = view_height.max(1);
-    // The scroll extent is a property of the layout and the viewport, and this
-    // component owns the offset, so it clamps to exactly the extent the runtime
-    // would apply. That keeps the requested offset equal to the painted one, so
-    // the committed layout and pointer coordinates never disagree.
-    let max_x = layout.max_row_width().saturating_sub(view_width);
-    let max_y = layout.row_count().max(1).saturating_sub(view_height);
+    // The extent is a property of the layout, the viewport, and the axes the
+    // host actually scrolls on. This component owns the offset, so it clamps to
+    // exactly what the runtime will apply: requesting an offset on a disabled
+    // axis would be silently refused and leave the requested and painted offsets
+    // out of step, which puts pointer coordinates in the wrong space.
+    let horizontal = matches!(axes, ScrollAxes::Horizontal | ScrollAxes::Both);
+    let vertical = matches!(axes, ScrollAxes::Vertical | ScrollAxes::Both);
+    let max_x = if horizontal {
+        layout.max_row_width().saturating_sub(view_width)
+    } else {
+        0
+    };
+    let max_y = if vertical {
+        layout.row_count().max(1).saturating_sub(view_height)
+    } else {
+        0
+    };
     state.scroll_x = state.scroll_x.min(max_x);
     state.scroll_y = state.scroll_y.min(max_y);
 

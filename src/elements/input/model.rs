@@ -1231,10 +1231,10 @@ mod tests {
     }
 
     #[test]
-    fn the_render_revision_decides_whether_a_draft_was_answerable() {
-        // A draft records the render it was produced from. Only a later render
-        // can have been the owner's response to it, so the caret snapshot is
-        // restored on that render and never on the render that produced it.
+    fn a_draft_is_answered_by_the_next_render_only() {
+        // A draft exists only for edits made since the render now being
+        // superseded, so the next render is always the owner's answer to it: the
+        // caret snapshot is restored there and nowhere else.
         let mut model = controlled("a", false);
         model.reduce(
             EditAction::PlaceCaret {
