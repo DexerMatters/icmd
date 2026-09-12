@@ -2076,3 +2076,59 @@ fn a_pointer_click_after_a_vertical_resize_maps_to_the_painted_row() {
         "the click must land on the row the resized frame painted first: {values:?}"
     );
 }
+
+#[test]
+fn a_pointer_click_survives_a_resize_that_does_not_clamp() {
+    // The other direction: shrinking the viewport grows the extent, so the
+    // offset the frame is painted with is still the one that was requested.
+    // Publishing it must keep working rather than collapsing to zero.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            mode: Attr::Set(RawInputMode::SingleLine),
+            default_value: Attr::Set("abcdefghijklmnop界".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Max;
+            style.height /= icmd::Dimension::Cells(1);
+        })
+        .node();
+    let viewport = Size::new(12, 3);
+    let (commit, resize, dispatcher) = Commit::new_with_events(viewport);
+    let (sender, output) = Runtime::new(Lower::default())
+        .then(commit)
+        .then(Renderer::new(viewport).unwrap())
+        .start();
+    sender.send(node).unwrap();
+    // Pan to the end: offset 6, which the 12-cell extent allows exactly.
+    interact(&output, &dispatcher, Some(click(0, 0)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+
+    // Shrink the viewport: the extent grows to 10, so the request stays valid.
+    resize.set(Size::new(8, 3));
+    let _ = collect_frames(&output, &dispatcher, None);
+
+    // The frame still starts at document column 6, which is 'g'.
+    interact(&output, &dispatcher, Some(click(0, 0)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+    );
+
+    let values = values.lock().unwrap();
+    let last = values.last().map(String::as_str).unwrap_or_default();
+    assert_eq!(
+        last, "abcdefg#hijklmnop界",
+        "the click must land on the cell the resized frame painted: {values:?}"
+    );
+}
