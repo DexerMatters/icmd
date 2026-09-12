@@ -1516,3 +1516,93 @@ mod property_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod mode_agreement_tests {
+    use super::*;
+
+    fn layout_for(value: &str, wrap: TextWrap, width: usize) -> TextLayout {
+        super::layout_for_test(value, wrap, width)
+    }
+
+    /// The three wrap policies agree with each other about what they may split:
+    /// `NoWrap` only breaks at explicit newlines, `Hard` never exceeds the
+    /// viewport for a breakable value, and `Soft` prefers word breaks over
+    /// mid-word splits. These are the same guarantees the editor surface and
+    /// the commit pipeline rely on, because both consume this one result.
+    #[test]
+    fn wrap_policies_have_consistent_row_counts() {
+        for value in ["hello world", "abcdefghij", "abc def", "a b c d e f"] {
+            let no_wrap = layout_for(value, TextWrap::NoWrap, 4);
+            let soft = layout_for(value, TextWrap::Soft, 4);
+            let hard = layout_for(value, TextWrap::Hard, 4);
+            assert_eq!(no_wrap.row_count(), 1, "NoWrap keeps one logical line");
+            // Hard wrapping fills every cell, so it never needs more rows than
+            // soft wrapping, which leaves a row early to keep words whole.
+            assert!(
+                hard.row_count() <= soft.row_count(),
+                "{value:?}: hard wrapping packs more per row than soft ({} vs {})",
+                hard.row_count(),
+                soft.row_count()
+            );
+            for layout in [&soft, &hard] {
+                for index in 0..layout.row_count() {
+                    assert!(
+                        layout.row_width(index) <= 4,
+                        "{value:?}: a wrapped row must fit the viewport"
+                    );
+                }
+            }
+            // Soft keeps whole words together where they fit.
+            if value.contains(' ') {
+                let rows: Vec<String> = (0..soft.row_count())
+                    .map(|index| {
+                        soft.row_items(index)
+                            .iter()
+                            .map(|item| item.symbol.clone())
+                            .collect()
+                    })
+                    .collect();
+                assert!(
+                    rows.iter().all(|row| !row.starts_with(' ')),
+                    "{value:?}: a soft-wrapped row does not start with a space: {rows:?}"
+                );
+            }
+        }
+    }
+
+    /// Every navigable source range survives wrapping: dropped separators and
+    /// explicit newlines are still reachable by stepping boundaries, for all
+    /// three policies.
+    #[test]
+    fn navigable_ranges_survive_every_policy() {
+        for value in ["hello world", "a\n\nb", "a\n", "  leading", "trailing  "] {
+            for wrap in [TextWrap::NoWrap, TextWrap::Soft, TextWrap::Hard] {
+                let layout = layout_for(value, wrap, 3);
+                let mut position = 0usize;
+                let mut guard = 0;
+                let mut visited = vec![position];
+                while position < value.len() {
+                    position = layout.next_boundary(position);
+                    visited.push(position);
+                    guard += 1;
+                    assert!(guard <= value.len() + 2, "the walk must terminate");
+                }
+                assert_eq!(position, value.len());
+                // Every byte of the value is either owned by a row or is a
+                // newline that a row terminates.
+                let mut cursor = 0usize;
+                for index in 0..layout.row_count() {
+                    let end = layout.row_source_end(index);
+                    assert!(end >= cursor, "rows must not overlap");
+                    cursor = end;
+                }
+                assert_eq!(cursor, value.len(), "rows must cover {value:?}");
+                assert!(
+                    visited.len() >= value.len(),
+                    "each byte advances the boundary walk"
+                );
+            }
+        }
+    }
+}

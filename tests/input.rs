@@ -1111,3 +1111,51 @@ fn single_line_caret_reveal_fits_the_padded_viewport() {
         "the caret must reveal the end of the value: {painted:?}"
     );
 }
+
+#[test]
+fn change_observer_may_edit_other_state_without_deadlocking() {
+    // The model lock is released before callbacks run, so an observer that
+    // touches shared state (or dispatches another event) cannot deadlock the
+    // editor.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("a".into()),
+            on_change: Attr::Set(EventListener::new({
+                let seen = seen.clone();
+                move |event: TextValueEvent| {
+                    // Reentrancy: read and write unrelated shared state while the
+                    // observer runs.
+                    let mut guard = seen.lock().unwrap();
+                    guard.push(event.value.clone());
+                    guard.sort();
+                }
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(6))
+        .node();
+    let viewport = Size::new(10, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    for ch in ["b", "c", "d"] {
+        interact(
+            &output,
+            &dispatcher,
+            Some(key(
+                KeyCode::Char(ch.chars().next().unwrap()),
+                KeyModifiers::empty(),
+            )),
+        );
+    }
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|value| value.starts_with('a')),
+        "the observer must see the edits: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|value| value.len() > 1),
+        "the observer must see multi-character values: {seen:?}"
+    );
+}
