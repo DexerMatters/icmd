@@ -111,8 +111,12 @@ pub(crate) struct Row {
     pub(crate) first_item: usize,
     /// Number of items in this row. A row can be empty (an empty logical line).
     pub(crate) len: usize,
-    /// Navigable source position of an empty row.
-    pub(crate) empty_source: Option<usize>,
+    /// First source byte this row owns.
+    pub(crate) source_start: usize,
+    /// End of the source bytes this row owns, including a dropped wrap
+    /// separator and the explicit newline that terminates it. Ranges tile the
+    /// value exactly: each row's end is the next row's start.
+    pub(crate) source_end: usize,
 }
 
 /// One shaped grapheme handed to [`TextLayout::layout`].
@@ -134,6 +138,11 @@ pub(crate) struct TextLayout {
     text: String,
     items: Vec<Item>,
     rows: Vec<Row>,
+    /// Every valid source boundary in ascending order: 0, each grapheme edge,
+    /// each explicit-newline edge, and the end of the value. Navigation clamps
+    /// and steps through this table, so a returned position is always a real
+    /// boundary and newlines stay navigable even though they own no items.
+    boundaries: Vec<usize>,
     /// Total cell width of the layout (the widest row).
     width: usize,
     /// Total source length the layout owns (including the final newline).
@@ -264,10 +273,18 @@ impl TextLayout {
         // Whitespace is dropped only on a non-final row of its logical line.
         struct Placed {
             range: Range<usize>,
+            /// First source byte this visual row owns.
+            source_start: usize,
             pieces: Vec<Piece>,
             is_last_row: bool,
-            empty_source: Option<usize>,
         }
+        // The source start of a shaped index; the end of the value past the
+        // last shaped glyph.
+        let source_at = |index: usize| {
+            shaped
+                .get(index)
+                .map_or(source_len, |glyph| glyph.source.start)
+        };
         let mut placed: Vec<Placed> = Vec::new();
         for logical in &logical_lines {
             // A logical line with no glyphs (only its terminating newline, or a
@@ -280,9 +297,9 @@ impl TextLayout {
             {
                 placed.push(Placed {
                     range: logical.start..logical.start,
+                    source_start: source_at(logical.start),
                     pieces: Vec::new(),
                     is_last_row: true,
-                    empty_source: Some(logical.start),
                 });
                 continue;
             }
@@ -301,9 +318,9 @@ impl TextLayout {
                 let end = line.last().map_or(logical.start, |piece| piece.end);
                 placed.push(Placed {
                     range: start..end,
+                    source_start: source_at(start),
                     pieces: line.to_vec(),
                     is_last_row: line_index == last_index,
-                    empty_source: None,
                 });
             }
         }
@@ -342,11 +359,20 @@ impl TextLayout {
                 });
                 cell = cell.saturating_add(item_width);
             }
+            let source_end = placed
+                .get(row_index + 1)
+                .map_or(source_len, |next| next.source_start);
             rows.push(Row {
                 first_item,
                 len: items.len() - first_item,
-                empty_source: entry.empty_source,
+                source_start: entry.source_start,
+                // The final row owns everything through the end of the value,
+                // including a trailing newline the value ends with.
+                source_end: source_end.max(entry.source_start),
             });
+        }
+        if let Some(last) = rows.last_mut() {
+            last.source_end = source_len.max(last.source_start);
         }
 
         let layer_width = rows
@@ -355,10 +381,24 @@ impl TextLayout {
             .max()
             .unwrap_or(0);
 
+        // Every grapheme edge, every explicit-newline edge, and the value ends
+        // are valid boundaries. Newlines own no items, so they are collected
+        // separately from the shaped table.
+        let mut boundaries = Vec::with_capacity(items.len() * 2 + 4);
+        boundaries.push(0usize);
+        for glyph in &shaped {
+            boundaries.push(glyph.source.start);
+            boundaries.push(glyph.source.end);
+        }
+        boundaries.push(source_len);
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
         Self {
             text,
             items,
             rows,
+            boundaries,
             width: layer_width,
             source_len,
         }
@@ -399,11 +439,11 @@ impl TextLayout {
         })
     }
 
-    /// First UTF-8 source byte painted on `index`.
+    /// First UTF-8 source byte this row owns.
     pub(crate) fn row_start(&self, index: usize) -> usize {
-        self.row_items(index)
-            .first()
-            .map_or_else(|| self.row_fallback_source(index), |item| item.source.start)
+        self.rows
+            .get(index)
+            .map_or(self.source_len, |row| row.source_start)
     }
 
     /// End of the UTF-8 source bytes painted on `index`.
@@ -424,16 +464,20 @@ impl TextLayout {
     /// Together with [`Self::row_start`], row ranges tile the source with no
     /// gaps or overlaps: each row starts where the previous one ended, and an
     /// explicit newline is the last byte the next row does not own.
+    #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
     pub(crate) fn row_source_end(&self, index: usize) -> usize {
-        self.row_items(index)
-            .last()
-            .map_or_else(|| self.row_start(index), |item| item.source.end)
+        self.rows
+            .get(index)
+            .map_or(self.source_len, |row| row.source_end)
     }
 
     /// Total painted cell width of `index`.
     pub(crate) fn row_width(&self, index: usize) -> usize {
+        // A separator is deliberately not painted, so it contributes no cells
+        // even though it owns source bytes.
         self.row_items(index)
             .iter()
+            .filter(|item| item.kind != ItemKind::Separator)
             .fold(0usize, |sum, item| sum.saturating_add(item.width))
     }
 
@@ -447,70 +491,81 @@ impl TextLayout {
 
     /// The visual row that owns `source`, clamped into range.
     ///
-    /// A source position on an explicit newline belongs to the row that the
-    /// newline terminates, and a position at the end of a row that continues on
-    /// the next row stays with the earlier row. A position after the final
-    /// newline resolves to the final (possibly empty) row.
+    /// Row ranges tile the value, so this is the first row whose owned range
+    /// contains `source`; a position at the very end resolves to the final row.
     pub(crate) fn row_of_source(&self, source: usize) -> usize {
         if self.rows.is_empty() {
             return 0;
         }
+        let source = source.min(self.source_len);
         for (index, row) in self.rows.iter().enumerate() {
-            let start = self.row_start(index);
-            let end = self.row_source_end(index);
-            if source <= end && (source > start || row.len == 0) {
+            if source < row.source_end {
                 return index;
             }
         }
         self.rows.len() - 1
     }
 
-    /// The grapheme boundary nearest to `source`, clamped to the value.
+    /// The nearest valid source boundary to `source`, clamped to the value.
+    ///
+    /// The boundary table includes explicit newlines, so a position on a line
+    /// break resolves to a real boundary instead of jumping to the next
+    /// grapheme.
     pub(crate) fn clamp(&self, source: usize) -> usize {
-        if self.items.is_empty() {
+        if self.boundaries.is_empty() {
             return 0;
         }
-        let last_end = self.items.last().map_or(0, |item| item.source.end);
-        if source >= last_end {
-            return last_end;
-        }
-        for item in &self.items {
-            if source < item.source.end {
-                return if source <= item.source.start {
-                    item.source.start
+        let source = source.min(self.source_len);
+        match self.boundaries.binary_search(&source) {
+            Ok(_) => source,
+            Err(at) => {
+                if at == 0 {
+                    return self.boundaries[0];
+                }
+                if at >= self.boundaries.len() {
+                    return *self.boundaries.last().expect("non-empty boundaries");
+                }
+                let before = self.boundaries[at - 1];
+                let after = self.boundaries[at];
+                // Prefer the nearer boundary; ties resolve forward so repeated
+                // stepping always advances.
+                if source - before < after - source {
+                    before
                 } else {
-                    item.source.end
-                };
+                    after
+                }
             }
         }
-        last_end
     }
 
     /// Source boundary immediately before `source`.
-    #[allow(dead_code)] // Used by the editor's word/character movement.
+    ///
+    /// Used by backward navigation.
+    #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
     pub(crate) fn previous_boundary(&self, source: usize) -> usize {
-        if source == 0 {
-            return 0;
-        }
         let source = self.clamp(source);
-        for item in self.items.iter().rev() {
-            if item.source.end <= source {
-                return item.source.start;
-            }
+        match self.boundaries.binary_search(&source) {
+            Ok(0) => 0,
+            Ok(at) => self.boundaries[at - 1],
+            Err(at) if at > 0 => self.boundaries[at - 1],
+            Err(_) => 0,
         }
-        0
     }
 
     /// Source boundary immediately after `source`.
-    #[allow(dead_code)]
+    ///
+    /// This always advances, so walking it terminates.
+    #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
     pub(crate) fn next_boundary(&self, source: usize) -> usize {
-        let source = self.clamp(source);
-        for item in &self.items {
-            if item.source.start >= source {
-                return item.source.end;
-            }
+        let clamped = self.clamp(source);
+        // A position that clamped forward is already the next boundary.
+        if clamped > source {
+            return clamped;
         }
-        self.items.last().map_or(0, |item| item.source.end)
+        match self.boundaries.binary_search(&clamped) {
+            Ok(at) => self.boundaries.get(at + 1).copied().unwrap_or(clamped),
+            Err(at) => self.boundaries.get(at).copied().unwrap_or(clamped),
+        }
     }
 
     /// The caret position for a source boundary: the visual row, the cell
@@ -588,7 +643,19 @@ impl TextLayout {
             }
             offset = end;
         }
-        self.row_source_end(row)
+        // Past the painted content: the caret belongs after this row's last
+        // glyph, not at the next row's first boundary.
+        self.row_last_boundary(row)
+    }
+
+    /// The last source boundary that still belongs to `row`: the end of its
+    /// final painted item, or its own start for an empty row.
+    fn row_last_boundary(&self, row: usize) -> usize {
+        self.row_items(row)
+            .iter()
+            .rev()
+            .find(|item| item.kind == ItemKind::Glyph && !item.symbol.is_empty())
+            .map_or_else(|| self.row_start(row), |item| item.source.end)
     }
 
     /// The cell column of a source boundary inside its visual row.
@@ -618,15 +685,6 @@ impl TextLayout {
         let target = (current as i64 + i64::from(direction))
             .clamp(0, self.rows.len().saturating_sub(1) as i64) as usize;
         (self.hit(target, column, HitBias::Leading), Some(column))
-    }
-
-    fn row_fallback_source(&self, index: usize) -> usize {
-        // An empty row (an empty logical line) still has one navigable source
-        // position: the newline that created it, or the end of the value.
-        self.rows
-            .get(index)
-            .and_then(|row| row.empty_source)
-            .unwrap_or(self.source_len)
     }
 }
 
@@ -712,10 +770,12 @@ fn item_is_dropped_separator(pieces: &[Piece], index: usize, is_last_row: bool) 
     index >= piece.content_end
 }
 
+/// Painted cell width of a row. Separators are excluded: they own source bytes
+/// but are deliberately not drawn, so they contribute no cells.
 fn row_cells(items: &[Item], row: &Row) -> usize {
     items[row.first_item..row.first_item + row.len]
         .iter()
-        .filter(|item| item.kind != ItemKind::Newline)
+        .filter(|item| item.kind == ItemKind::Glyph)
         .fold(0usize, |sum, item| sum.saturating_add(item.width))
 }
 
@@ -984,11 +1044,15 @@ mod tests {
             let layout = build(value, TextWrap::Soft, 3);
             for index in 0..layout.row_count() {
                 let mut cell = 0usize;
+                let mut painted = 0usize;
                 for item in layout.row_items(index) {
                     assert_eq!(item.cell, cell, "item cell order in row {index}");
                     cell += item.width;
+                    if item.kind != ItemKind::Separator {
+                        painted += item.width;
+                    }
                 }
-                assert_eq!(layout.row_width(index), cell);
+                assert_eq!(layout.row_width(index), painted);
             }
         }
     }
@@ -1084,23 +1148,11 @@ mod tests {
     }
 }
 
-/// Temporary parity harness: compares the canonical layout against the two
-/// wrap implementations it is replacing. Removed once migration is complete.
+/// Shared helpers for the layout property tests below.
 #[cfg(test)]
-pub(crate) mod parity {
-    use super::*;
-    use crate::{Text as PublicText, TextWrap as PublicWrap};
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) struct LegacyRow {
-        pub start: usize,
-        pub end: usize,
-        pub source_end: usize,
-    }
-
-    /// The normalized form both engines lay out (CRLF/CR to LF, controls
-    /// discarded). The canonical layout tracks raw-source bytes, so parity
-    /// compares shapes over this normalized value.
+mod parity {
+    /// The normalized form an editor lays out: CRLF/CR to LF, other controls
+    /// discarded.
     pub(crate) fn normalized(value: &str) -> String {
         value
             .replace("\r\n", "\n")
@@ -1109,287 +1161,13 @@ pub(crate) mod parity {
             .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
             .collect()
     }
-
-    pub(crate) fn canonical_rows(value: &str, wrap: PublicWrap, width: u16) -> Vec<LegacyRow> {
-        let layout = layout_text(
-            &PublicText::new(normalized(value)).wrap(wrap),
-            width as usize,
-            ComputedText::default(),
-            |parent, _| parent,
-            |style| *style,
-        );
-        (0..layout.row_count())
-            .map(|index| LegacyRow {
-                start: layout.row_start(index),
-                end: layout.row_end(index),
-                source_end: layout.row_source_end(index),
-            })
-            .collect()
-    }
-
-    pub(crate) fn canonical_row_symbols(
-        value: &str,
-        wrap: PublicWrap,
-        width: usize,
-    ) -> Vec<String> {
-        let layout = layout_text(
-            &PublicText::new(normalized(value)).wrap(wrap),
-            width,
-            ComputedText::default(),
-            |parent, _| parent,
-            |style| *style,
-        );
-        (0..layout.row_count())
-            .map(|index| {
-                let mut painted = String::new();
-                for item in layout.row_items(index) {
-                    if item.kind != ItemKind::Glyph || item.width == 0 {
-                        continue;
-                    }
-                    if item.symbol == "\t" {
-                        painted.push_str(&" ".repeat(item.width));
-                    } else {
-                        painted.push_str(&item.symbol);
-                    }
-                }
-                painted
-            })
-            .collect()
-    }
-
-    // --- Self-contained copy of the legacy commit glyph/wrap algorithm. ---
-    // This is the exact code that occupied `runtime::commit::text` before the
-    // canonical layout migration. It shapes from the raw source independently
-    // rather than reading the canonical layout, so it is a genuine oracle.
-
-    #[derive(Debug, Clone)]
-    struct LegacyGlyph {
-        symbol: String,
-        width: usize,
-    }
-
-    #[derive(Debug, Clone)]
-    struct LegacyFragment {
-        glyphs: Vec<LegacyGlyph>,
-        content_len: usize,
-        content_width: usize,
-        whitespace_width: usize,
-    }
-
-    impl textwrap::core::Fragment for LegacyFragment {
-        fn width(&self) -> f64 {
-            self.content_width as f64
-        }
-        fn whitespace_width(&self) -> f64 {
-            self.whitespace_width as f64
-        }
-        fn penalty_width(&self) -> f64 {
-            0.0
-        }
-    }
-
-    fn glyph_width(glyphs: &[LegacyGlyph]) -> usize {
-        glyphs.iter().map(|glyph| glyph.width).sum()
-    }
-
-    fn split_overlong_fragment(fragment: LegacyFragment, width: usize) -> Vec<LegacyFragment> {
-        if fragment.content_width <= width || width == 0 {
-            return vec![fragment];
-        }
-        let mut pieces = Vec::new();
-        let content = &fragment.glyphs[..fragment.content_len.min(fragment.glyphs.len())];
-        let whitespace = &fragment.glyphs[fragment.content_len.min(fragment.glyphs.len())..];
-        let mut current = Vec::new();
-        let mut current_width = 0usize;
-        for glyph in content {
-            if current_width > 0 && current_width.saturating_add(glyph.width) > width {
-                pieces.push(LegacyFragment {
-                    content_len: current.len(),
-                    glyphs: std::mem::take(&mut current),
-                    content_width: current_width,
-                    whitespace_width: 0,
-                });
-                current_width = 0;
-            }
-            current_width = current_width.saturating_add(glyph.width);
-            current.push(glyph.clone());
-        }
-        if !current.is_empty() {
-            pieces.push(LegacyFragment {
-                content_len: current.len(),
-                glyphs: current
-                    .into_iter()
-                    .chain(whitespace.iter().cloned())
-                    .collect(),
-                content_width: current_width,
-                whitespace_width: fragment.whitespace_width,
-            });
-        }
-        if pieces.is_empty() {
-            vec![fragment]
-        } else {
-            pieces
-        }
-    }
-
-    fn hard_wrapped_line(line: Vec<LegacyGlyph>, width: usize) -> Vec<Vec<LegacyGlyph>> {
-        if line.is_empty() {
-            return vec![line];
-        }
-        let fragments = line
-            .into_iter()
-            .map(|glyph| LegacyFragment {
-                content_width: glyph.width,
-                content_len: 1,
-                whitespace_width: 0,
-                glyphs: vec![glyph],
-            })
-            .collect::<Vec<_>>();
-        textwrap::wrap_algorithms::wrap_first_fit(&fragments, &[width.max(1) as f64])
-            .into_iter()
-            .map(|row| {
-                row.iter()
-                    .flat_map(|fragment| fragment.glyphs.iter().cloned())
-                    .collect()
-            })
-            .collect()
-    }
-
-    fn wrapped_line(
-        line: Vec<LegacyGlyph>,
-        wrap: PublicWrap,
-        width: usize,
-    ) -> Vec<Vec<LegacyGlyph>> {
-        if matches!(wrap, PublicWrap::NoWrap) || line.is_empty() {
-            return vec![line];
-        }
-        if matches!(wrap, PublicWrap::Hard) {
-            return hard_wrapped_line(line, width);
-        }
-        let mut source = String::new();
-        let mut offsets = Vec::with_capacity(line.len() + 1);
-        offsets.push(0);
-        for glyph in &line {
-            source.push_str(&glyph.symbol);
-            offsets.push(source.len());
-        }
-        let words = textwrap::WordSeparator::UnicodeBreakProperties
-            .find_words(&source)
-            .collect::<Vec<_>>();
-        if words.is_empty() {
-            return vec![line];
-        }
-        let mut fragments = Vec::new();
-        let mut byte_cursor = 0usize;
-        for word in words {
-            let word_start = byte_cursor;
-            let content_end = word_start.saturating_add(word.word.len());
-            let end = content_end.saturating_add(word.whitespace.len());
-            byte_cursor = end;
-            let first = offsets.partition_point(|offset| *offset < word_start);
-            let last = offsets.partition_point(|offset| *offset < end);
-            let content_last = offsets.partition_point(|offset| *offset < content_end);
-            let glyphs = line[first.min(line.len())..last.min(line.len())].to_vec();
-            let content_count = content_last.saturating_sub(first).min(glyphs.len());
-            let content_glyphs = glyphs[..content_count].to_vec();
-            let whitespace_glyphs = glyphs[content_count..].to_vec();
-            fragments.push(LegacyFragment {
-                content_len: content_glyphs.len(),
-                content_width: glyph_width(&content_glyphs),
-                whitespace_width: glyph_width(&whitespace_glyphs),
-                glyphs,
-            });
-        }
-        if byte_cursor < source.len() {
-            let first = offsets.partition_point(|offset| *offset < byte_cursor);
-            fragments.push(LegacyFragment {
-                glyphs: line[first.min(line.len())..].to_vec(),
-                content_len: line.len().saturating_sub(first.min(line.len())),
-                content_width: glyph_width(&line[first.min(line.len())..]),
-                whitespace_width: 0,
-            });
-        }
-        let preserve_trailing_whitespace = line
-            .last()
-            .is_some_and(|glyph| glyph.symbol.chars().all(char::is_whitespace));
-        if preserve_trailing_whitespace && let Some(last) = fragments.last_mut() {
-            last.content_len = last.glyphs.len();
-            last.content_width = last.content_width.saturating_add(last.whitespace_width);
-            last.whitespace_width = 0;
-        }
-        fragments = fragments
-            .into_iter()
-            .flat_map(|fragment| split_overlong_fragment(fragment, width))
-            .collect();
-        textwrap::wrap_algorithms::wrap_first_fit(&fragments, &[width.max(1) as f64])
-            .into_iter()
-            .map(|line| {
-                let mut glyphs = Vec::new();
-                for (index, fragment) in line.iter().enumerate() {
-                    let content_count = if index + 1 == line.len() && !preserve_trailing_whitespace
-                    {
-                        fragment.content_len.min(fragment.glyphs.len())
-                    } else {
-                        fragment.glyphs.len()
-                    };
-                    glyphs.extend(fragment.glyphs.iter().take(content_count).cloned());
-                    if index + 1 != line.len() {
-                        glyphs.extend(fragment.glyphs.iter().skip(content_count).cloned());
-                    }
-                }
-                glyphs
-            })
-            .collect()
-    }
-
-    pub(crate) fn legacy_commit_rows(value: &str, wrap: PublicWrap, width: usize) -> Vec<String> {
-        let value = normalized(value);
-        let mut lines: Vec<Vec<LegacyGlyph>> = vec![Vec::new()];
-        for grapheme in unicode_segmentation::UnicodeSegmentation::graphemes(value.as_str(), true) {
-            if grapheme == "\n" {
-                lines.push(Vec::new());
-                continue;
-            }
-            let (symbol, width) = if grapheme == "\t" {
-                ("    ".to_string(), 4usize)
-            } else if grapheme.chars().any(char::is_control) {
-                ("\u{FFFD}".to_string(), 1)
-            } else {
-                let symbol = grapheme.to_string();
-                let width = unicode_width::UnicodeWidthStr::width(symbol.as_str());
-                if symbol.len() > crate::MAX_GLYPH_BYTES || !(1..=2).contains(&width) {
-                    ("\u{FFFD}".to_string(), 1)
-                } else {
-                    (symbol, width)
-                }
-            };
-            if width == 0 {
-                continue;
-            }
-            lines
-                .last_mut()
-                .expect("line exists")
-                .push(LegacyGlyph { symbol, width });
-        }
-        let width = width.max(1);
-        let mut result = Vec::new();
-        for line in lines {
-            result.extend(wrapped_line(line, wrap, width));
-        }
-        if result.is_empty() {
-            result.push(Vec::new());
-        }
-        result
-            .into_iter()
-            .map(|line| line.into_iter().map(|glyph| glyph.symbol).collect())
-            .collect()
-    }
 }
 
 #[cfg(test)]
-mod parity_tests {
-    use super::parity::*;
+mod property_tests {
+    use super::parity::normalized;
     use super::*;
+    #[allow(unused_imports)]
     use crate::TextWrap as W;
 
     fn corpus() -> Vec<&'static str> {
@@ -1429,157 +1207,281 @@ mod parity_tests {
         ]
     }
 
-    fn widths_u16() -> [u16; 10] {
-        [1, 2, 3, 4, 5, 6, 8, 12, 24, 80]
-    }
-
-    fn widths_usize() -> [usize; 10] {
-        [1, 2, 3, 4, 5, 6, 8, 12, 24, 80]
-    }
-
     const WRAPS: [W; 3] = [W::NoWrap, W::Soft, W::Hard];
+    const WIDTHS: [usize; 10] = [1, 2, 3, 4, 5, 6, 8, 12, 24, 80];
 
-    /// Strip whitespace that the canonical layout marks as a separator: it is
-    /// not painted, so the painted rows of the two engines agree even when the
-    /// internal row strings differ.
-    fn without_separators(value: &str, wrap: W, width: usize) -> Vec<String> {
-        let layout =
-            crate::basic::text_layout::layout_for_test(normalized(value).as_str(), wrap, width);
-        (0..layout.row_count())
-            .map(|index| {
-                layout
-                    .row_items(index)
-                    .iter()
-                    .filter(|item| item.kind == ItemKind::Glyph && item.width > 0)
-                    .map(|item| item.symbol.as_str())
-                    .collect::<String>()
-            })
-            .collect()
-    }
-
-    /// Commit parity is asserted over painted cells, not internal row strings.
-    ///
-    /// Two intentional differences live in the row strings only:
-    ///
-    /// 1. Tabs: the canonical layout uses terminal tab stops while the legacy
-    ///    commit glyph expander always emitted four spaces. Tabs are excluded
-    ///    here and pinned separately.
-    /// 2. Whitespace that forces a soft wrap is a separator rather than a
-    ///    painted glyph, so the row's internal string omits it even when the
-    ///    following word also overflows.
-    ///
-    /// Both produce the same visible cells at their final widths and row
-    /// boundaries, and the row geometry itself is asserted to match (see
-    /// `separator_wrapping_preserves_row_geometry`).
+    /// Every source position the layout returns is an extended-grapheme
+    /// boundary of the normalized value.
     #[test]
-    fn canonical_matches_legacy_commit_rows() {
-        let mut failures = Vec::new();
+    fn every_returned_position_is_a_grapheme_boundary() {
+        use unicode_segmentation::UnicodeSegmentation;
         for value in corpus() {
-            if value.contains('\t') {
-                continue;
-            }
+            let value = normalized(value);
+            let boundaries: std::collections::HashSet<usize> = std::iter::once(0)
+                .chain(
+                    value
+                        .grapheme_indices(true)
+                        .map(|(index, grapheme)| index + grapheme.len()),
+                )
+                .collect();
             for wrap in WRAPS {
-                for width in widths_usize() {
-                    let legacy = legacy_commit_rows(value, wrap, width);
-                    let canonical = without_separators(value, wrap, width);
-                    let legacy_painted: Vec<String> = legacy
-                        .iter()
-                        .map(|row| row.chars().filter(|c| !c.is_whitespace()).collect())
-                        .collect();
-                    let canonical_painted: Vec<String> = canonical
-                        .iter()
-                        .map(|row| row.chars().filter(|c| !c.is_whitespace()).collect())
-                        .collect();
-                    if legacy_painted != canonical_painted {
-                        failures.push(format!(
-                            "value={value:?} wrap={wrap:?} width={width}\n  legacy={legacy:?}\n  canonical={canonical:?}"
-                        ));
+                for width in WIDTHS {
+                    let layout = layout_for_test(&value, wrap, width);
+                    let mut position = 0usize;
+                    let mut guard = 0usize;
+                    loop {
+                        assert!(
+                            boundaries.contains(&position),
+                            "{position} is not a boundary of {value:?}"
+                        );
+                        if position >= value.len() {
+                            break;
+                        }
+                        let next = layout.next_boundary(position);
+                        assert!(
+                            next > position,
+                            "next_boundary({position}) must advance for {value:?} \
+                             {wrap:?} {width}, returned {next}"
+                        );
+                        position = next;
+                        guard += 1;
+                        assert!(guard <= value.len() + 2, "walk must terminate");
+                    }
+                    for index in 0..layout.row_count() {
+                        assert!(boundaries.contains(&layout.row_start(index)));
+                        assert!(boundaries.contains(&layout.row_end(index)));
+                        assert!(boundaries.contains(&layout.row_source_end(index)));
                     }
                 }
             }
         }
-        report("commit", failures);
     }
 
-    /// Whitespace dropped at a soft wrap must not change where the source
-    /// bytes land: the surviving glyphs keep their rows and order.
+    /// `hit(caret(position))` round-trips for every boundary whose visual
+    /// position is unambiguous.
     #[test]
-    fn separator_wrapping_preserves_row_geometry() {
-        for value in ["你好 世界", "hello world", "ab cd ef"] {
-            for width in widths_u16() {
-                let canonical = canonical_rows(value, wrap_soft(), width);
-                // Concatenating the row ranges reproduces the source exactly.
-                let mut expected = 0usize;
-                for row in &canonical {
-                    assert!(
-                        row.start >= expected,
-                        "row overlap for {value:?} at {width}: {canonical:?}"
-                    );
-                    expected = row.source_end;
+    fn hit_test_round_trips_caret_positions() {
+        for value in corpus() {
+            let value = normalized(value);
+            for wrap in WRAPS {
+                for width in WIDTHS {
+                    let layout = layout_for_test(&value, wrap, width);
+                    let mut position = 0usize;
+                    loop {
+                        let (row, cell, caret_width) = layout.caret(position);
+                        let hit = layout.hit(row, cell, HitBias::Leading);
+                        // A caret past the last painted cell of its row shares
+                        // that cell with the following row's first boundary, and
+                        // a wide grapheme's trailing edge shares its second cell.
+                        // Those positions are visually ambiguous by definition;
+                        // the plan only requires the unambiguous ones to round
+                        // trip.
+                        let past_last_cell = cell >= layout.row_width(row);
+                        let ambiguous = past_last_cell || (caret_width > 1 && cell > 0);
+                        assert!(
+                            hit == position || ambiguous,
+                            "round trip failed for {value:?} {wrap:?} {width}: \
+                             position={position} row={row} cell={cell} hit={hit}"
+                        );
+                        if position >= value.len() {
+                            break;
+                        }
+                        position = layout.next_boundary(position);
+                    }
                 }
             }
         }
     }
 
-    fn wrap_soft() -> W {
-        W::Soft
-    }
-
-    /// Intentional behavior changes from the legacy engines.
-    ///
-    /// These are asserted rather than merely omitted so the difference is
-    /// explicit and the canonical behavior is pinned:
-    ///
-    /// 1. Tabs use terminal tab stops (column-relative), which both the
-    ///    renderer's cells and the editor already assume. The old commit glyph
-    ///    expander always emitted four spaces per tab regardless of column.
-    /// 2. Whitespace that forces a soft wrap is not painted (it is a
-    ///    [`ItemKind::Separator`]) even when the following word also overflows.
-    ///    The rendered terminal cells are identical; only the internal row
-    ///    string differs.
+    /// Every displayed cell is reachable by pointer hit-testing: walking the
+    /// cells of a row never skips past a painted grapheme.
     #[test]
-    fn intentional_behavior_changes_are_pinned() {
-        // Tab stops are column-relative: "a\tb" needs three spaces after "a"
-        // (to the next four-cell stop), not four.
-        let layout = crate::basic::text_layout::layout_for_test("a\tb", W::NoWrap, 8);
-        assert_eq!(
-            layout.column(2),
-            4,
-            "a tab after one column reaches column 4"
-        );
-        assert_eq!(layout.column(3), 5, "the glyph after the tab follows it");
-        let painted: String = layout
-            .items()
-            .iter()
-            .filter(|item| item.kind == ItemKind::Glyph && item.width > 0)
-            .map(|item| {
-                if item.symbol == "\t" {
-                    " ".repeat(item.width)
-                } else {
-                    item.symbol.clone()
+    fn every_displayed_cell_is_reachable() {
+        for value in corpus() {
+            let value = normalized(value);
+            for wrap in WRAPS {
+                for width in WIDTHS {
+                    let layout = layout_for_test(&value, wrap, width);
+                    for index in 0..layout.row_count() {
+                        let cells = layout.row_width(index);
+                        for cell in 0..cells {
+                            let hit = layout.hit(index, cell, HitBias::Trailing);
+                            // A hit resolves to a boundary; that boundary's
+                            // caret belongs to this row, except at the very end
+                            // of a row, where the caret continues on the next
+                            // one. Both are correct: what must never happen is a
+                            // hit landing on an unrelated earlier row.
+                            let (row, _, _) = layout.caret(hit);
+                            assert!(
+                                row == index || row == index + 1,
+                                "cell {cell} of row {index} resolved to row {row} \
+                                 for {value:?} {wrap:?} {width}"
+                            );
+                        }
+                    }
                 }
-            })
-            .collect();
-        assert_eq!(painted, "a   b");
-
-        // At a width of one cell the forcing space is dropped, so the words sit
-        // next to each other in the row text but still paint on separate rows.
-        let rows = canonical_row_symbols("hello world", W::Soft, 5);
-        assert_eq!(rows, ["hello", "world"]);
+            }
+        }
     }
 
-    fn report(label: &str, failures: Vec<String>) {
-        if failures.is_empty() {
-            return;
+    /// Measure and paint agree on the row count and the widest row for every
+    /// viewport width, including zero and one cell.
+    #[test]
+    fn measure_and_paint_agree_on_extents() {
+        for value in corpus() {
+            let value = normalized(value);
+            for wrap in WRAPS {
+                for width in [0usize, 1, 2, 3, 4, 5, 8, 24] {
+                    let layout = layout_for_test(&value, wrap, width);
+                    assert!(layout.row_count() >= 1, "a layout always has one row");
+                    let widest = (0..layout.row_count())
+                        .map(|index| layout.row_width(index))
+                        .max()
+                        .unwrap_or(0);
+                    assert_eq!(layout.max_row_width(), widest);
+                    assert_eq!(layout.width(), widest);
+                }
+            }
         }
-        let head: Vec<&String> = failures.iter().take(8).collect();
-        panic!(
-            "{} {label} parity failures:\n{}",
-            failures.len(),
-            head.iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
+    }
+
+    /// `NoWrap`, `Soft`, and `Hard` never lose a source byte and never paint a
+    /// row wider than the viewport unless the text is unbreakable under that
+    /// policy.
+    #[test]
+    fn wrap_modes_preserve_source_and_respect_the_viewport() {
+        for value in corpus() {
+            let value = normalized(value);
+            for wrap in WRAPS {
+                for width in [1usize, 3, 5, 12, 80] {
+                    let layout = layout_for_test(&value, wrap, width);
+                    let mut cursor = 0usize;
+                    for index in 0..layout.row_count() {
+                        let start = layout.row_start(index);
+                        let end = layout.row_source_end(index);
+                        assert!(start >= cursor, "rows must not overlap");
+                        cursor = end;
+                        // A wrapped row fits its viewport. Two documented
+                        // exceptions: a grapheme wider than the viewport cannot
+                        // be split, and `NoWrap` deliberately overflows so a
+                        // scroll host can pan across the logical line.
+                        if wrap != W::NoWrap {
+                            let unbreakable = layout
+                                .row_items(index)
+                                .iter()
+                                .any(|item| item.kind == ItemKind::Glyph && item.width > width);
+                            assert!(
+                                unbreakable || layout.row_width(index) <= width,
+                                "row {index} is {} cells wide in a {width}-cell box \
+                                 for {value:?} {wrap:?}",
+                                layout.row_width(index)
+                            );
+                        }
+                    }
+                    assert_eq!(cursor, value.len(), "rows must cover {value:?}");
+                }
+            }
+        }
+    }
+
+    /// A width-two grapheme in a one-cell viewport keeps its leading boundary
+    /// visible instead of producing an invalid continuation cell.
+    #[test]
+    fn wide_graphemes_in_a_one_cell_viewport_are_safe() {
+        // The wide grapheme overflows its one-cell viewport, but it still owns
+        // exactly one row and never produces a half continuation cell.
+        let layout = layout_for_test("界a", W::Hard, 1);
+        let row = layout.row_of_source(0);
+        assert_eq!(
+            layout.row_items(row)[0].source,
+            0..3,
+            "the wide grapheme starts its row"
         );
+        assert_eq!(layout.row_items(row)[0].width, 2);
+        assert!(
+            layout.row_count() >= 2,
+            "the following glyph needs its own row"
+        );
+        // The leading boundary sits at the start of the wide grapheme's row;
+        // its trailing boundary begins the following row, which is what lets a
+        // caret step past a glyph the viewport cannot show in full.
+        assert_eq!(layout.row_of_source(0), row);
+        // The caret at the grapheme's leading boundary starts its row at cell
+        // zero, and its trailing boundary starts the next row.
+        assert_eq!(
+            layout.caret(0),
+            (row, 0, 2),
+            "the caret precedes both cells"
+        );
+        assert_eq!(
+            layout.caret(3).0,
+            row + 1,
+            "the caret moves to the next row"
+        );
+    }
+
+    /// Selection and caret never style only half of a wide glyph: a grapheme's
+    /// source range is indivisible in the item table.
+    #[test]
+    fn wide_glyphs_are_indivisible() {
+        for value in ["界a", "你好", "👍🏽ok"] {
+            for wrap in WRAPS {
+                let layout = layout_for_test(value, wrap, 4);
+                for item in layout.items() {
+                    if item.kind != ItemKind::Glyph || item.width < 2 {
+                        continue;
+                    }
+                    let graphemes: Vec<Range<usize>> = {
+                        use unicode_segmentation::UnicodeSegmentation;
+                        value
+                            .grapheme_indices(true)
+                            .map(|(index, grapheme)| index..index + grapheme.len())
+                            .collect()
+                    };
+                    assert!(
+                        graphemes.contains(&item.source),
+                        "a wide item must span exactly one grapheme: {:?}",
+                        item.source
+                    );
+                }
+            }
+        }
+    }
+
+    /// Vertical movement keeps a preferred terminal-cell column across short
+    /// rows and never leaves the row table.
+    #[test]
+    fn vertical_movement_keeps_a_preferred_column() {
+        let layout = layout_for_test("abcdef\nxy\nabcdef", W::Soft, 3);
+        assert_eq!(layout.row_count(), 5);
+        // Source 5 is the last cell of row 1 ("def"); its caret column is 2.
+        assert_eq!(layout.caret(5).1, 2);
+        // Moving down lands at column 2 of row 2 ("xy"), whose content is only
+        // two cells, so that is the row's own end.
+        let (first, preferred) = layout.vertical(5, 1, None);
+        assert_eq!(preferred, Some(2));
+        assert_eq!(first, 9, "column 2 of the two-cell row is its end");
+        assert_eq!(layout.row_of_source(first), 2);
+
+        // Repeating the preferred column from there reaches row 3 unchanged.
+        let (second, _) = layout.vertical(first, 1, preferred);
+        assert_eq!(layout.row_of_source(second), 3);
+        assert_eq!(layout.column(second), 2, "the preferred column is kept");
+
+        // Moving back up returns to row 2's column 2 and then row 1's.
+        let (back, _) = layout.vertical(second, -1, preferred);
+        assert_eq!(layout.row_of_source(back), 2);
+    }
+
+    /// Zero-sized offered geometry is clamped safely and cannot loop.
+    #[test]
+    fn zero_width_geometry_is_clamped() {
+        for value in corpus() {
+            for wrap in WRAPS {
+                let layout = layout_for_test(value, wrap, 0);
+                assert!(layout.row_count() >= 1);
+                assert!(layout.row_count() <= value.chars().count().max(1) * 2 + 2);
+            }
+        }
     }
 }
