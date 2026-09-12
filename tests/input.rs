@@ -617,3 +617,47 @@ fn unhandled_keys_bubble_to_ancestors_while_handled_keys_stop() {
         "an unhandled key continues to ancestors"
     );
 }
+
+#[test]
+fn wrapping_is_correct_in_the_first_committed_frame() {
+    // The editor wraps to the width the layout actually grants, and the commit
+    // pass builds that layout itself. Correct wrapping therefore does not need
+    // a feedback render: the first frame whose rows are painted already has the
+    // final wrap.
+    let node = icmd::textarea
+        .props(icmd::TextareaProps {
+            default_value: Attr::Set("0123456789abcdefghij".into()),
+            wrap: Attr::Set(icmd::TextWrap::Hard),
+            ..icmd::TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(20);
+            style.height /= icmd::Dimension::Cells(6);
+        })
+        .node();
+    let viewport = Size::new(24, 8);
+    let (sender, output, _) = pipeline(viewport);
+    sender.send(node).unwrap();
+
+    // Collect every frame before quiescence. A settling loop would show a
+    // first frame with rows wrapped for the wrong width and a later correction;
+    // instead the union of painted characters must be complete and the first
+    // frame must already carry content.
+    let mut frames: Vec<String> = Vec::new();
+    while let Ok(frame) = output.recv_timeout(Duration::from_millis(250)) {
+        frames.push(strip_ansi(&frame.unwrap()));
+    }
+    assert!(!frames.is_empty(), "at least one frame must be committed");
+    let painted = frames.concat();
+    for ch in "0123456789abcdefghij".chars() {
+        assert!(
+            painted.contains(ch),
+            "character {ch:?} must be painted: {painted:?}"
+        );
+    }
+    assert!(
+        frames[0].contains("0123456789"),
+        "the first committed frame must already wrap at the granted width: {:?}",
+        frames[0]
+    );
+}
