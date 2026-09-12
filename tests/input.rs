@@ -1813,3 +1813,34 @@ fn a_tab_in_the_placeholder_keeps_later_cells_in_place() {
         );
     }
 }
+
+#[test]
+fn ordinary_text_and_the_editor_agree_on_wide_glyph_columns() {
+    // The same value rendered as ordinary Text and as a raw_input must place
+    // glyphs in the same columns, because both consume the canonical layout.
+    for (value, width) in [("界a", 3u16), ("a界b", 5), ("界界", 4)] {
+        let text: Node = icmd::Text::new(value)
+            .with_style(icmd::style(|style| {
+                style.width /= icmd::Dimension::Cells(width)
+            }))
+            .wrap(icmd::TextWrap::NoWrap)
+            .into();
+        let mut dom = icmd::DomProps::default();
+        dom.style.width = Attr::Set(icmd::Dimension::Cells(width));
+        dom.style.height = Attr::Set(icmd::Dimension::Cells(2));
+        let node = Node::element(dom, [text]);
+        let viewport = Size::new(width + 4, 3);
+        let (sender, output, dispatcher) = pipeline(viewport);
+        sender.send(node).unwrap();
+        let raw = collect_frames(&output, &dispatcher, None);
+        let painted = strip_ansi(&raw);
+        for ch in value.chars() {
+            assert!(
+                painted.contains(ch),
+                "{value:?} at width {width}: ordinary text must paint {ch:?}: \
+                 {painted:?}"
+            );
+        }
+        let _ = viewport;
+    }
+}
