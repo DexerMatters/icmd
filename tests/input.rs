@@ -1784,3 +1784,32 @@ fn a_grapheme_wider_than_the_viewport_never_breaks_the_frame() {
         );
     }
 }
+
+#[test]
+fn a_tab_in_the_placeholder_keeps_later_cells_in_place() {
+    // The placeholder is shaped by the same engine as a value, so a tab in it
+    // expands to its tab-stop width. The glyph after it must be painted at the
+    // column the layout gives it, exactly as in the value path.
+    // "a\tb": the tab runs from column 1 to the next stop at 4, so 'b' is at
+    // cell 4. "\tb": the tab starts at column 0 and also reaches 4.
+    for (placeholder, expected) in [("a\tb", "a   b"), ("\tb", "    b")] {
+        let node = raw_input
+            .props(RawInputProps {
+                mode: Attr::Set(RawInputMode::Multiline),
+                placeholder: Attr::Set(placeholder.into()),
+                ..RawInputProps::default()
+            })
+            .style(|style| style.width /= icmd::Dimension::Cells(6))
+            .node();
+        let viewport = Size::new(10, 4);
+        let (sender, output, dispatcher) = pipeline(viewport);
+        sender.send(node).unwrap();
+        let raw = collect_frames(&output, &dispatcher, None);
+        let painted = strip_ansi(&raw);
+        assert!(
+            painted.contains(expected),
+            "placeholder {placeholder:?}: the glyph after a tab must keep its \
+             expanded column (expected {expected:?}): {painted:?}"
+        );
+    }
+}
