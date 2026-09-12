@@ -1376,3 +1376,45 @@ fn a_caret_inside_a_dropped_separator_is_still_painted() {
         strip_ansi(&raw)
     );
 }
+
+#[test]
+fn tabs_and_wide_graphemes_keep_paint_and_caret_aligned() {
+    // Tabs expand to their cell width and CJK graphemes occupy two cells. Both
+    // must advance the painted column exactly as the layout's item table says,
+    // so clicking a cell lands on the grapheme the user sees there.
+    for (value, cell) in [("a\tb", 4u16), ("界a", 1), ("a界b", 2)] {
+        let values = Arc::new(Mutex::new(Vec::new()));
+        let node = raw_input
+            .props(RawInputProps {
+                default_value: Attr::Set(value.into()),
+                on_change: Attr::Set(EventListener::new({
+                    let values = values.clone();
+                    move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+                })),
+                ..RawInputProps::default()
+            })
+            .style(|style| style.width /= icmd::Dimension::Cells(8))
+            .node();
+        let viewport = Size::new(12, 3);
+        let (sender, output, dispatcher) = pipeline(viewport);
+        sender.send(node).unwrap();
+        interact(&output, &dispatcher, Some(click(0, cell)));
+        interact(
+            &output,
+            &dispatcher,
+            Some(key(KeyCode::Char('#'), KeyModifiers::empty())),
+        );
+        let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
+        assert!(
+            emitted.contains('#') && emitted.contains(value.chars().next().unwrap()),
+            "{value:?}: clicking cell {cell} must produce a usable caret: {emitted:?}"
+        );
+        // No grapheme may be lost by the paint/click round trip.
+        for ch in value.chars().filter(|ch| *ch != '\t') {
+            assert!(
+                emitted.contains(ch),
+                "{value:?}: {ch:?} must survive the edit: {emitted:?}"
+            );
+        }
+    }
+}
