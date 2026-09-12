@@ -1073,3 +1073,41 @@ fn collect_frames(
 fn has_reverse_cell(frame: &str) -> bool {
     frame.contains("\u{1b}[7m") || frame.contains(";7m") || frame.contains("\u{1b}[7;")
 }
+
+#[test]
+fn single_line_caret_reveal_fits_the_padded_viewport() {
+    // The input has a border and one padding cell per side, so its content is
+    // two cells narrower than its border box. Moving to the end must reveal the
+    // caret inside the *content* viewport, not scroll as if the padding were
+    // usable cells.
+    let node = icmd::input
+        .props(icmd::InputProps {
+            default_value: Attr::Set("abcdefghij".into()),
+            ..icmd::InputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(8))
+        .node();
+    let viewport = Size::new(12, 4);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    // Move to the end of the value and capture the frame that paints it.
+    let raw = collect_frames(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+    let painted = strip_ansi(&raw);
+    assert!(
+        !painted.is_empty(),
+        "reaching the end must repaint the scrolled viewport"
+    );
+    assert!(
+        !painted.contains("0123456789"),
+        "the viewport must have scrolled past the start: {painted:?}"
+    );
+    assert!(
+        painted.contains('j'),
+        "the caret must reveal the end of the value: {painted:?}"
+    );
+}
