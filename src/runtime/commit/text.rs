@@ -74,6 +74,9 @@ fn editor_measure(
         return (layout.max_row_width() as i32, layout.row_count() as i32);
     }
     let natural = surface_layout(surface, usize::MAX / 4, wrap);
+    if std::env::var("ES3").is_ok() {
+        eprintln!("measure ow={offered_width:?} oh={offered_height:?}");
+    }
     // The document height is whatever the value wraps to. A parent that grants
     // a shorter box clips and scrolls it (that is the scroll host's job); a
     // parent that leaves the height auto gets the whole document, so multiline
@@ -265,6 +268,9 @@ fn editor_raster(
     // An empty control paints its placeholder through the same canonical
     // engine as a value, so tab stops and wide graphemes agree.
     let showing_placeholder = surface.value.is_empty() && !surface.placeholder.is_empty();
+    if std::env::var("ES3").is_ok() {
+        eprintln!("raster rect={rect:?} visible={visible:?}");
+    }
     let layout = if showing_placeholder {
         layout_for(
             &surface.placeholder,

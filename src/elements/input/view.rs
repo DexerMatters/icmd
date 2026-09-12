@@ -545,9 +545,11 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         )
     };
 
-    // One host: caller DOM props, explicit focusability, and the scroll engine.
-    // The caller's observers are composed inside each internal listener, so the
-    // host's own event slots stay free for the `ui!` attributes below.
+    // The editor's single semantic host: caller DOM props and explicit
+    // focusability. The caller's observers are composed inside each internal
+    // listener, so the host's own event slots stay free for the `ui!`
+    // attributes below, and the scroll area nested inside it provides scrolling
+    // without introducing a second event or focus identity.
     let mut scroll_host = props.host_props(DomProps::default());
     scroll_host.focusable = !config.policy.disabled;
     if focus_active(&state_ref, &config)
@@ -557,9 +559,11 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
     }
     let scroll_axes = config.scroll_axes();
     let disabled = config.policy.disabled;
-    // The editable surface itself is the focus target, so it carries the
-    // composed listeners. It is also the scrolling element, so pointer
-    // coordinates stay in one content space.
+    // The editor host owns caller DOM props, focus (via `focusable`), and the
+    // composed listeners, and it is the node that `scroll_area` wraps. The
+    // scroll area supplies the scrolling mechanism and the content box the
+    // surface wraps to, so pointer coordinates and painted rows share one
+    // content space even though the scroll engine lives on the inner node.
     let scrollable = if disabled {
         ui! {
             <view style={|style| {

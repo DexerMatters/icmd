@@ -43,6 +43,16 @@
 //! viewport keeps its leading boundary visible rather than scrolling into a
 //! continuation cell.
 //!
+//! # Host structure
+//!
+//! `raw_input` renders one semantic host. That host carries the caller's
+//! `DomProps`, is the focus target, and holds the composed internal-plus-caller
+//! event listeners. A `scroll_area` is nested inside it to supply the scrolling
+//! mechanism: the runtime remains the authority for clipping, extents, wheel
+//! behavior, and pointer coordinates, and the surface wraps to the content box
+//! the scroll area grants. There is no second event or focus identity, and the
+//! editor never subtracts padding or borders by hand.
+//!
 //! # Extension and styling
 //!
 //! Extension means wrapping `raw_input` in an ordinary function component and
