@@ -746,23 +746,53 @@ impl DomProps {
 pub struct Props<T> {
     pub dom: DomProps,
     pub children: Vec<Node>,
-    pub user_defined: T,
+    // Private so the payload is reachable through one documented accessor path
+    // (`data`/`data_mut`), matching `extra`/`extra_mut`. The duplicate public
+    // field plus accessors were two ways to reach the same state.
+    data: T,
 }
 
 impl<T> Props<T> {
-    pub fn new(user_defined: T) -> Self {
+    pub fn new(data: T) -> Self {
         Self {
             dom: DomProps::default(),
             children: Vec::new(),
-            user_defined,
+            data,
         }
     }
 
+    // Assemble a full payload in one step. Kept because the payload field is
+    // private, so external code cannot build the struct literally.
+    pub fn with_parts(dom: DomProps, children: Vec<Node>, data: T) -> Self {
+        Self {
+            dom,
+            children,
+            data,
+        }
+    }
+
+    // Canonical payload access.
+    pub fn data(&self) -> &T {
+        &self.data
+    }
+
+    pub fn data_mut(&mut self) -> &mut T {
+        &mut self.data
+    }
+
+    pub fn into_data(self) -> T {
+        self.data
+    }
+
+    pub fn set_data(&mut self, data: T) {
+        self.data = data;
+    }
+
     pub fn extra(&self) -> &T {
-        &self.user_defined
+        self.data()
     }
     pub fn extra_mut(&mut self) -> &mut T {
-        &mut self.user_defined
+        self.data_mut()
     }
 
     pub fn host_props(&self, defaults: DomProps) -> DomProps {
@@ -783,45 +813,48 @@ impl<T> Props<T> {
         self
     }
 
-    pub fn with_extra<U>(self, user_defined: U) -> Props<U> {
-        self.map(|_| user_defined)
+    pub fn with_extra<U>(self, data: U) -> Props<U> {
+        self.map(|_| data)
     }
 
     pub fn map<U>(self, map: impl FnOnce(T) -> U) -> Props<U> {
         let Props {
             dom,
             children,
-            user_defined,
+            data,
         } = self;
         Props {
             dom,
             children,
-            user_defined: map(user_defined),
+            data: map(data),
         }
     }
 
     pub fn into_parts(self) -> (DomProps, Vec<Node>, T) {
-        (self.dom, self.children, self.user_defined)
+        (self.dom, self.children, self.data)
     }
 }
 
+// Transparent payload access is kept for macro and component ergonomics; it
+// delegates to the one canonical accessor, so there is still a single owner of
+// the payload state.
 impl<T> Deref for Props<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.user_defined
+        self.data()
     }
 }
 
 impl<T> DerefMut for Props<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.user_defined
+        self.data_mut()
     }
 }
 
 impl<T> From<T> for Props<T> {
-    fn from(user_defined: T) -> Self {
-        Self::new(user_defined)
+    fn from(data: T) -> Self {
+        Self::new(data)
     }
 }
 

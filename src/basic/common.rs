@@ -20,8 +20,10 @@ use super::{
 pub struct Key(Arc<str>);
 
 impl Key {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(Arc::from(value.into()))
+    // Canonical construction avoids the intermediate `String` that
+    // `impl Into<String>` forced for `&str` and `Arc<str>` inputs.
+    pub fn new(value: impl Into<Key>) -> Self {
+        value.into()
     }
 
     pub fn as_str(&self) -> &str {
@@ -38,6 +40,18 @@ impl fmt::Debug for Key {
 impl From<&str> for Key {
     fn from(value: &str) -> Self {
         Self(Arc::from(value))
+    }
+}
+
+impl From<Arc<str>> for Key {
+    fn from(value: Arc<str>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&String> for Key {
+    fn from(value: &String) -> Self {
+        Self(Arc::from(value.as_str()))
     }
 }
 
@@ -253,7 +267,7 @@ pub trait Component<P>: 'static {
     {
         let extra = extra.into();
         Forward::new(self, move |props: &mut Props<P>| {
-            props.user_defined = extra.clone()
+            props.set_data(extra.clone())
         })
     }
 
@@ -265,9 +279,7 @@ pub trait Component<P>: 'static {
         Self: Sized,
         P: Send + Sync + 'static,
     {
-        Forward::new(self, move |props: &mut Props<P>| {
-            apply(&mut props.user_defined)
-        })
+        Forward::new(self, move |props: &mut Props<P>| apply(props.data_mut()))
     }
 
     fn style(self, apply: impl FnOnce(&mut Style)) -> Forward<Self, impl PropsTransform<P>>

@@ -500,7 +500,7 @@ fn themed_leaves_share_one_theme_instance() {
     fn probe(cx: &mut icmd::ComponentContext, props: &icmd::Props<ProbeProps>) -> Node {
         let theme = cx.use_theme();
         props
-            .user_defined
+            .data()
             .seen
             .lock()
             .unwrap()

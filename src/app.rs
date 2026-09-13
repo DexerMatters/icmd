@@ -184,7 +184,7 @@ impl Drop for TerminalSession {
 }
 
 fn root(_cx: &mut ComponentContext, props: &Props<Node>) -> Node {
-    props.user_defined.clone()
+    props.data().clone()
 }
 
 // Upper bound on how long the loop blocks waiting for a frame. Input latency

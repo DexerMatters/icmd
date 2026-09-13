@@ -172,7 +172,7 @@ macro_rules! ui {
     (@set_attr $props:ident $key:ident on_paste_event { $value:expr }) => { $props.dom.events.paste_event /= $value; };
 
     (@set_attr $props:ident $key:ident $name:ident { $value:expr }) => {
-        $props.user_defined.$name /= $value;
+        $props.data_mut().$name /= $value;
     };
 
     ($($tokens:tt)*) => {

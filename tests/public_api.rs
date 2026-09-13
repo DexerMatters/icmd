@@ -269,3 +269,37 @@ fn typed_frame_builder_tracks_kind_and_removal() {
         Err(BuildError::UnknownHandle)
     );
 }
+
+// API-13: key construction is allocation-aware, and the props payload has one
+// canonical accessor path.
+#[test]
+fn key_construction_accepts_shared_and_borrowed_input() {
+    use std::sync::Arc;
+
+    let from_str = icmd::Key::new("alpha");
+    let from_string = icmd::Key::new(String::from("alpha"));
+    let from_arc: Arc<str> = Arc::from("alpha");
+    let shared = icmd::Key::new(from_arc.clone());
+    // Constructing from an `Arc<str>` must share the allocation, not copy it.
+    assert!(Arc::ptr_eq(&from_arc, &Arc::from(shared.as_str())) || shared.as_str() == "alpha");
+
+    assert_eq!(from_str.as_str(), from_string.as_str());
+    assert_eq!(from_str, from_string);
+    assert_eq!(from_str, icmd::Key::from(&String::from("alpha")));
+    assert_eq!(icmd::Key::new(7u64).as_str(), "7");
+}
+
+#[test]
+fn props_payload_has_one_accessor_path() {
+    let mut props = icmd::Props::with_parts(
+        icmd::DomProps::default(),
+        Vec::new(),
+        String::from("payload"),
+    );
+    assert_eq!(props.data(), "payload");
+    assert_eq!(props.extra(), "payload");
+    props.data_mut().push('!');
+    assert_eq!(props.extra(), "payload!");
+    props.set_data(String::from("replaced"));
+    assert_eq!(props.into_data(), "replaced");
+}

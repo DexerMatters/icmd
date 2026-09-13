@@ -43,7 +43,7 @@ pub fn scroll_area(cx: &mut ComponentContext, props: &Props<ScrollAreaProps>) ->
         enable_wheel: props.enable_wheel | true,
         enable_keyboard: props.enable_keyboard | true,
         wheel_step: (props.wheel_step | 1).max(1),
-        scrollbar: props.user_defined.scrollbar_style.clone() | theme.scrollbar.clone(),
+        scrollbar: props.data().scrollbar_style.clone() | theme.scrollbar.clone(),
     }));
 
     ui! { <view dom={dom}>{props.children_node()}</view> }

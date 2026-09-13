@@ -70,7 +70,7 @@ fn accepting_controlled_input(
     props: &Props<ControlledInputTestProps>,
 ) -> Node {
     let (value, set_value) = cx.use_state(|| "a".to_string());
-    let values = props.user_defined.values.clone();
+    let values = props.data().values.clone();
     input
         .props(InputProps {
             value: Attr::Set(value),
@@ -1401,14 +1401,7 @@ fn textarea_wraps_to_the_width_its_parent_grants() {
     dom.style.layout /= icmd::Layout::Vertical;
     dom.style.width /= icmd::Dimension::Cells(14);
     dom.style.padding /= icmd::Edges::symmetric(0, 1);
-    let node = icmd::Component::apply(
-        view,
-        Props {
-            dom,
-            children: vec![editor],
-            user_defined: (),
-        },
-    );
+    let node = icmd::Component::apply(view, Props::with_parts(dom, vec![editor], ()));
     // One row taller than the wrapped document, so the whole box is on screen
     // and any clipped character is horizontal, not vertical.
     let viewport = Size::new(14, 10);
@@ -1584,14 +1577,7 @@ fn textarea_rewraps_when_the_viewport_resizes() {
     dom.style.layout /= icmd::Layout::Vertical;
     dom.style.width /= icmd::Dimension::Max;
     dom.style.padding /= icmd::Edges::symmetric(0, 1);
-    let node = icmd::Component::apply(
-        view,
-        Props {
-            dom,
-            children: vec![editor],
-            user_defined: (),
-        },
-    );
+    let node = icmd::Component::apply(view, Props::with_parts(dom, vec![editor], ()));
     let viewport = Size::new(40, 12);
     let (commit, setter, _) = Commit::new_with_events(viewport);
     let (sender, output) = Runtime::new(Lower::default())
@@ -1650,14 +1636,7 @@ fn narrow_textarea_click_still_maps_to_the_cell() {
     dom.style.layout /= icmd::Layout::Vertical;
     dom.style.width /= icmd::Dimension::Cells(14);
     dom.style.padding /= icmd::Edges::symmetric(0, 1);
-    let node = icmd::Component::apply(
-        view,
-        Props {
-            dom,
-            children: vec![editor],
-            user_defined: (),
-        },
-    );
+    let node = icmd::Component::apply(view, Props::with_parts(dom, vec![editor], ()));
     let viewport = Size::new(14, 10);
     let (sender, output, dispatcher) = pipeline(viewport);
     sender.send(node).unwrap();

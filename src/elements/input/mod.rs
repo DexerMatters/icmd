@@ -145,11 +145,9 @@ fn editor_host(
         on_submit,
         on_clipboard: host.on_clipboard,
     };
-    raw_input.apply(Props {
-        dom,
-        children: Vec::new(),
-        user_defined: raw,
-    })
+    let mut props = Props::new(raw);
+    props.dom = dom;
+    raw_input.apply(props)
 }
 
 pub fn input(cx: &mut ComponentContext, props: &Props<InputProps>) -> Node {
