@@ -269,7 +269,7 @@ impl Lower {
         match roots.len() {
             1 => roots.pop().expect("root DOM node disappeared"),
             _ => DomNode::Element {
-                id: DomId(0),
+                id: DomId::root(),
                 props: DomProps::default(),
                 children: roots,
             },
@@ -672,7 +672,7 @@ impl Lower {
     }
 
     fn allocate_dom_id(&mut self) -> DomId {
-        let id = DomId(self.next_dom_id);
+        let id = DomId::new(self.next_dom_id);
         self.next_dom_id = self
             .next_dom_id
             .checked_add(1)

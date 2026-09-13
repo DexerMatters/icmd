@@ -206,8 +206,6 @@ fn deep_key_routing_scales_with_depth_not_region_count() {
 
     // Focus the deep leaf, then route a key to it.
 
-    dispatcher.focus(icmd::DomId(0));
-
     let _ = dispatcher.take_id_probe_count();
     dispatcher.dispatch(Event::Key(KeyEvent::new_with_kind(
         KeyCode::Char('x'),
@@ -255,4 +253,85 @@ fn application_global_key_listener_fires_without_focus() {
     );
     assert_eq!(dispatcher.dispatch(Event::Key(key)).delivered, 1);
     assert_eq!(app_hits.load(Ordering::SeqCst), 1);
+}
+
+// API-11: element IDs are opaque. A fabricated handle cannot be constructed by
+// callers, and a checked focus request rejects unknown or non-focusable targets.
+#[test]
+fn programmatic_focus_is_checked_and_rejects_unknown_targets() {
+    let viewport = Size::new(20, 5);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    input.send(root.apply(())).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // The runtime root is not focusable, so it cannot be focused.
+    // Any handle obtained from the framework is checked for existence and
+    // focusability rather than trusted.
+    let outcome = dispatcher.try_focus(icmd::DomId::ROOT);
+    assert!(
+        matches!(
+            outcome,
+            Err(icmd::FocusError::UnknownTarget(_) | icmd::FocusError::NotFocusable(_))
+        ),
+        "an unfocusable root must be rejected: {outcome:?}"
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+}
+
+#[test]
+fn focus_transitions_report_a_structured_outcome() {
+    let viewport = Size::new(20, 5);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    let gained = Arc::new(AtomicUsize::new(0));
+    let gained_for_listener = gained.clone();
+    let node = icmd::view
+        .events(move |events| {
+            events.focus_event /= EventListener::new(move |event: icmd::FocusEvent| {
+                if event == icmd::FocusEvent::Gained {
+                    gained_for_listener.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        })
+        .apply(
+            icmd::Props::new(()).with_dom(
+                icmd::DomProps::default()
+                    .with_focusable(true)
+                    .with_style(icmd::style(|style| {
+                        style.width /= icmd::Dimension::Max;
+                        style.height /= icmd::Dimension::Max;
+                    })),
+            ),
+        );
+    input.send(node).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // Focus by pointer, then read the structured outcome of the transition.
+    let outcome = dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(outcome.delivered > 0);
+    assert_eq!(gained.load(Ordering::SeqCst), 1);
+
+    // Re-focusing the same target is reported, not silently ignored.
+    let id = dispatcher.focused().expect("a focused region");
+    assert!(matches!(
+        dispatcher.try_focus(id),
+        Err(icmd::FocusError::AlreadyFocused(_))
+    ));
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
 }

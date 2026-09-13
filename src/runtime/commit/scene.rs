@@ -85,7 +85,7 @@ impl Commit {
         }
 
         let mut next_keys: Vec<_> = next.keys().copied().collect();
-        next_keys.sort_by_key(|key| (next[key].order, key.node.0, key.role));
+        next_keys.sort_by_key(|key| (next[key].order, key.node.get(), key.role));
         for key in &next_keys {
             let key = *key;
             let value = &next[&key];

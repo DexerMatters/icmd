@@ -18,6 +18,33 @@ use super::commit::layout::ScrollbarMetrics;
 // The observable result of one dispatch. It replaces a bare delivery count,
 // whose meaning varied by route, with explicit propagation, default-action, and
 // redraw signals a caller can act on.
+// The result of an accepted focus request: how many listeners observed the
+// transition and which region now owns focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusOutcome {
+    pub delivered: usize,
+    pub focused: DomId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusError {
+    UnknownTarget(DomId),
+    NotFocusable(DomId),
+    AlreadyFocused(DomId),
+}
+
+impl std::fmt::Display for FocusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownTarget(id) => write!(f, "no region with id {id}"),
+            Self::NotFocusable(id) => write!(f, "region {id} is not focusable"),
+            Self::AlreadyFocused(id) => write!(f, "region {id} already owns focus"),
+        }
+    }
+}
+
+impl std::error::Error for FocusError {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DispatchOutcome {
     pub delivered: usize,
@@ -389,6 +416,32 @@ impl EventDispatcher {
 
     pub fn focus(&self, id: DomId) -> bool {
         self.change_focus(id).0
+    }
+
+    // Checked programmatic focus. Unlike `focus`, this enforces that the target
+    // exists in the current generation and is actually focusable, so a
+    // fabricated or stale handle cannot steal focus.
+    pub fn try_focus(&self, id: DomId) -> Result<FocusOutcome, FocusError> {
+        {
+            let state = self.state.read().expect("event registry poisoned");
+            let Some(region) = state.region(id) else {
+                return Err(FocusError::UnknownTarget(id));
+            };
+            if !region.focusable {
+                return Err(FocusError::NotFocusable(id));
+            }
+            if state.focused == Some(id) {
+                return Err(FocusError::AlreadyFocused(id));
+            }
+        }
+        let (changed, delivered) = self.change_focus(id);
+        if !changed {
+            return Err(FocusError::UnknownTarget(id));
+        }
+        Ok(FocusOutcome {
+            delivered,
+            focused: id,
+        })
     }
 
     // Request focus for a target that may not be published yet. The request is

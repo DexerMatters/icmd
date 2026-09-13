@@ -240,7 +240,7 @@ impl Commit {
                     }),
                 });
 
-                if *id != DomId(0)
+                if *id != DomId::root()
                     && let Some(hit_rect) = clip.intersection(rect)
                     && hit_rect.width > 0
                     && hit_rect.height > 0

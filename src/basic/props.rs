@@ -773,6 +773,16 @@ impl<T> Props<T> {
         self.children.clone().into_iter().collect()
     }
 
+    pub fn with_dom(mut self, dom: DomProps) -> Self {
+        self.dom = dom;
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = crate::Node>) -> Self {
+        self.children.extend(children);
+        self
+    }
+
     pub fn with_extra<U>(self, user_defined: U) -> Props<U> {
         self.map(|_| user_defined)
     }
