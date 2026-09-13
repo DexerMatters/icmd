@@ -279,6 +279,15 @@ impl Cell {
             width: 1,
         }
     }
+
+    // Canonical blank test without constructing a cell.
+    pub(crate) fn is_blank(&self) -> bool {
+        self.foreground == Color::Reset
+            && self.background == Color::Reset
+            && self.attributes == Attributes::default()
+            && self.width == 1
+            && &*self.symbol == " "
+    }
     pub fn width(&self) -> usize {
         self.width as usize
     }
@@ -318,7 +327,9 @@ pub(crate) enum CellSlot {
 
 impl CellSlot {
     pub(crate) fn is_default(&self) -> bool {
-        matches!(self, Self::Lead(cell) if *cell == Cell::blank())
+        // Field test rather than constructing a blank cell and comparing: the
+        // previous form built (and symbol-cloned) a `Cell` on every call.
+        matches!(self, Self::Lead(cell) if cell.is_blank())
     }
 
     pub(crate) fn cell(&self) -> &Cell {
@@ -469,10 +480,13 @@ impl Image {
                 return Err(ImageError::UnequalRowWidths);
             }
             for cell in row {
-                let cell_width = cell.width();
-                cells.push(CellSlot::Lead(cell.clone()));
-                if cell_width == 2 {
-                    cells.push(CellSlot::Continuation(cell.as_blank()));
+                // The row is owned, so each cell is moved into the surface
+                // instead of cloned. The wide-cell continuation is derived
+                // before the move so no clone is needed.
+                let continuation = (cell.width() == 2).then(|| cell.as_blank());
+                cells.push(CellSlot::Lead(cell));
+                if let Some(blank) = continuation {
+                    cells.push(CellSlot::Continuation(blank));
                 }
             }
         }
