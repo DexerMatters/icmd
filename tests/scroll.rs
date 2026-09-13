@@ -11,9 +11,9 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use icmd::{
-    Attr, Commit, Component, ComponentContext, Dimension, Layout, Lower, Node, Props, Renderer,
-    Runtime, ScrollAreaProps, ScrollAxes, ScrollEvent, ScrollOffset, ScrollbarVisibility, Size,
-    StateSetter, scroll_area, text,
+    Attr, Commit, Component, ComponentContext, Dimension, Layout, Lower, Node, Overflow, Props,
+    Renderer, Runtime, ScrollAreaProps, ScrollAxes, ScrollEvent, ScrollOffset, ScrollbarVisibility,
+    Size, StateSetter, scroll_area, text,
 };
 
 fn render_pipeline(
@@ -429,4 +429,41 @@ fn controlled_offset_round_trips_through_component_state() {
         .unwrap()
         .unwrap();
     assert!(updated.contains('1'));
+}
+
+// DUP-05: caller style is merged exactly once, and the scroll-area's required
+// clipping invariant is applied after the merge so it always wins.
+#[test]
+fn caller_style_is_merged_once_and_clipping_invariant_wins() {
+    // The caller asks for visible overflow and a 6-cell box, then supplies a
+    // 12-cell child. The single merge must keep the caller's size while the
+    // scroll-area's required clip still hides the overflowing tail.
+    let node = scroll_area
+        .props(ScrollAreaProps {
+            axes: Attr::Set(ScrollAxes::Both),
+            ..ScrollAreaProps::default()
+        })
+        .style(|style| {
+            style.overflow_x /= Overflow::Visible;
+            style.overflow_y /= Overflow::Visible;
+            style.width /= Dimension::Cells(6);
+            style.height /= Dimension::Cells(2);
+        })
+        .child(text("abcdefghijkl"));
+    let (input, output, _) = render_pipeline(Size::new(16, 3));
+    input.send(node).unwrap();
+    let frame = output
+        .recv_timeout(Duration::from_secs(1))
+        .expect("frame")
+        .expect("render");
+
+    // Visible prefix is painted; the overflowing tail is clipped away.
+    assert!(
+        frame.contains("abcdef"),
+        "the visible prefix must paint, frame was {frame:?}"
+    );
+    assert!(
+        !frame.contains("ghijkl"),
+        "overflow must stay clipped despite the caller asking for Visible, frame was {frame:?}"
+    );
 }

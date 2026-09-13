@@ -23,20 +23,12 @@ pub fn scroll_area(cx: &mut ComponentContext, props: &Props<ScrollAreaProps>) ->
     let horizontal = matches!(axes, ScrollAxes::Horizontal | ScrollAxes::Both);
     let vertical = matches!(axes, ScrollAxes::Vertical | ScrollAxes::Both);
 
-    let mut style = props.dom.style.clone();
-    if horizontal {
-        style.overflow_x /= Overflow::Clip;
-    }
-    if vertical {
-        style.overflow_y /= Overflow::Clip;
-    }
-
-    let mut dom = props.host_props(DomProps {
-        style,
-        ..DomProps::default()
-    });
-    // Scrolling owns clipping on its enabled axes.  Preserve every other
-    // caller style while preventing a later override from leaking content.
+    // Caller style is applied exactly once, by the canonical host-prop merge.
+    // The previous code cloned it into the defaults and then merged it again,
+    // which both duplicated work and made precedence depend on merge order.
+    let mut dom = props.host_props(DomProps::default());
+    // Scrolling owns clipping on its enabled axes. This required invariant is
+    // applied after the caller merge so it cannot be overridden away.
     if horizontal {
         dom.style.overflow_x = Attr::Set(Overflow::Clip);
     }
