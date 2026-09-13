@@ -15,6 +15,26 @@ use crate::{
 use super::commit::ViewportSetter;
 use super::commit::layout::ScrollbarMetrics;
 
+// The observable result of one dispatch. It replaces a bare delivery count,
+// whose meaning varied by route, with explicit propagation, default-action, and
+// redraw signals a caller can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DispatchOutcome {
+    pub delivered: usize,
+    pub propagation_stopped: bool,
+    pub default_prevented: bool,
+    pub redraw_requested: bool,
+}
+
+impl DispatchOutcome {
+    pub(crate) fn from_delivered(delivered: usize) -> Self {
+        Self {
+            delivered,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EventRect {
     pub(crate) line: i32,
@@ -340,16 +360,24 @@ impl EventDispatcher {
         }
     }
 
-    pub fn dispatch(&self, event: Event) -> usize {
+    pub fn dispatch(&self, event: Event) -> DispatchOutcome {
         match event {
-            Event::Mouse(event) => self.dispatch_mouse(event),
+            Event::Mouse(event) => DispatchOutcome::from_delivered(self.dispatch_mouse(event)),
             Event::Key(event) => self.dispatch_key(KeyboardEvent { key: event }),
-            Event::Paste(value) => self.dispatch_paste(PasteEvent { text: value }),
-            Event::Resize(width, height) => self.dispatch_resize(ResizeEvent {
-                size: Size::new(width, height),
-            }),
-            Event::FocusGained => self.dispatch_terminal_focus(FocusEvent::Gained),
-            Event::FocusLost => self.dispatch_terminal_focus(FocusEvent::Lost),
+            Event::Paste(value) => {
+                DispatchOutcome::from_delivered(self.dispatch_paste(PasteEvent { text: value }))
+            }
+            Event::Resize(width, height) => {
+                DispatchOutcome::from_delivered(self.dispatch_resize(ResizeEvent {
+                    size: Size::new(width, height),
+                }))
+            }
+            Event::FocusGained => {
+                DispatchOutcome::from_delivered(self.dispatch_terminal_focus(FocusEvent::Gained))
+            }
+            Event::FocusLost => {
+                DispatchOutcome::from_delivered(self.dispatch_terminal_focus(FocusEvent::Lost))
+            }
         }
     }
 
@@ -866,7 +894,7 @@ impl EventDispatcher {
         count
     }
 
-    fn dispatch_key(&self, event: KeyboardEvent) -> usize {
+    fn dispatch_key(&self, event: KeyboardEvent) -> DispatchOutcome {
         let mut scroll_changed = false;
         let mut scroll_deliveries = Vec::new();
         // Targeted delivery requires an actual focused target. Falling back to
@@ -969,7 +997,12 @@ impl EventDispatcher {
         if scroll_changed {
             self.viewport.request_redraw();
         }
-        count
+        DispatchOutcome {
+            delivered: count,
+            propagation_stopped: consumed,
+            default_prevented: false,
+            redraw_requested: scroll_changed,
+        }
     }
 
     fn scroll_from_target(

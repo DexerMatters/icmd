@@ -40,10 +40,10 @@ pub use raster::{
     ImageUpdatePolicy, RasterImage, RasterImageError, RasterPlacement,
 };
 pub use runtime::{
-    ChannelRenderer, Commit, CommitConfig, ConfigError, EventDispatcher, FrameError, ImageMetrics,
-    ImageResource, LimitError, Lower, LowerError, PipelineComponent, Renderer, RendererConfig,
-    RendererConfigError, ResourceLimits, Runtime, RuntimeError, RuntimeHandle, ShutdownPolicy,
-    Stage, SurfaceKind, ViewportSetter, live_worker_count,
+    ChannelRenderer, Commit, CommitConfig, ConfigError, DispatchOutcome, EventDispatcher,
+    FrameError, ImageMetrics, ImageResource, LimitError, Lower, LowerError, PipelineComponent,
+    Renderer, RendererConfig, RendererConfigError, ResourceLimits, Runtime, RuntimeError,
+    RuntimeHandle, ShutdownPolicy, Stage, SurfaceKind, ViewportSetter, live_worker_count,
 };
 
 pub mod prelude {

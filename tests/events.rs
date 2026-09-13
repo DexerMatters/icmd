@@ -58,7 +58,7 @@ fn mouse_listener_is_hit_tested_and_keyboard_focus_is_routed() {
         row: 1,
         modifiers: KeyModifiers::empty(),
     };
-    assert_eq!(dispatcher.dispatch(Event::Mouse(mouse)), 1);
+    assert_eq!(dispatcher.dispatch(Event::Mouse(mouse)).delivered, 1);
     assert_eq!(mouse_hits.load(Ordering::SeqCst), 1);
 
     // Pointer capture keeps the pressed element as the target even after the
@@ -69,7 +69,7 @@ fn mouse_listener_is_hit_tested_and_keyboard_focus_is_routed() {
         row: 10,
         modifiers: KeyModifiers::empty(),
     };
-    assert_eq!(dispatcher.dispatch(Event::Mouse(outside_up)), 1);
+    assert_eq!(dispatcher.dispatch(Event::Mouse(outside_up)).delivered, 1);
     assert_eq!(mouse_up_hits.load(Ordering::SeqCst), 1);
 
     let key = KeyEvent::new_with_kind(
@@ -80,10 +80,10 @@ fn mouse_listener_is_hit_tested_and_keyboard_focus_is_routed() {
     // SAF-04: targeted keyboard delivery requires an actual focused DOM target.
     // The press above focused only a node with pointer handlers, and the root is
     // not focusable, so nothing owns focus and no targeted listener runs.
-    assert_eq!(dispatcher.dispatch(Event::Key(key)), 0);
+    assert_eq!(dispatcher.dispatch(Event::Key(key)).delivered, 0);
     assert_eq!(key_hits.load(Ordering::SeqCst), 0);
 
-    assert_eq!(dispatcher.dispatch(Event::Resize(30, 6)), 0);
+    assert_eq!(dispatcher.dispatch(Event::Resize(30, 6)).delivered, 0);
     assert_eq!(viewport.viewport(), Size::new(30, 6));
 }
 
@@ -200,6 +200,6 @@ fn application_global_key_listener_fires_without_focus() {
         KeyModifiers::empty(),
         KeyEventKind::Press,
     );
-    assert_eq!(dispatcher.dispatch(Event::Key(key)), 1);
+    assert_eq!(dispatcher.dispatch(Event::Key(key)).delivered, 1);
     assert_eq!(app_hits.load(Ordering::SeqCst), 1);
 }
