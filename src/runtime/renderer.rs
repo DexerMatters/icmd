@@ -857,12 +857,12 @@ impl Renderer {
             }
         }
 
-        let pinned_sources: HashSet<_> = self
+        let pinned_sources: HashSet<crate::raster::ImageSourceKey> = self
             .images
             .values()
             .filter_map(|node| match &node.surface {
                 Surface::Raster(raster) if self.source_should_load(node, raster) => {
-                    Some(raster.source.clone())
+                    Some(raster.source.cache_key())
                 }
                 _ => None,
             })
@@ -871,7 +871,7 @@ impl Renderer {
             let Some(source) = self.image_manager.oldest_inactive_source(&pinned_sources) else {
                 break;
             };
-            self.image_manager.remove_cached(&source);
+            self.image_manager.remove_cached_key(&source);
         }
     }
 

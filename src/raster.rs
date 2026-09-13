@@ -2,7 +2,7 @@ use std::{
     error::Error,
     fmt, fs,
     hash::{Hash, Hasher},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -15,14 +15,44 @@ use crate::{Cell, Image, Size};
 
 static NEXT_RASTER_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Errors carry their originating source, so they are compared by shape rather
+// than by `PartialEq`: two distinct I/O failures are not the same failure.
+#[derive(Debug, Clone)]
 pub enum RasterImageError {
     Empty,
-    InvalidLength { expected: usize, actual: usize },
-    DimensionsTooLarge { width: u32, height: u32 },
-    Decode(String),
-    Io(String),
+    InvalidLength {
+        expected: usize,
+        actual: usize,
+    },
+    DimensionsTooLarge {
+        width: u32,
+        height: u32,
+    },
+    // Sources are preserved rather than flattened into strings so callers can
+    // inspect the underlying I/O or decode failure.
+    Decode {
+        source: Arc<::image::ImageError>,
+    },
+    Io {
+        path: PathBuf,
+        source: Arc<std::io::Error>,
+    },
     ChafaUnavailable,
+}
+
+impl RasterImageError {
+    fn decode(error: ::image::ImageError) -> Self {
+        Self::Decode {
+            source: Arc::new(error),
+        }
+    }
+
+    fn io(path: &Path, error: std::io::Error) -> Self {
+        Self::Io {
+            path: path.to_path_buf(),
+            source: Arc::new(error),
+        }
+    }
 }
 
 impl fmt::Display for RasterImageError {
@@ -36,14 +66,27 @@ impl fmt::Display for RasterImageError {
             Self::DimensionsTooLarge { width, height } => {
                 write!(f, "raster image {width}x{height} is too large")
             }
-            Self::Decode(error) => write!(f, "could not decode image: {error}"),
-            Self::Io(error) => write!(f, "could not read image: {error}"),
+            Self::Decode { source } => write!(f, "could not decode image: {source}"),
+            Self::Io { path, source } => {
+                write!(f, "could not read image {}: {source}", path.display())
+            }
             Self::ChafaUnavailable => write!(f, "Chafa could not create an image canvas"),
         }
     }
 }
 
-impl Error for RasterImageError {}
+impl Error for RasterImageError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Decode { source } => Some(source.as_ref()),
+            Self::Io { source, .. } => Some(source.as_ref()),
+            Self::Empty
+            | Self::InvalidLength { .. }
+            | Self::DimensionsTooLarge { .. }
+            | Self::ChafaUnavailable => None,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct RasterImage {
@@ -107,13 +150,18 @@ impl RasterImage {
 
     pub fn decode(bytes: impl AsRef<[u8]>) -> Result<Self, RasterImageError> {
         let decoded = ::image::load_from_memory(bytes.as_ref())
-            .map_err(|error| RasterImageError::Decode(error.to_string()))?
+            .map_err(RasterImageError::decode)?
             .to_rgba8();
         Self::from_rgba8(decoded.width(), decoded.height(), decoded.into_raw())
     }
 
+    // Opens exactly the path the caller supplied. No lexical normalization is
+    // applied: on a filesystem with symlinks, `link/../target` resolves after
+    // the link is traversed, so folding `..` textually can select a different
+    // file than the kernel would. The original path is preserved in errors.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RasterImageError> {
-        let bytes = fs::read(path).map_err(|error| RasterImageError::Io(error.to_string()))?;
+        let path = path.as_ref();
+        let bytes = fs::read(path).map_err(|error| RasterImageError::io(path, error))?;
         Self::decode(bytes)
     }
 
@@ -137,13 +185,42 @@ pub enum ImageSource {
     File(Arc<PathBuf>),
 }
 
+// Cache identity, derived separately from the caller-visible source so that two
+// spellings of the same opened file share one entry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ImageSourceKey {
+    Loaded(u64),
+    File(PathBuf),
+}
+
+impl From<&ImageSource> for ImageSourceKey {
+    fn from(source: &ImageSource) -> Self {
+        source.cache_key()
+    }
+}
+
 impl ImageSource {
     pub fn loaded(image: RasterImage) -> Self {
         Self::Loaded(image)
     }
 
+    // Stores the caller's path verbatim so loading resolves exactly what the
+    // caller asked for. Cache identity is decided later, from the handle that
+    // was actually opened, by `key`.
     pub fn file(path: impl AsRef<Path>) -> Self {
-        Self::File(Arc::new(normalize_path(path.as_ref().to_path_buf())))
+        Self::File(Arc::new(path.as_ref().to_path_buf()))
+    }
+
+    // Identity used for caching. Canonicalization is best-effort: a sandboxed or
+    // since-deleted path can still be a perfectly valid handle, so failure falls
+    // back to the caller-visible path instead of rejecting the source.
+    pub(crate) fn cache_key(&self) -> ImageSourceKey {
+        match self {
+            Self::Loaded(image) => ImageSourceKey::Loaded(image.id()),
+            Self::File(path) => ImageSourceKey::File(
+                fs::canonicalize(path.as_path()).unwrap_or_else(|_| path.as_ref().to_path_buf()),
+            ),
+        }
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -195,41 +272,6 @@ impl From<&str> for ImageSource {
 impl From<&Path> for ImageSource {
     fn from(value: &Path) -> Self {
         Self::file(value)
-    }
-}
-
-fn normalize_path(path: PathBuf) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    let mut rooted = false;
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir if rooted => {
-                normalized.pop();
-            }
-            Component::ParentDir => {
-                let can_pop = normalized
-                    .file_name()
-                    .is_some_and(|name| name != std::ffi::OsStr::new(".."));
-                if can_pop {
-                    normalized.pop();
-                } else {
-                    normalized.push("..");
-                }
-            }
-            Component::Prefix(_) | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-            Component::RootDir => {
-                rooted = true;
-                normalized.push(component.as_os_str());
-            }
-        }
-    }
-    if normalized.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        normalized
     }
 }
 

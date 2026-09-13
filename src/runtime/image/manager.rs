@@ -5,6 +5,7 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender};
 
+use crate::raster::ImageSourceKey;
 use crate::{Cell, Image, ImageSource, RasterImage, RasterImageError, RasterPlacement};
 
 pub(crate) type LoadResult = (ImageSource, Result<RasterImage, RasterImageError>);
@@ -94,11 +95,14 @@ pub(crate) enum SourceRequest {
 #[derive(Debug)]
 pub(crate) struct ImageManager {
     loader: ImageLoader,
-    source_cache: HashMap<ImageSource, SourceCacheEntry>,
+    // Keyed by cache identity, so two spellings of the same opened file share
+    // one load and one entry.
+    source_cache: HashMap<ImageSourceKey, SourceCacheEntry>,
     source_cache_bytes: usize,
-    loading: HashSet<ImageSource>,
+    loading: HashSet<ImageSourceKey>,
     // Deduplicated queue of sources that could not be handed to a worker yet.
-    pending: VecDeque<ImageSource>,
+    // The source travels with its key so a retry can still load it.
+    pending: VecDeque<(ImageSourceKey, ImageSource)>,
     pending_loads: VecDeque<LoadResult>,
     cache_tick: u64,
 }
@@ -147,8 +151,9 @@ impl ImageManager {
         match source {
             ImageSource::Loaded(image) => Some(image.clone()),
             ImageSource::File(_) => {
+                let key = source.cache_key();
                 self.source_cache
-                    .get(source)
+                    .get(&key)
                     .and_then(|entry| match &entry.state {
                         SourceState::Ready(image) => Some(image.clone()),
                         SourceState::Loading | SourceState::Failed => None,
@@ -164,11 +169,8 @@ impl ImageManager {
         if raster.source.loaded_image().is_some() {
             return None;
         }
-        let symbol = match self
-            .source_cache
-            .get(&raster.source)
-            .map(|entry| &entry.state)
-        {
+        let key = raster.source.cache_key();
+        let symbol = match self.source_cache.get(&key).map(|entry| &entry.state) {
             Some(SourceState::Ready(_)) => return None,
             Some(SourceState::Failed) => "×",
             Some(SourceState::Loading) | None => "…",
@@ -177,22 +179,23 @@ impl ImageManager {
     }
 
     pub(crate) fn request(&mut self, source: &ImageSource) -> SourceRequest {
-        if source.loaded_image().is_some() || self.source_cache.contains_key(source) {
-            if let Some(entry) = self.source_cache.get_mut(source) {
+        let key = source.cache_key();
+        if source.loaded_image().is_some() || self.source_cache.contains_key(&key) {
+            if let Some(entry) = self.source_cache.get_mut(&key) {
                 self.cache_tick = self.cache_tick.saturating_add(1);
                 entry.used = self.cache_tick;
             }
             return SourceRequest::AlreadyAvailable;
         }
-        if !self.loading.insert(source.clone()) {
+        if !self.loading.insert(key.clone()) {
             // Already in flight or waiting for a worker: still not an error.
             return SourceRequest::AlreadyAvailable;
         }
         self.cache_tick = self.cache_tick.saturating_add(1);
-        self.pending.push_back(source.clone());
+        self.pending.push_back((key.clone(), source.clone()));
         match self.pump() {
             ScheduleResult::Closed => SourceRequest::Closed,
-            _ if self.pending.iter().any(|pending| pending == source) => {
+            _ if self.pending.iter().any(|(pending, _)| pending == &key) => {
                 SourceRequest::Backpressured
             }
             _ => SourceRequest::Queued,
@@ -201,13 +204,13 @@ impl ImageManager {
 
     // Move as many deferred sources into the worker queue as capacity allows.
     fn pump(&mut self) -> ScheduleResult {
-        while let Some(source) = self.pending.front().cloned() {
-            match self.loader.schedule(source.clone()) {
+        while let Some((key, source)) = self.pending.front().cloned() {
+            match self.loader.schedule(source) {
                 ScheduleResult::Queued => {
                     self.pending.pop_front();
                     self.cache_tick = self.cache_tick.saturating_add(1);
                     self.source_cache.insert(
-                        source,
+                        key,
                         SourceCacheEntry {
                             state: SourceState::Loading,
                             bytes: 0,
@@ -230,9 +233,10 @@ impl ImageManager {
     }
 
     pub(crate) fn remove_cached(&mut self, source: &ImageSource) {
-        self.loading.remove(source);
-        self.pending.retain(|pending| pending != source);
-        if let Some(previous) = self.source_cache.remove(source) {
+        let key = source.cache_key();
+        self.loading.remove(&key);
+        self.pending.retain(|(pending, _)| pending != &key);
+        if let Some(previous) = self.source_cache.remove(&key) {
             self.source_cache_bytes = self.source_cache_bytes.saturating_sub(previous.bytes);
         }
     }
@@ -242,8 +246,9 @@ impl ImageManager {
         source: ImageSource,
         result: Result<RasterImage, RasterImageError>,
     ) -> bool {
-        self.loading.remove(&source);
-        self.pending.retain(|pending| pending != &source);
+        let key = source.cache_key();
+        self.loading.remove(&key);
+        self.pending.retain(|(pending, _)| pending != &key);
         let bytes = result
             .as_ref()
             .map(|image| image.rgba8().len())
@@ -252,7 +257,7 @@ impl ImageManager {
         self.source_cache_bytes = self.source_cache_bytes.saturating_add(bytes);
         let ready = result.is_ok();
         self.source_cache.insert(
-            source,
+            key,
             SourceCacheEntry {
                 state: match result {
                     Ok(image) => SourceState::Ready(image),
@@ -276,13 +281,21 @@ impl ImageManager {
 
     pub(crate) fn oldest_inactive_source(
         &self,
-        pinned: &HashSet<ImageSource>,
-    ) -> Option<ImageSource> {
+        pinned: &HashSet<ImageSourceKey>,
+    ) -> Option<ImageSourceKey> {
         self.source_cache
             .iter()
-            .filter(|(source, entry)| entry.bytes > 0 && !pinned.contains(*source))
+            .filter(|(key, entry)| entry.bytes > 0 && !pinned.contains(*key))
             .min_by_key(|(_, entry)| entry.used)
-            .map(|(source, _)| source.clone())
+            .map(|(key, _)| key.clone())
+    }
+
+    pub(crate) fn remove_cached_key(&mut self, key: &ImageSourceKey) {
+        self.loading.remove(key);
+        self.pending.retain(|(pending, _)| pending != key);
+        if let Some(previous) = self.source_cache.remove(key) {
+            self.source_cache_bytes = self.source_cache_bytes.saturating_sub(previous.bytes);
+        }
     }
 }
 
@@ -334,7 +347,7 @@ mod tests {
         assert!(
             !manager
                 .source_cache
-                .get(&deferred)
+                .get(&deferred.cache_key())
                 .is_some_and(|entry| matches!(entry.state, SourceState::Failed)),
             "backpressure must not poison the cache with a failure"
         );
