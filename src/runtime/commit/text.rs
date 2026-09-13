@@ -172,6 +172,7 @@ pub(super) fn raster_text(
             && (layout.row_count() > rect.height as usize || horizontal_overflow)
             && row_index + 1 == rect.height as usize;
         rows.push(raster_line(
+            layout.text(),
             items,
             offset,
             rect.width as usize,
@@ -188,6 +189,7 @@ pub(super) fn raster_text(
 
 #[allow(clippy::too_many_arguments)]
 fn raster_line(
+    layout_text: &str,
     items: &[text_layout::Item],
     offset: usize,
     rect_width: usize,
@@ -256,7 +258,7 @@ fn raster_line(
             && column.saturating_add(item.width) <= content_end
             && column.saturating_add(item.width) <= visible_end
             && let Ok(cell) = Cell::with_width(
-                cell_symbol(item),
+                cell_symbol(layout_text, item),
                 item.style.foreground,
                 item.style.background.unwrap_or(backdrop),
                 item.style.attributes,
@@ -273,11 +275,14 @@ fn raster_line(
     cells
 }
 
-fn cell_symbol(item: &text_layout::Item) -> String {
-    if item.symbol == "\t" {
+// The rendered symbol for an item: a tab becomes its measured blank run, and
+// every other item is the exact slice of the layout's normalized text.
+fn cell_symbol(text: &str, item: &text_layout::Item) -> String {
+    let symbol = item.symbol(text);
+    if symbol == "\t" {
         " ".repeat(item.width)
     } else {
-        item.symbol.clone()
+        symbol.to_string()
     }
 }
 
@@ -387,11 +392,7 @@ fn editor_raster(
                     cells.push(blank(base));
                     columns += 1;
                 }
-                let symbol = if item.symbol == "\t" {
-                    " ".repeat(item.width)
-                } else {
-                    item.symbol.clone()
-                };
+                let symbol = cell_symbol(layout.text(), item);
                 let style = if caret_here && !caret_painted {
                     caret_painted = true;
                     caret_span = Some((item.cell, item.width));
@@ -492,11 +493,7 @@ fn editor_raster(
                     columns += item.width;
                     continue;
                 }
-                let symbol = if item.symbol == "\t" {
-                    " ".repeat(item.width)
-                } else {
-                    item.symbol.clone()
-                };
+                let symbol = cell_symbol(layout.text(), item);
                 let on_caret = surface.focused
                     && surface.caret >= item.source.start
                     && surface.caret < item.source.end;
@@ -699,7 +696,7 @@ mod tests {
                     .row_items(index)
                     .iter()
                     .filter(|item| item.kind != ItemKind::Separator)
-                    .map(cell_symbol)
+                    .map(|item| cell_symbol(layout.text(), item))
                     .collect::<String>()
             })
             .collect()
@@ -906,7 +903,7 @@ mod tests {
             if item.cell + item.width > width {
                 continue;
             }
-            if item.symbol == "\t" {
+            if item.is_tab(layout.text()) {
                 // A tab is wider than one cell, so it paints one blank per
                 // expanded column rather than a single symbol.
                 for offset in 0..item.width {
@@ -917,7 +914,7 @@ mod tests {
                 continue;
             }
             if let Some(slot) = slots.get_mut(item.cell) {
-                *slot = item.symbol.clone();
+                *slot = item.symbol(layout.text()).to_string();
             }
             for offset in 1..item.width {
                 if let Some(slot) = slots.get_mut(item.cell + offset) {
@@ -983,12 +980,12 @@ mod tests {
             .map(
                 |column| match leaders.get(column).and_then(|item| item.as_ref()) {
                     Some(item) if column + item.width <= start + viewport => {
-                        if item.symbol == "\t" {
+                        if item.is_tab(layout.text()) {
                             // A tab paints one blank per expanded column, and the
                             // columns after its leading one are blank either way.
                             " ".to_string()
                         } else {
-                            item.symbol.clone()
+                            item.symbol(layout.text()).to_string()
                         }
                     }
                     _ => " ".to_string(),

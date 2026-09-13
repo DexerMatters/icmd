@@ -47,13 +47,32 @@ impl Default for ComputedText {
 #[allow(dead_code)] // `text`/`cell`/`row` are the layout's public geometry surface.
 pub(crate) struct Item {
     pub(crate) source: Range<usize>,
+    // Byte range into the layout's normalized text. The glyph's rendered symbol
+    // is resolved from here rather than stored per item, which removed a heap
+    // allocation and a copy per glyph.
     pub(crate) text: Range<usize>,
     pub(crate) cell: usize,
     pub(crate) width: usize,
     pub(crate) kind: ItemKind,
     pub(crate) row: usize,
-    pub(crate) symbol: String,
     pub(crate) style: ComputedText,
+}
+
+impl Item {
+    // The symbol this item paints within `text`. Empty for a separator, which
+    // occupies cells but is deliberately not drawn.
+    pub(crate) fn symbol<'a>(&self, text: &'a str) -> &'a str {
+        text.get(self.text.clone()).unwrap_or("")
+    }
+
+    pub(crate) fn is_empty_symbol(&self, text: &str) -> bool {
+        self.symbol(text).is_empty()
+    }
+
+    #[allow(dead_code)] // Used by the rasterization paths and their tests.
+    pub(crate) fn is_tab(&self, text: &str) -> bool {
+        self.symbol(text) == "\t"
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -320,7 +339,6 @@ impl TextLayout {
                     width: item_width,
                     kind,
                     row: row_index,
-                    symbol: glyph.symbol.clone(),
                     style: into_computed(&glyph.style),
                 });
                 cell = cell.saturating_add(item_width);
@@ -428,7 +446,7 @@ impl TextLayout {
     pub(crate) fn row_end(&self, index: usize) -> usize {
         self.row_items(index)
             .iter()
-            .rfind(|item| item.kind == ItemKind::Glyph && !item.symbol.is_empty())
+            .rfind(|item| item.kind == ItemKind::Glyph && !item.is_empty_symbol(&self.text))
             .map_or_else(|| self.row_start(index), |item| item.source.end)
     }
 
@@ -934,7 +952,7 @@ mod tests {
                 if item.kind == ItemKind::Newline {
                     "\n".to_string()
                 } else {
-                    item.symbol.clone()
+                    item.symbol(layout.text()).to_string()
                 }
             })
             .collect()
@@ -947,7 +965,7 @@ mod tests {
                     .row_items(index)
                     .iter()
                     .filter(|item| item.kind == ItemKind::Glyph)
-                    .map(|item| item.symbol.as_str())
+                    .map(|item| item.symbol(layout.text()))
                     .collect::<String>()
             })
             .collect()
@@ -1122,7 +1140,7 @@ mod tests {
                     .row_items(index)
                     .iter()
                     .filter(|item| item.kind != ItemKind::Separator)
-                    .map(|item| item.symbol.clone())
+                    .map(|item| item.symbol(layout.text()).to_string())
                     .collect()
             })
             .collect();
@@ -1689,10 +1707,12 @@ mod property_tests {
                 let mut column = 0usize;
                 for item in layout.row_items(index) {
                     assert_eq!(
-                        item.cell, column,
+                        item.cell,
+                        column,
                         "{value:?} row {index}: item {:?} reports cell {} but the \
                          painter reaches it at column {column}",
-                        item.symbol, item.cell
+                        item.symbol(layout.text()),
+                        item.cell
                     );
                     // Every item advances, separators included: they own cells
                     // even though they are not painted.
@@ -1726,7 +1746,7 @@ mod property_tests {
                     layout
                         .row_items(index)
                         .iter()
-                        .map(|i| (i.symbol.clone(), i.cell, i.width))
+                        .map(|i| (i.symbol(layout.text()).to_string(), i.cell, i.width))
                         .collect::<Vec<_>>()
                 );
             }
@@ -1810,7 +1830,7 @@ mod mode_agreement_tests {
                     .map(|index| {
                         soft.row_items(index)
                             .iter()
-                            .map(|item| item.symbol.clone())
+                            .map(|item| item.symbol(soft.text()).to_string())
                             .collect()
                     })
                     .collect();
