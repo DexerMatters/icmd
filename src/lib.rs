@@ -43,7 +43,7 @@ pub use runtime::{
     ChannelRenderer, Commit, CommitConfig, ConfigError, EventDispatcher, FrameError, ImageResource,
     LimitError, Lower, LowerError, PipelineComponent, Renderer, RendererConfig,
     RendererConfigError, ResourceLimits, Runtime, RuntimeError, RuntimeHandle, ShutdownPolicy,
-    Stage, ViewportSetter, live_worker_count,
+    Stage, SurfaceKind, ViewportSetter, live_worker_count,
 };
 
 pub mod prelude {

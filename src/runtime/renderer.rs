@@ -27,10 +27,36 @@ use std::time::{Duration, Instant};
 
 const ADAPTIVE_REPLAY_DELAY: Duration = Duration::from_millis(80);
 
+// Which representation a retained surface holds. Validation tracks it so an
+// operation aimed at the wrong representation is rejected instead of silently
+// doing nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceKind {
+    Cells,
+    Raster,
+}
+
+impl fmt::Display for SurfaceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cells => write!(f, "cell surface"),
+            Self::Raster => write!(f, "raster surface"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
     DuplicateImage(ImageId),
     UnknownImage(ImageId),
+    // An operation named the wrong kind of surface. The operation index and
+    // surface ID make the offending entry unambiguous.
+    WrongSurface {
+        operation: usize,
+        id: ImageId,
+        expected: SurfaceKind,
+        actual: SurfaceKind,
+    },
     InvalidPatch {
         image: ImageId,
         error: ImageError,
@@ -50,6 +76,15 @@ impl fmt::Display for FrameError {
         match self {
             Self::DuplicateImage(id) => write!(f, "image {id:?} already exists"),
             Self::UnknownImage(id) => write!(f, "image {id:?} does not exist"),
+            Self::WrongSurface {
+                operation,
+                id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "operation {operation} for {id:?} requires a {expected}, but the surface is a {actual}"
+            ),
             Self::InvalidPatch { image, error } => {
                 write!(f, "invalid patch for {image:?}: {error}")
             }
@@ -68,6 +103,12 @@ impl fmt::Display for FrameError {
     }
 }
 impl Error for FrameError {}
+
+#[derive(Debug, Clone, Copy)]
+struct ValidatedSurface {
+    size: (usize, usize),
+    kind: SurfaceKind,
+}
 
 #[derive(Debug, Clone)]
 pub(super) enum Surface {
@@ -483,22 +524,55 @@ impl Renderer {
         // Keep only frame-local overrides. Cloning the dimensions of every
         // retained image made validating a one-cell patch scale with scene
         // size even though validation is otherwise purely transactional.
-        let mut dimensions: HashMap<ImageId, Option<(usize, usize)>> = HashMap::new();
-        let lookup = |id: &ImageId, changes: &HashMap<ImageId, Option<(usize, usize)>>| {
+        let mut dimensions: HashMap<ImageId, Option<ValidatedSurface>> = HashMap::new();
+        let lookup = |id: &ImageId, changes: &HashMap<ImageId, Option<ValidatedSurface>>| {
             changes.get(id).copied().flatten().or_else(|| {
                 (!changes.contains_key(id))
                     .then(|| self.images.get(id))
                     .flatten()
-                    .map(|node| surface_size(&node.surface))
+                    .map(|node| ValidatedSurface {
+                        size: surface_size(&node.surface),
+                        kind: match node.surface {
+                            Surface::Cells(_) => SurfaceKind::Cells,
+                            Surface::Raster(_) => SurfaceKind::Raster,
+                        },
+                    })
             })
         };
-        for operation in &frame.operations {
+        // Reject an operation whose required surface kind differs from what the
+        // ID currently holds. `require` keeps transactional behavior: every
+        // mismatch is found before the renderer is mutated.
+        let require = |id: &ImageId,
+                       expected: SurfaceKind,
+                       operation: usize,
+                       changes: &HashMap<ImageId, Option<ValidatedSurface>>|
+         -> Result<ValidatedSurface, FrameError> {
+            let Some(surface) = lookup(id, changes) else {
+                return Err(FrameError::UnknownImage(*id));
+            };
+            if surface.kind != expected {
+                return Err(FrameError::WrongSurface {
+                    operation,
+                    id: *id,
+                    expected,
+                    actual: surface.kind,
+                });
+            }
+            Ok(surface)
+        };
+        for (index, operation) in frame.operations.iter().enumerate() {
             match operation {
                 Operation::Create { id, image, .. } => {
                     if lookup(id, &dimensions).is_some() {
                         return Err(FrameError::DuplicateImage(*id));
                     }
-                    dimensions.insert(*id, Some((image.width(), image.height())));
+                    dimensions.insert(
+                        *id,
+                        Some(ValidatedSurface {
+                            size: (image.width(), image.height()),
+                            kind: SurfaceKind::Cells,
+                        }),
+                    );
                 }
                 Operation::CreateRaster { id, raster, .. } => {
                     if lookup(id, &dimensions).is_some() {
@@ -506,7 +580,10 @@ impl Renderer {
                     }
                     dimensions.insert(
                         *id,
-                        Some((usize::from(raster.width), usize::from(raster.height))),
+                        Some(ValidatedSurface {
+                            size: (usize::from(raster.width), usize::from(raster.height)),
+                            kind: SurfaceKind::Raster,
+                        }),
                     );
                 }
                 Operation::Remove { id } => {
@@ -526,7 +603,13 @@ impl Renderer {
                     if lookup(id, &dimensions).is_none() {
                         return Err(FrameError::UnknownImage(*id));
                     }
-                    dimensions.insert(*id, Some((image.width(), image.height())));
+                    dimensions.insert(
+                        *id,
+                        Some(ValidatedSurface {
+                            size: (image.width(), image.height()),
+                            kind: SurfaceKind::Cells,
+                        }),
+                    );
                 }
                 Operation::ReplaceRaster { id, raster } => {
                     if lookup(id, &dimensions).is_none() {
@@ -534,18 +617,18 @@ impl Renderer {
                     }
                     dimensions.insert(
                         *id,
-                        Some((usize::from(raster.width), usize::from(raster.height))),
+                        Some(ValidatedSurface {
+                            size: (usize::from(raster.width), usize::from(raster.height)),
+                            kind: SurfaceKind::Raster,
+                        }),
                     );
                 }
                 Operation::SetRasterClip { id, .. } => {
-                    if lookup(id, &dimensions).is_none() {
-                        return Err(FrameError::UnknownImage(*id));
-                    }
+                    require(id, SurfaceKind::Raster, index, &dimensions)?;
                 }
                 Operation::PatchRect { id, rect, rows } => {
-                    let Some((width, height)) = lookup(id, &dimensions) else {
-                        return Err(FrameError::UnknownImage(*id));
-                    };
+                    let surface = require(id, SurfaceKind::Cells, index, &dimensions)?;
+                    let (width, height) = surface.size;
                     let row_width_error = rows.iter().find_map(|row| {
                         let width = row
                             .iter()
@@ -572,9 +655,8 @@ impl Renderer {
                     }
                 }
                 Operation::PatchCells { id, edits } => {
-                    let Some((width, height)) = lookup(id, &dimensions) else {
-                        return Err(FrameError::UnknownImage(*id));
-                    };
+                    let surface = require(id, SurfaceKind::Cells, index, &dimensions)?;
+                    let (width, height) = surface.size;
                     if edits.iter().any(|edit| {
                         edit.position.column >= width
                             || edit.position.line >= height

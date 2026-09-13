@@ -617,3 +617,265 @@ fn adaptive_sixel_uses_symbols_until_the_scene_settles() {
     thread::sleep(Duration::from_millis(90));
     assert!(renderer.render_diff().unwrap().unwrap().contains("\x1bP"));
 }
+
+// SAF-06: frame validation is transactional and surface-kind aware. Every
+// invalid batch must be rejected with a precise error and leave the renderer
+// exactly as it was.
+// Drive the renderer directly: frame validation is its contract, so the test
+// submits raw operation batches rather than lowering a widget tree.
+fn validation_pipeline() -> (
+    crossbeam_channel::Sender<Frame>,
+    crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+) {
+    let viewport = Size::new(8, 4);
+    let runtime = Runtime::new(
+        Renderer::with_config(
+            viewport,
+            RendererConfig {
+                image_protocol: ImageProtocol::Symbols,
+                ..RendererConfig::default()
+            },
+        )
+        .unwrap(),
+    )
+    .start_handle();
+    (runtime.input(), runtime.output())
+}
+
+fn blank_cells() -> Image {
+    Image::new(2, 2, Cell::plain(" ").unwrap()).unwrap()
+}
+
+#[test]
+fn cell_patches_targeting_a_raster_surface_are_rejected() {
+    let (input, output) = validation_pipeline();
+    let raster = RasterPlacement::new(ImageSource::loaded(asset()), 2, 2, Default::default());
+    input
+        .send(Frame::new(vec![Operation::CreateRaster {
+            id: icmd::ImageId(1),
+            raster,
+            position: Default::default(),
+            level: 0,
+        }]))
+        .unwrap();
+    let _ = output.recv_timeout(Duration::from_secs(1));
+
+    let invalid = Frame::new(vec![
+        Operation::PatchCells {
+            id: icmd::ImageId(1),
+            edits: vec![icmd::CellEdit {
+                position: icmd::ImagePosition::new(0, 0),
+                cell: Cell::plain("x").unwrap(),
+            }],
+        },
+        Operation::PatchRect {
+            id: icmd::ImageId(1),
+            rect: icmd::Rect::new(0, 0, 1, 1),
+            rows: vec![vec![Cell::plain("x").unwrap()]],
+        },
+    ]);
+    input.send(invalid).unwrap();
+    let error = output
+        .recv_timeout(Duration::from_secs(1))
+        .expect("expected a validation error")
+        .expect_err("a wrong-kind patch must not render");
+    assert!(
+        matches!(
+            error,
+            icmd::FrameError::WrongSurface {
+                operation: 0,
+                expected: icmd::SurfaceKind::Cells,
+                actual: icmd::SurfaceKind::Raster,
+                ..
+            }
+        ),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn raster_clips_targeting_a_cell_surface_are_rejected() {
+    let (input, output) = validation_pipeline();
+    input
+        .send(Frame::new(vec![Operation::Create {
+            id: icmd::ImageId(1),
+            image: blank_cells(),
+            position: Default::default(),
+            level: 0,
+        }]))
+        .unwrap();
+    let _ = output.recv_timeout(Duration::from_secs(1));
+
+    input
+        .send(Frame::new(vec![Operation::SetRasterClip {
+            id: icmd::ImageId(1),
+            clip: Some(icmd::Rect::new(0, 0, 1, 1)),
+        }]))
+        .unwrap();
+    let error = output
+        .recv_timeout(Duration::from_secs(1))
+        .expect("expected a validation error")
+        .expect_err("a raster clip on cells must not render");
+    assert!(
+        matches!(
+            error,
+            icmd::FrameError::WrongSurface {
+                operation: 0,
+                expected: icmd::SurfaceKind::Raster,
+                actual: icmd::SurfaceKind::Cells,
+                ..
+            }
+        ),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn use_after_remove_and_duplicate_create_report_operation_indexes() {
+    let (input, output) = validation_pipeline();
+    input
+        .send(Frame::new(vec![
+            Operation::Create {
+                id: icmd::ImageId(1),
+                image: blank_cells(),
+                position: Default::default(),
+                level: 0,
+            },
+            Operation::Remove {
+                id: icmd::ImageId(1),
+            },
+            Operation::Move {
+                id: icmd::ImageId(1),
+                position: Default::default(),
+            },
+        ]))
+        .unwrap();
+    let error = output
+        .recv_timeout(Duration::from_secs(1))
+        .expect("expected a validation error")
+        .expect_err("use after remove must not render");
+    assert!(
+        matches!(error, icmd::FrameError::UnknownImage(id) if id == icmd::ImageId(1)),
+        "got {error:?}"
+    );
+
+    let (input, output) = validation_pipeline();
+    input
+        .send(Frame::new(vec![
+            Operation::Create {
+                id: icmd::ImageId(2),
+                image: blank_cells(),
+                position: Default::default(),
+                level: 0,
+            },
+            Operation::Create {
+                id: icmd::ImageId(2),
+                image: blank_cells(),
+                position: Default::default(),
+                level: 0,
+            },
+        ]))
+        .unwrap();
+    let error = output
+        .recv_timeout(Duration::from_secs(1))
+        .expect("expected a validation error")
+        .expect_err("a duplicate create must not render");
+    assert!(
+        matches!(error, icmd::FrameError::DuplicateImage(id) if id == icmd::ImageId(2)),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn an_invalid_batch_leaves_the_previous_frame_intact() {
+    // Create a cell surface, paint it, then submit a batch that is valid until
+    // its last (wrong-kind) operation. Nothing from that batch may be applied.
+    let (input, output) = validation_pipeline();
+    input
+        .send(Frame::new(vec![
+            Operation::Create {
+                id: icmd::ImageId(3),
+                image: blank_cells(),
+                position: Default::default(),
+                level: 0,
+            },
+            Operation::PatchCells {
+                id: icmd::ImageId(3),
+                edits: vec![icmd::CellEdit {
+                    position: icmd::ImagePosition::new(0, 0),
+                    cell: Cell::plain("A").unwrap(),
+                }],
+            },
+        ]))
+        .unwrap();
+    let first = output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert!(first.contains('A'));
+
+    // The valid create is followed by an operation for the wrong surface kind.
+    let raster = RasterPlacement::new(ImageSource::loaded(asset()), 2, 2, Default::default());
+    input
+        .send(Frame::new(vec![
+            Operation::Create {
+                id: icmd::ImageId(4),
+                image: blank_cells(),
+                position: Default::default(),
+                level: 0,
+            },
+            Operation::SetRasterClip {
+                id: icmd::ImageId(4),
+                clip: Some(icmd::Rect::new(0, 0, 1, 1)),
+            },
+        ]))
+        .unwrap();
+    let error = output
+        .recv_timeout(Duration::from_secs(1))
+        .expect("expected a validation error")
+        .expect_err("the batch must be rejected as a whole");
+    assert!(matches!(error, icmd::FrameError::WrongSurface { .. }));
+
+    // A later valid patch on the original surface still works, proving the
+    // rejected batch did not partially mutate retained state.
+    input
+        .send(Frame::new(vec![Operation::PatchCells {
+            id: icmd::ImageId(3),
+            edits: vec![icmd::CellEdit {
+                position: icmd::ImagePosition::new(1, 1),
+                cell: Cell::plain("B").unwrap(),
+            }],
+        }]))
+        .unwrap();
+    let frame = output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert!(frame.contains('B'));
+
+    // Re-creating id 4 must succeed. If the rejected batch had been applied
+    // even partially, its id 4 would still exist and this would be a duplicate.
+    input
+        .send(Frame::new(vec![
+            Operation::Create {
+                id: icmd::ImageId(4),
+                image: blank_cells(),
+                position: Default::default(),
+                level: 0,
+            },
+            Operation::PatchCells {
+                id: icmd::ImageId(4),
+                edits: vec![icmd::CellEdit {
+                    position: icmd::ImagePosition::new(0, 0),
+                    cell: Cell::plain("C").unwrap(),
+                }],
+            },
+        ]))
+        .unwrap();
+    let frame = output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert!(frame.contains('C'), "the re-created surface must render");
+    let _ = raster;
+}
