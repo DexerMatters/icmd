@@ -471,3 +471,93 @@ fn invalid_poll_interval_is_rejected_before_side_effects() {
     let error = icmd::RuntimeConfig::validate(&config).unwrap_err();
     assert!(error.to_string().contains("poll interval"), "{error}");
 }
+
+// PERF-04: keyed reconciliation is indexed, so a large reorder is linear and
+// state-bearing children keep their identity.
+#[test]
+fn large_keyed_reorder_reconciles_without_quadratic_scan() {
+    use icmd::{Attr, Component, ComponentContext, Props, Text};
+
+    #[derive(Clone, Default)]
+    struct CounterProps {
+        label: Attr<String>,
+    }
+
+    fn counter(cx: &mut ComponentContext, props: &Props<CounterProps>) -> Node {
+        // State-bearing child: its state must survive a reorder by key.
+        let (count, _set_count) = cx.use_state(|| 0u64);
+        let label = props.label.clone() | String::new();
+        Text::new(format!("{label}:{count}")).into()
+    }
+
+    let keys: Vec<String> = (0..2_000).map(|index| format!("k{index}")).collect();
+    let build = |order: &[String]| -> Node {
+        let children: Vec<Node> = order
+            .iter()
+            .map(|key| {
+                let node = counter
+                    .props(CounterProps {
+                        label: Attr::Set(key.clone()),
+                    })
+                    .node();
+                node.key(key.clone())
+            })
+            .collect();
+        Node::element(icmd::DomProps::default(), children)
+    };
+
+    let viewport = Size::new(20, 5);
+    let (commit, _) = Commit::new(viewport);
+    let runtime = Runtime::new(Lower::with_limits(ResourceLimits::default()))
+        .then(commit)
+        .then(Renderer::new(viewport).unwrap())
+        .start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+    let errors = runtime.errors();
+
+    input.send(build(&keys)).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(5))
+        .expect("initial frame")
+        .unwrap();
+
+    // Reverse: a quadratic implementation would perform ~2,000,000 key
+    // comparisons; the indexed one is linear. The wall-clock bound below is
+    // generous enough to avoid flakiness but still catches a quadratic blowup
+    // at this size on any realistic machine.
+    let mut reversed = keys.clone();
+    reversed.reverse();
+    let started = std::time::Instant::now();
+    input.send(build(&reversed)).unwrap();
+    let frame = output
+        .recv_timeout(Duration::from_secs(10))
+        .expect("reordered frame")
+        .expect("reordered render must succeed");
+    assert!(!frame.is_empty());
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "keyed reorder took {elapsed:?}; the lookup is likely still quadratic"
+    );
+    assert!(errors.try_recv().is_err(), "no lowering error expected");
+
+    drop(input);
+    let _ = runtime.shutdown(ShutdownPolicy::default());
+}
+
+// A caller error must be typed, not a panic.
+#[test]
+fn duplicate_sibling_keys_are_a_typed_error() {
+    use icmd::{DomProps, Text};
+
+    let child = |key: &str| -> Node {
+        Node::element(DomProps::default(), [Text::new("x").into()]).key(key.to_string())
+    };
+    let node = Node::element(DomProps::default(), [child("dup"), child("dup")]);
+    let outcome = run_once(ResourceLimits::default(), node);
+    match outcome {
+        Err(RuntimeError::Lower(icmd::LowerError::DuplicateKey { key })) => assert_eq!(key, "dup"),
+        other => panic!("expected DuplicateKey, got {other:?}"),
+    }
+}

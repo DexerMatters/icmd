@@ -1,6 +1,6 @@
 use std::{
     any::{Any, TypeId},
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt, mem,
     sync::{Arc, Mutex},
@@ -33,6 +33,11 @@ pub enum LowerError {
         limit: usize,
         observed: usize,
     },
+    // Two siblings shared one key. This is a caller error, not an internal
+    // invariant, so it is reported instead of panicking the worker.
+    DuplicateKey {
+        key: String,
+    },
 }
 
 impl fmt::Display for LowerError {
@@ -49,6 +54,9 @@ impl fmt::Display for LowerError {
                 f,
                 "logical tree node count exceeds the limit of {limit} (at least {observed})"
             ),
+            Self::DuplicateKey { key } => {
+                write!(f, "duplicate sibling key {key:?}")
+            }
         }
     }
 }
@@ -337,6 +345,18 @@ impl Lower {
         let mut children = Vec::with_capacity(nodes.len());
         let mut seen_keys = HashSet::new();
 
+        // Per-parent key index built in one pass, so matching a keyed new child
+        // is a lookup rather than a scan of every old sibling. Without this,
+        // reordering N keyed children costs O(N^2) comparisons.
+        // The key is cloned into the index so reconciliation can mutate the
+        // fiber arena while the index is alive.
+        let mut keyed_old: HashMap<Key, FiberId> = HashMap::with_capacity(old.len());
+        for candidate in &old {
+            if let Some(key) = self.fibers[*candidate].key.clone() {
+                keyed_old.entry(key).or_insert(*candidate);
+            }
+        }
+
         let child_depth = self.fibers[parent].depth.saturating_add(1);
         for (index, node) in nodes.into_iter().enumerate() {
             if self.pending_error.is_some() {
@@ -359,13 +379,16 @@ impl Lower {
             if let Some(key) = node.node_key()
                 && !seen_keys.insert(key.clone())
             {
-                panic!("duplicate sibling key {:?}", key);
+                // Deterministic first-wins: report the duplicate and skip it
+                // rather than panicking or silently migrating state.
+                self.pending_error = Some(LowerError::DuplicateKey {
+                    key: key.as_str().to_string(),
+                });
+                continue;
             }
             let matched = if let Some(key) = node.node_key() {
-                old.iter().copied().find(|candidate| {
-                    !used.contains(candidate)
-                        && self.fibers[*candidate].key.as_ref() == Some(key)
-                        && self.compatible(*candidate, &node)
+                keyed_old.get(key).copied().filter(|candidate| {
+                    !used.contains(candidate) && self.compatible(*candidate, &node)
                 })
             } else {
                 old.get(index).copied().filter(|candidate| {
