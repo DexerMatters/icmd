@@ -627,3 +627,70 @@ fn one_cell_damage_does_not_scale_with_viewport_area() {
         "a one-cell frame examined {large} of {large_area} cells"
     );
 }
+
+// PERF-02: the layout pass must stay close to one intrinsic measurement and one
+// placement per node. This is the acceptance gate for the frame-local layout
+// tree; it records the current counts so a regression is a test failure.
+#[test]
+fn layout_visits_stay_linear_in_node_count() {
+    use icmd::{Commit, DomProps, Lower, Node, Renderer, Runtime, ShutdownPolicy};
+    use std::time::Duration;
+
+    fn chain(depth: usize) -> NumberedTree {
+        let mut nodes = 1usize;
+        let mut node = Node::element(DomProps::default(), Vec::<Node>::new());
+        for _ in 0..depth {
+            node = Node::element(DomProps::default(), vec![node]);
+            nodes += 1;
+        }
+        NumberedTree { node, nodes }
+    }
+
+    struct NumberedTree {
+        node: Node,
+        nodes: usize,
+    }
+
+    let mut baseline: Option<(usize, u64, u64)> = None;
+    for depth in [4usize, 16, 64] {
+        let viewport = Size::new(20, 8);
+        let (commit, _viewport, _dispatcher, instrument) = Commit::instrumented(viewport);
+        let runtime = Runtime::new(Lower::default())
+            .then(commit)
+            .then(Renderer::new(viewport).unwrap())
+            .start_handle();
+        let input = runtime.input();
+        let output = runtime.output();
+        let tree = chain(depth);
+        input.send(tree.node).unwrap();
+        let _ = output.recv_timeout(Duration::from_secs(2));
+        let (intrinsic, placement) = instrument.counts();
+        drop(input);
+        let _ = runtime.shutdown(ShutdownPolicy::default());
+
+        // Both passes must be linear in the node count, not quadratic. Allow a
+        // constant factor for the scrollbar convergence pass.
+        assert!(
+            intrinsic <= (tree.nodes as u64) * 8,
+            "depth {depth} ({} nodes) measured {intrinsic} times",
+            tree.nodes
+        );
+        assert!(
+            placement <= (tree.nodes as u64) * 4,
+            "depth {depth} ({} nodes) placed {placement} times",
+            tree.nodes
+        );
+
+        if let Some((prev_nodes, prev_intrinsic, _)) = baseline {
+            // Doubling the tree must not much more than double the work.
+            let node_ratio = tree.nodes as f64 / prev_nodes as f64;
+            let visit_ratio = intrinsic as f64 / prev_intrinsic.max(1) as f64;
+            assert!(
+                visit_ratio <= node_ratio * 2.0 + 2.0,
+                "intrinsic visits grew faster than the node count: {visit_ratio:.2}x for {node_ratio:.2}x nodes"
+            );
+        } else {
+            baseline = Some((tree.nodes, intrinsic, placement));
+        }
+    }
+}

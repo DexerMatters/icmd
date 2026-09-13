@@ -125,6 +125,7 @@ impl Commit {
         offered_height: Option<i32>,
         inherited: ComputedText,
     ) -> (i32, i32) {
+        self.instrument.intrinsic();
         match node {
             DomNode::Image { image, .. } => (image.width() as i32, image.height() as i32),
             DomNode::Raster { raster, .. } => (raster.width as i32, raster.height as i32),

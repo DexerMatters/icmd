@@ -56,10 +56,10 @@ pub use raster::{
 };
 pub use runtime::{
     ChannelRenderer, Commit, CommitConfig, ConfigError, DispatchOutcome, EventDispatcher,
-    FocusError, FocusOutcome, FrameError, ImageMetrics, ImageResource, LimitError, Lower,
-    LowerError, PipelineComponent, Renderer, RendererConfig, RendererConfigError, ResourceLimits,
-    Runtime, RuntimeError, RuntimeHandle, ShutdownPolicy, Stage, SurfaceKind, ViewportSetter,
-    live_worker_count,
+    FocusError, FocusOutcome, FrameError, ImageMetrics, ImageResource, LayoutInstrument,
+    LimitError, Lower, LowerError, PipelineComponent, Renderer, RendererConfig,
+    RendererConfigError, ResourceLimits, Runtime, RuntimeError, RuntimeHandle, ShutdownPolicy,
+    Stage, SurfaceKind, ViewportSetter, live_worker_count,
 };
 
 pub mod prelude {

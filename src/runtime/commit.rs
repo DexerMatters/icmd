@@ -73,6 +73,12 @@ pub struct Commit {
     text_cache_tick: u64,
     text_seen: HashSet<DomId>,
     emoji_merging: EmojiMerging,
+    // Visit counters for the layout pass. They make the "one intrinsic
+    // measurement and one placement per node" budget measurable, which is the
+    // acceptance gate for the frame-local layout tree.
+    // Shared with a doc-hidden instrument handle so tests can read the layout
+    // budget without owning the worker's `Commit`.
+    instrument: Arc<LayoutInstrument>,
 }
 
 impl Commit {
@@ -116,6 +122,7 @@ impl Commit {
             text_cache: HashMap::new(),
             text_cache_tick: 0,
             text_seen: HashSet::new(),
+            instrument: Arc::new(LayoutInstrument::default()),
             emoji_merging: config.emoji_merging,
         };
         (commit, setter, event_dispatcher)
@@ -202,6 +209,7 @@ impl Commit {
 
         let mut next = HashMap::new();
         self.text_seen.clear();
+        self.instrument.reset();
         let root_rect = self.root_rect(&root);
         let mut retained_scroll_ids = HashSet::new();
         collect_scroll_ids(&root, &mut retained_scroll_ids);
@@ -246,6 +254,55 @@ impl Commit {
         self.latest = Some(root);
         self.text_cache.retain(|id, _| self.text_seen.contains(id));
         make_frame(operations, include_viewport.then_some(self.viewport))
+    }
+}
+
+// Layout visit counters. They make the "one intrinsic measurement and one
+// placement per node" budget measurable, which is PERF-02's acceptance gate.
+#[derive(Debug, Default)]
+pub struct LayoutInstrument {
+    intrinsic: std::sync::atomic::AtomicU64,
+    placement: std::sync::atomic::AtomicU64,
+}
+
+impl LayoutInstrument {
+    pub(crate) fn intrinsic(&self) {
+        self.intrinsic
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn placement(&self) {
+        self.placement
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn reset(&self) {
+        self.intrinsic
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.placement
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // (intrinsic measurements, placement visits) observed so far.
+    pub fn counts(&self) -> (u64, u64) {
+        (
+            self.intrinsic.load(std::sync::atomic::Ordering::Relaxed),
+            self.placement.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+}
+
+impl Commit {
+    // Build a commit that shares its layout instrument with the caller, so a
+    // test can observe the visit counts of the frame the worker produced.
+    #[doc(hidden)]
+    pub fn instrumented(
+        viewport: Size,
+    ) -> (Self, ViewportSetter, EventDispatcher, Arc<LayoutInstrument>) {
+        let (commit, setter, dispatcher) =
+            Self::with_config_and_events(viewport, CommitConfig::default());
+        let instrument = commit.instrument.clone();
+        (commit, setter, dispatcher, instrument)
     }
 }
 

@@ -42,6 +42,9 @@ impl Commit {
         // can agree with the pixels.
         scroll: (i32, i32),
     ) {
+        // One placement visit per painted node, so the acceptance budget for
+        // the layout work is directly measurable.
+        self.instrument.placement();
         if clip.is_empty() {
             // Eager file sources are retained even when an ancestor's
             // viewport clip currently excludes the tile. This records a

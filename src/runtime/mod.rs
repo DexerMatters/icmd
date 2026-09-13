@@ -7,7 +7,7 @@ pub(crate) mod lower;
 mod pipeline;
 mod renderer;
 
-pub use commit::{Commit, CommitConfig, ViewportSetter};
+pub use commit::{Commit, CommitConfig, LayoutInstrument, ViewportSetter};
 pub use event::{DispatchOutcome, EventDispatcher, FocusError, FocusOutcome};
 pub use limits::{ConfigError, ImageResource, LimitError, RendererConfigError, ResourceLimits};
 pub use lower::{Lower, LowerError};
