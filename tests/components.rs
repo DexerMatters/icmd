@@ -325,3 +325,70 @@ fn scrollbar_glyphs_validate_early_and_theme_styles_are_overridable() {
     let frame = render(node, Size::new(4, 2));
     assert!(frame.contains('!') || frame.contains('#'));
 }
+
+// PERF-12: batched primitives must produce exactly the same cells as the
+// per-cell path they replaced.
+#[test]
+fn batched_canvas_primitives_match_cell_by_cell_drawing() {
+    // Draw with the batched primitive.
+    let batched = canvas
+        .extra(|props| {
+            props.width /= 6;
+            props.height /= 3;
+            props
+                .draw
+                .set(Arc::new(|drawing: &mut icmd::CanvasContext| {
+                    drawing.fill_rect(0, 0, 6, 3, "░").unwrap();
+                    drawing.line(0, 0, 5, 2, "*").unwrap();
+                }));
+        })
+        .node();
+    let batched_frame = render(batched, Size::new(6, 3));
+
+    // The same picture drawn one cell at a time.
+    let scalar = canvas
+        .extra(|props| {
+            props.width /= 6;
+            props.height /= 3;
+            props
+                .draw
+                .set(Arc::new(|drawing: &mut icmd::CanvasContext| {
+                    for row in 0..3 {
+                        for column in 0..6 {
+                            drawing.set(column, row, "░").unwrap();
+                        }
+                    }
+                    // Bresenham from (0,0) to (5,2).
+                    let (mut x, mut y) = (0i32, 0i32);
+                    let (x1, y1) = (5i32, 2i32);
+                    let dx = (x1 - x).abs();
+                    let sx = if x < x1 { 1 } else { -1 };
+                    let dy = -(y1 - y).abs();
+                    let sy = if y < y1 { 1 } else { -1 };
+                    let mut error = dx + dy;
+                    loop {
+                        drawing.set(x, y, "*").unwrap();
+                        if x == x1 && y == y1 {
+                            break;
+                        }
+                        let twice = 2 * error;
+                        if twice >= dy {
+                            error += dy;
+                            x += sx;
+                        }
+                        if twice <= dx {
+                            error += dx;
+                            y += sy;
+                        }
+                    }
+                }));
+        })
+        .node();
+    let scalar_frame = render(scalar, Size::new(6, 3));
+
+    assert_eq!(
+        batched_frame, scalar_frame,
+        "batching must not change the painted cells"
+    );
+    assert!(batched_frame.contains('*'), "the line must be painted");
+}

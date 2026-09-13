@@ -130,16 +130,62 @@ impl CanvasContext {
 
     pub fn set(&mut self, x: i32, y: i32, symbol: impl Into<String>) -> Result<(), CanvasError> {
         let cell = Cell::new(symbol, self.foreground, self.background, self.attributes)?;
+        self.write_validated(x, y, cell)
+    }
+
+    // Writes a cell that is already validated and clipped. Bounds and style are
+    // checked once by the caller, so batched primitives pay validation once per
+    // operation instead of once per cell.
+    fn write_validated(&mut self, x: i32, y: i32, cell: Cell) -> Result<(), CanvasError> {
         if x < 0 || y < 0 || x as usize >= self.width() || y as usize >= self.height() {
             return Ok(());
         }
         if cell.width() == 2 && x as usize + 1 >= self.width() {
             return Ok(());
         }
+        // Non-wide cells in one row are contiguous only when they are adjacent;
+        // a single edit keeps the invariant simple and the patch is already
+        // row-local inside `patch_cells`.
         self.image.patch_cells(&[CellEdit {
             position: ImagePosition::new(y as usize, x as usize),
             cell,
         }])?;
+        Ok(())
+    }
+
+    // Batched variant used by the primitives: one validation, one patch.
+    fn write_run(
+        &mut self,
+        row: i32,
+        left: i32,
+        right: i32,
+        cell: &Cell,
+    ) -> Result<(), CanvasError> {
+        if row < 0 || row as usize >= self.height() {
+            return Ok(());
+        }
+        let width = self.width() as i32;
+        let left = left.max(0);
+        let right = right.min(width);
+        if left >= right {
+            return Ok(());
+        }
+        let cell_width = cell.width().max(1) as i32;
+        let mut edits = Vec::with_capacity(((right - left) / cell_width).max(1) as usize);
+        let mut column = left;
+        while column + cell_width <= right {
+            if column as usize >= self.width() {
+                break;
+            }
+            edits.push(CellEdit {
+                position: ImagePosition::new(row as usize, column as usize),
+                cell: cell.clone(),
+            });
+            column += cell_width;
+        }
+        if !edits.is_empty() {
+            self.image.patch_cells(&edits)?;
+        }
         Ok(())
     }
 
@@ -157,14 +203,13 @@ impl CanvasContext {
         height: u16,
         symbol: impl Into<String>,
     ) -> Result<(), CanvasError> {
-        let symbol = symbol.into();
-        let cell_width = Cell::new(
-            symbol.clone(),
+        // Validate once, then write one batched patch per row.
+        let cell = Cell::new(
+            symbol.into(),
             self.foreground,
             self.background,
             self.attributes,
-        )?
-        .width() as i32;
+        )?;
         let left = x.max(0);
         let top = y.max(0);
         let right = x.saturating_add(i32::from(width)).min(self.width() as i32);
@@ -175,14 +220,7 @@ impl CanvasContext {
             return Ok(());
         }
         for row in top..bottom {
-            let mut column = left;
-            while column.saturating_add(cell_width) <= right {
-                self.set(column, row, symbol.clone())?;
-                column = column.saturating_add(cell_width);
-                if column >= right {
-                    break;
-                }
-            }
+            self.write_run(row, left, right, &cell)?;
         }
         Ok(())
     }
@@ -222,9 +260,8 @@ impl CanvasContext {
         y1: i32,
         symbol: impl Into<String>,
     ) -> Result<(), CanvasError> {
-        let symbol = symbol.into();
-        Cell::new(
-            symbol.clone(),
+        let cell = Cell::new(
+            symbol.into(),
             self.foreground,
             self.background,
             self.attributes,
@@ -245,7 +282,7 @@ impl CanvasContext {
         let sy = if y0 < y1 { 1 } else { -1 };
         let mut error = dx + dy;
         loop {
-            self.set(x0 as i32, y0 as i32, symbol.clone())?;
+            self.write_validated(x0 as i32, y0 as i32, cell.clone())?;
             if x0 == x1 && y0 == y1 {
                 break;
             }
