@@ -224,7 +224,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
             scroll_y: state.scroll_y,
         };
         let text = Text::from_spans(Vec::new())
-            .with_style(surface_style())
+            .layout_style(surface_style())
             .wrap(config.wrap)
             .editor_surface(surface, probe.clone());
         (scroll_offset, text)

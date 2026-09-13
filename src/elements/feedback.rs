@@ -149,7 +149,7 @@ pub fn alert(cx: &mut ComponentContext, props: &Props<AlertProps>) -> Node {
     ui! {
         <view dom={dom}>
             {Text::new(title_text).foreground(title_color).bold()}
-            {Text::new(message_text).style(theme.typography.body.clone())}
+            {Text::new(message_text).text_style(theme.typography.body.clone())}
         </view>
     }
 }

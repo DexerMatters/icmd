@@ -1820,7 +1820,7 @@ fn ordinary_text_and_the_editor_agree_on_wide_glyph_columns() {
     // glyphs in the same columns, because both consume the canonical layout.
     for (value, width) in [("界a", 3u16), ("a界b", 5), ("界界", 4)] {
         let text: Node = icmd::Text::new(value)
-            .with_style(icmd::style(|style| {
+            .layout_style(icmd::style(|style| {
                 style.width /= icmd::Dimension::Cells(width)
             }))
             .wrap(icmd::TextWrap::NoWrap)

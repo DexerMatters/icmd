@@ -149,13 +149,26 @@ impl Text {
         self
     }
 
-    pub fn style(mut self, style: TextStyle) -> Self {
+    // Canonical names distinguish the two different "style" domains. The old
+    // spellings remain as transitional delegates to the same implementation.
+    pub fn text_style(mut self, style: TextStyle) -> Self {
         self.style = style;
         self
     }
-    pub fn with_style(mut self, style: Style) -> Self {
+
+    pub fn layout_style(mut self, style: Style) -> Self {
         self.layout_style = style;
         self
+    }
+
+    #[deprecated(note = "use text_style")]
+    pub fn style(self, style: TextStyle) -> Self {
+        self.text_style(style)
+    }
+
+    #[deprecated(note = "use layout_style")]
+    pub fn with_style(self, style: Style) -> Self {
+        self.layout_style(style)
     }
     text_color_builders!(foreground, background);
 

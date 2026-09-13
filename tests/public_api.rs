@@ -171,3 +171,27 @@ fn renderer_config_rejects_impossible_geometry() {
         "{error:?}"
     );
 }
+
+// API-10: setter, fluent, and query names are distinct, and the deprecated
+// aliases delegate to the same implementation.
+#[test]
+#[allow(deprecated)]
+fn text_and_canvas_naming_is_domain_qualified() {
+    // Text: typography versus layout style are different domains.
+    let text = icmd::Text::new("hi")
+        .text_style(TextStyle::default().bold())
+        .layout_style(Style::default());
+    // The deprecated spellings delegate to the same behavior.
+    let legacy = icmd::Text::new("hi")
+        .style(TextStyle::default().bold())
+        .with_style(Style::default());
+    let _ = (text, legacy);
+
+    // Canvas: setters are named as setters, and queries keep noun names.
+    let mut canvas = icmd::CanvasContext::new(2, 1).expect("2x1 canvas");
+    canvas.set_foreground(crossterm::style::Color::Red);
+    canvas.set_background(crossterm::style::Color::Blue);
+    canvas.set_attributes(crossterm::style::Attributes::default());
+    assert_eq!(canvas.foreground_color(), crossterm::style::Color::Red);
+    assert_eq!(canvas.background_color(), crossterm::style::Color::Blue);
+}

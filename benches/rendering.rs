@@ -184,7 +184,7 @@ fn pipeline_benches(c: &mut Criterion) {
                     "wrapped terminal content ".repeat(100)
                 ))
                 .wrap(TextWrap::Soft)
-                .with_style(style(|value| value.width /= Dimension::Cells(80)))
+                .layout_style(style(|value| value.width /= Dimension::Cells(80)))
                 .into()
             };
             let first = make_node("a");

@@ -56,6 +56,12 @@ pub struct CanvasContext {
 }
 
 impl CanvasContext {
+    // Public construction path for callers that draw without the component
+    // (tests, custom renderers). The default theme supplies the base colors.
+    pub fn new(width: u16, height: u16) -> Result<Self, CanvasError> {
+        Self::try_new(width, height, &Theme::default())
+    }
+
     fn try_new(width: u16, height: u16, theme: &Theme) -> Result<Self, CanvasError> {
         let blank = Cell::styled(
             theme.colors.foreground,
@@ -80,16 +86,46 @@ impl CanvasContext {
         self.image.height()
     }
 
-    pub fn foreground(&mut self, color: Color) {
+    // Setters are named as setters; the noun forms are queries in the rest of
+    // the API, so reusing them for mutation was ambiguous. The old names remain
+    // as deprecated aliases for one transition release.
+    pub fn set_foreground(&mut self, color: Color) {
         self.foreground = color;
     }
 
-    pub fn background(&mut self, color: Color) {
+    pub fn set_background(&mut self, color: Color) {
         self.background = color;
     }
 
-    pub fn attributes(&mut self, attributes: Attributes) {
+    pub fn set_attributes(&mut self, attributes: Attributes) {
         self.attributes = attributes;
+    }
+
+    pub fn foreground_color(&self) -> Color {
+        self.foreground
+    }
+
+    pub fn background_color(&self) -> Color {
+        self.background
+    }
+
+    pub fn cell_attributes(&self) -> Attributes {
+        self.attributes
+    }
+
+    #[deprecated(note = "use set_foreground")]
+    pub fn foreground(&mut self, color: Color) {
+        self.set_foreground(color);
+    }
+
+    #[deprecated(note = "use set_background")]
+    pub fn background(&mut self, color: Color) {
+        self.set_background(color);
+    }
+
+    #[deprecated(note = "use set_attributes")]
+    pub fn attributes(&mut self, attributes: Attributes) {
+        self.set_attributes(attributes);
     }
 
     pub fn set(&mut self, x: i32, y: i32, symbol: impl Into<String>) -> Result<(), CanvasError> {

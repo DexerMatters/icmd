@@ -121,15 +121,15 @@ fn overview(theme: &Theme, tick: usize) -> Node {
             }}>
                 <card style={|style| style.width /= Dimension::Percent(Percent::available(32))}>
                     {Text::new("24").foreground(theme.colors.primary).bold()}
-                    {Text::new("mounted nodes").style(theme.typography.muted.clone())}
+                    {Text::new("mounted nodes").text_style(theme.typography.muted.clone())}
                 </card>
                 <card style={|style| style.width /= Dimension::Percent(Percent::available(32))}>
                     {Text::new("99.9%").foreground(theme.colors.secondary).bold()}
-                    {Text::new("render uptime").style(theme.typography.muted.clone())}
+                    {Text::new("render uptime").text_style(theme.typography.muted.clone())}
                 </card>
                 <card style={|style| style.width /= Dimension::Percent(Percent::available(32))}>
                     {Text::new("0").foreground(theme.colors.accent).bold()}
-                    {Text::new("layout faults").style(theme.typography.muted.clone())}
+                    {Text::new("layout faults").text_style(theme.typography.muted.clone())}
                 </card>
             </view>
             <view style={|style| {
@@ -155,11 +155,11 @@ fn overview(theme: &Theme, tick: usize) -> Node {
                         <muted>"last 30 frames"</muted>
                     </view>
                     <canvas width={32} height={5} draw={Arc::new(move |drawing| {
-                        drawing.background(canvas_background);
+                        drawing.set_background(canvas_background);
                         drawing.clear().unwrap();
-                        drawing.foreground(canvas_grid);
+                        drawing.set_foreground(canvas_grid);
                         drawing.line(0, 4, 31, 4, "─").unwrap();
-                        drawing.foreground(canvas_accent);
+                        drawing.set_foreground(canvas_accent);
                         drawing.line(1, 3, 7, 1, "•").unwrap();
                         drawing.line(7, 1, 13, 3, "•").unwrap();
                         drawing.line(13, 3, 20, 0, "•").unwrap();
@@ -277,7 +277,7 @@ fn components_page(
                     <badge text="error" variant={BadgeVariant::Destructive} />
                     <skeleton width={20} />
                     {Text::new("A deliberately clipped status message")
-                        .with_style(icmd::style(|style| style.width /= Dimension::Cells(24)))
+                        .layout_style(icmd::style(|style| style.width /= Dimension::Cells(24)))
                         .overflow(TextOverflow::Ellipsis)}
                 </card>
             </view>
