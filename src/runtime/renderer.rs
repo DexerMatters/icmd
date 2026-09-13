@@ -269,6 +269,12 @@ pub struct Renderer {
     last: Vec<CellSlot>,
     scratch: Vec<CellSlot>,
     dirty: Vec<bool>,
+    // Which cells `dirty` currently marks, so it can be cleared in O(damage)
+    // instead of a viewport-wide fill every frame.
+    dirty_marks: Vec<(usize, Range<usize>)>,
+    // Counter: cells compared by the last frame encode. A one-cell patch must
+    // keep this bounded by damage, independent of viewport area.
+    cells_examined: u64,
     changed: Vec<bool>,
     damage: Vec<Damage>,
     // Damage is normalized into row spans before composition. `owners` stores
@@ -367,6 +373,8 @@ impl Renderer {
             last: cells,
             scratch: Vec::with_capacity(cell_count),
             dirty: vec![false; cell_count],
+            dirty_marks: Vec::new(),
+            cells_examined: 0,
             changed: vec![false; cell_count],
             damage: Vec::new(),
             damage_rows: vec![Vec::new(); usize::from(viewport.height)],
@@ -398,6 +406,17 @@ impl Renderer {
 
     // Structured, bounded observability for the image pipeline. Labels are
     // stage/kind only; no path or text content is exposed.
+    // Cells compared by the most recent frame encode, and the viewport size it
+    // was compared against. Bounded-cardinality renderer metrics.
+    pub fn take_cells_examined(&mut self) -> (u64, usize) {
+        let examined = self.cells_examined;
+        self.cells_examined = 0;
+        (
+            examined,
+            usize::from(self.viewport.width) * usize::from(self.viewport.height),
+        )
+    }
+
     pub fn image_metrics(&self) -> ImageMetrics {
         ImageMetrics {
             in_flight_bytes: self.image_manager.bytes_in_flight(),
@@ -1007,7 +1026,7 @@ impl Renderer {
     fn normalize_damage(&mut self, full: bool) {
         let width = usize::from(self.viewport.width);
         let height = usize::from(self.viewport.height);
-        self.dirty.fill(false);
+        self.clear_dirty_marks();
         if self.damage_rows.len() != height {
             self.damage_rows.clear();
             self.damage_rows.resize_with(height, Vec::new);
@@ -1050,9 +1069,63 @@ impl Renderer {
                 *row = merged;
             }
         }
+        let mut marks = std::mem::take(&mut self.dirty_marks);
+        marks.clear();
         for (line, spans) in self.damage_rows.iter().enumerate() {
             for span in spans {
                 self.dirty[line * width + span.start..line * width + span.end].fill(true);
+                marks.push((line, span.clone()));
+            }
+        }
+        self.dirty_marks = marks;
+    }
+
+    // Clear exactly the cells marked dirty for the previous attempt.
+    fn clear_dirty_marks(&mut self) {
+        if self.dirty_marks.is_empty() {
+            return;
+        }
+        let width = usize::from(self.viewport.width);
+        let marks = std::mem::take(&mut self.dirty_marks);
+        for (line, span) in &marks {
+            let start = line * width + span.start;
+            let end = (line * width + span.end).min(self.dirty.len());
+            if start < end {
+                self.dirty[start..end].fill(false);
+            }
+        }
+        self.dirty_marks = marks;
+        self.dirty_marks.clear();
+    }
+
+    // Copy the presented frame into the scratch buffer for every row this frame
+    // will read. Rows outside the damage are never inspected, so leaving them
+    // stale is free.
+    fn refresh_desired_rows(&self, desired: &mut [CellSlot]) {
+        let width = usize::from(self.viewport.width);
+        for (line, spans) in self.damage_rows.iter().enumerate() {
+            if spans.is_empty() {
+                continue;
+            }
+            let start = line * width;
+            let end = (start + width).min(self.last.len());
+            if start < end && end <= desired.len() {
+                desired[start..end].clone_from_slice(&self.last[start..end]);
+            }
+        }
+    }
+
+    // Apply only the rows that changed to the presented frame.
+    fn apply_desired_rows(&mut self, desired: &[CellSlot]) {
+        let width = usize::from(self.viewport.width);
+        for (line, spans) in self.damage_rows.iter().enumerate() {
+            if spans.is_empty() {
+                continue;
+            }
+            let start = line * width;
+            let end = (start + width).min(self.last.len());
+            if start < end && end <= desired.len() {
+                self.last[start..end].clone_from_slice(&desired[start..end]);
             }
         }
     }
@@ -1251,22 +1324,31 @@ impl Renderer {
                 cells: self.last.len(),
             });
         }
-        desired.clear();
-        desired.extend_from_slice(&self.last);
         self.normalize_damage(full_redraw);
+        // Refresh only the rows this frame will touch. The scratch buffer keeps
+        // a mirror of the presented frame for every row it is about to read, so
+        // a one-cell change no longer copies the entire viewport. A viewport
+        // change or full redraw touches every row and therefore rebuilds it.
+        if desired.len() != self.last.len() {
+            desired.clear();
+            desired.extend_from_slice(&self.last);
+        } else {
+            self.refresh_desired_rows(&mut desired);
+        }
         self.compose_damage(&mut desired);
         let ansi = match encode_diff(
             &self.last,
             &desired,
             self.viewport,
-            &self.dirty,
+            &self.damage_rows,
             full_redraw,
             self.emoji_merging,
             &mut self.changed,
+            &mut self.cells_examined,
         ) {
             Ok(ansi) => ansi,
             Err(error) => {
-                self.dirty.fill(false);
+                self.clear_dirty_marks();
                 self.scratch = desired;
                 return Err(error);
             }
@@ -1296,9 +1378,12 @@ impl Renderer {
                 requested: total,
             });
         }
-        std::mem::swap(&mut self.last, &mut desired);
+        // Apply only the rows that changed, then keep the composed buffer as
+        // scratch. Non-damaged rows of the scratch buffer are refreshed from
+        // the presented frame before they are next read.
+        self.apply_desired_rows(&desired);
         self.scratch = desired;
-        self.dirty.fill(false);
+        self.clear_dirty_marks();
         self.damage.clear();
         self.full_redraw = false;
         if self.symbols_for_native {
@@ -1918,14 +2003,16 @@ fn unreliable_advancement(cell: &Cell, merging: EmojiMerging) -> bool {
             .any(crate::data::is_emoji_sequence_mark)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_diff(
     old: &[CellSlot],
     desired: &[CellSlot],
     viewport: Size,
-    dirty: &[bool],
+    damage_rows: &[Vec<Range<usize>>],
     full: bool,
     merging: EmojiMerging,
     changed: &mut Vec<bool>,
+    cells_examined: &mut u64,
 ) -> Result<Option<String>, FrameError> {
     let width = viewport.width as usize;
     let height = viewport.height as usize;
@@ -1938,18 +2025,48 @@ fn encode_diff(
             cells: desired.len(),
         });
     }
-    changed.clear();
-    changed.resize(desired.len(), full);
-    if !full {
-        for index in 0..desired.len() {
-            if dirty.get(index).copied().unwrap_or(false) && old[index] != desired[index] {
-                mark_footprint(changed, index, &old[index]);
-                mark_footprint(changed, index, &desired[index]);
+    if full {
+        changed.clear();
+        changed.resize(desired.len(), true);
+        *cells_examined = cells_examined.saturating_add(desired.len() as u64);
+    } else {
+        // Clear and re-scan only the rows this frame touches. A one-cell patch
+        // therefore examines a handful of cells, not the whole viewport.
+        if changed.len() != desired.len() {
+            changed.clear();
+            changed.resize(desired.len(), false);
+        } else {
+            for (line, spans) in damage_rows.iter().enumerate() {
+                if spans.is_empty() {
+                    continue;
+                }
+                let start = line * width;
+                let end = (start + width).min(desired.len());
+                if start < end {
+                    changed[start..end].fill(false);
+                }
             }
         }
-    }
-    if !full && !changed.iter().any(|value| *value) {
-        return Ok(None);
+        let mut any = false;
+        for (line, spans) in damage_rows.iter().enumerate() {
+            for span in spans {
+                for column in span.clone() {
+                    let index = line * width + column;
+                    if index >= desired.len() {
+                        continue;
+                    }
+                    *cells_examined = cells_examined.saturating_add(1);
+                    if old[index] != desired[index] {
+                        mark_footprint(changed, index, &old[index]);
+                        mark_footprint(changed, index, &desired[index]);
+                        any = true;
+                    }
+                }
+            }
+        }
+        if !any {
+            return Ok(None);
+        }
     }
     let changed_count = changed.iter().filter(|value| **value).count();
     let mut output = String::new();
@@ -2185,6 +2302,7 @@ impl PipelineComponent for ChannelRenderer {
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)] // Damage rows are spans by design.
 mod tests {
     use super::*;
 
@@ -2206,10 +2324,11 @@ mod tests {
             &old,
             &desired,
             Size::new(4, 1),
-            &[true, true, true, false],
+            &[vec![0..4]],
             false,
             EmojiMerging::Merge,
             &mut changed,
+            &mut 0u64,
         )
         .unwrap()
         .unwrap();
@@ -2241,10 +2360,11 @@ mod tests {
                 &old,
                 &desired,
                 Size::new(6, 1),
-                &[true; 6],
+                &[vec![0..6]],
                 false,
                 EmojiMerging::Merge,
                 &mut changed,
+                &mut 0u64,
             )
             .unwrap()
             .unwrap();
@@ -2269,10 +2389,11 @@ mod tests {
                 &old,
                 &desired,
                 Size::new(6, 1),
-                &[true; 6],
+                &[vec![0..6]],
                 false,
                 EmojiMerging::Merge,
                 &mut changed,
+                &mut 0u64,
             )
             .unwrap()
             .unwrap();
@@ -2303,10 +2424,11 @@ mod tests {
             &old,
             &desired,
             Size::new(6, 1),
-            &[true; 6],
+            &[vec![0..6]],
             false,
             EmojiMerging::Separate,
             &mut changed,
+            &mut 0u64,
         )
         .unwrap()
         .unwrap();
@@ -2334,10 +2456,11 @@ mod tests {
             &old,
             &desired,
             Size::new(4, 1),
-            &[true, true, true, true],
+            &[vec![0..4]],
             false,
             EmojiMerging::Merge,
             &mut changed,
+            &mut 0u64,
         )
         .unwrap()
         .unwrap();

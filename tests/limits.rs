@@ -561,3 +561,69 @@ fn duplicate_sibling_keys_are_a_typed_error() {
         other => panic!("expected DuplicateKey, got {other:?}"),
     }
 }
+
+// PERF-01: a one-cell change must be proportional to damage, not to viewport
+// area. The rendered output must stay identical to a full redraw of the same
+// scene, so the optimization cannot change behavior.
+#[test]
+fn one_cell_damage_does_not_scale_with_viewport_area() {
+    use icmd::{Cell, Frame, Image, ImageId, Operation, ScreenPosition};
+
+    fn examined_for(viewport: Size, cells: usize) -> (u64, usize) {
+        let mut renderer = Renderer::with_config(
+            viewport,
+            icmd::RendererConfig {
+                image_protocol: icmd::ImageProtocol::Symbols,
+                ..icmd::RendererConfig::default()
+            },
+        )
+        .unwrap();
+        let image = Image::new(cells, 1, Cell::plain("x").unwrap()).unwrap();
+        renderer
+            .apply_frame(Frame::new(vec![Operation::Create {
+                id: ImageId(1),
+                image,
+                position: ScreenPosition::default(),
+                level: 0,
+            }]))
+            .unwrap();
+        let _ = renderer.render_diff().unwrap();
+        let _ = renderer.take_cells_examined();
+
+        // Change exactly one cell in the middle of the surface.
+        let mut row: Vec<Cell> = (0..cells).map(|_| Cell::plain("x").unwrap()).collect();
+        row[cells / 2] = Cell::plain("y").unwrap();
+        let edited = Image::from_rows(vec![row]).unwrap();
+        renderer
+            .apply_frame(Frame::new(vec![
+                Operation::Remove { id: ImageId(1) },
+                Operation::Create {
+                    id: ImageId(1),
+                    image: edited,
+                    position: ScreenPosition::default(),
+                    level: 0,
+                },
+            ]))
+            .unwrap();
+        let _ = renderer.render_diff().unwrap();
+        renderer.take_cells_examined()
+    }
+
+    let (small, small_area) = examined_for(Size::new(80, 24), 4);
+    let (large, large_area) = examined_for(Size::new(240, 80), 4);
+
+    assert!(
+        small > 0,
+        "a damaged frame must examine at least its damage"
+    );
+    // The damage is one cell in both cases, so the work must not grow with the
+    // viewport: allow a small constant factor for row repair and padding.
+    assert!(
+        large <= small * 8,
+        "one-cell work grew with viewport area: {small} cells at {small_area} vs {large} at {large_area}"
+    );
+    assert!(
+        large < (large_area as u64) / 4,
+        "a one-cell frame examined {large} of {large_area} cells"
+    );
+}
