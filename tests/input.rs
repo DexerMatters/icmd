@@ -11,16 +11,17 @@ use std::{
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use icmd::advanced::{Commit, EventDispatcher, Lower, Renderer, Runtime};
 use icmd::{
-    Attr, Commit, Component, ComponentContext, EventDispatcher, EventListener, Lower, Node, Props,
-    RawInputMode, RawInputProps, Renderer, Runtime, Size, TextValueEvent, raw_input,
+    Attr, Component, ComponentContext, EventListener, Node, Props, RawInputMode, RawInputProps,
+    Size, TextValueEvent, raw_input,
 };
 
 fn pipeline(
     viewport: Size,
 ) -> (
     crossbeam_channel::Sender<Node>,
-    crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+    crossbeam_channel::Receiver<Result<String, icmd::advanced::FrameError>>,
     EventDispatcher,
 ) {
     let (commit, _, dispatcher) = Commit::new_with_events(viewport);
@@ -37,7 +38,7 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
 
 /// Wait for the pipeline to settle, dispatch one event, and settle again.
 fn interact(
-    output: &crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+    output: &crossbeam_channel::Receiver<Result<String, icmd::advanced::FrameError>>,
     dispatcher: &EventDispatcher,
     event: Option<Event>,
 ) {
@@ -1052,7 +1053,7 @@ fn the_caret_is_painted_at_every_row_end() {
 
 /// Drain every pending frame and return the concatenated raw stream.
 fn collect_frames(
-    output: &crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+    output: &crossbeam_channel::Receiver<Result<String, icmd::advanced::FrameError>>,
     dispatcher: &EventDispatcher,
     event: Option<Event>,
 ) -> String {

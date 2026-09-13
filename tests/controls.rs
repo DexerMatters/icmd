@@ -10,17 +10,18 @@ use std::time::Duration;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use icmd::advanced::{Commit, Lower, Renderer, Runtime};
 use icmd::{
-    Attr, ButtonProps, CheckboxProps, Commit, Component, EventListener, Lower, Node, RadioProps,
-    Renderer, Runtime, Size, SwitchProps, button, checkbox, radio, switch,
+    Attr, ButtonProps, CheckboxProps, Component, EventListener, Node, RadioProps, Size,
+    SwitchProps, button, checkbox, radio, switch,
 };
 
 fn pipeline(
     viewport: Size,
 ) -> (
     crossbeam_channel::Sender<Node>,
-    crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
-    icmd::EventDispatcher,
+    crossbeam_channel::Receiver<Result<String, icmd::advanced::FrameError>>,
+    icmd::advanced::EventDispatcher,
 ) {
     let (commit, _, dispatcher) = Commit::new_with_events(viewport);
     let runtime = Runtime::new(Lower::default())
@@ -30,7 +31,7 @@ fn pipeline(
     (runtime.input(), runtime.output(), dispatcher)
 }
 
-fn click(dispatcher: &icmd::EventDispatcher, column: u16, row: u16) {
+fn click(dispatcher: &icmd::advanced::EventDispatcher, column: u16, row: u16) {
     for kind in [
         MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
@@ -44,7 +45,7 @@ fn click(dispatcher: &icmd::EventDispatcher, column: u16, row: u16) {
     }
 }
 
-fn key(dispatcher: &icmd::EventDispatcher, code: KeyCode) {
+fn key(dispatcher: &icmd::advanced::EventDispatcher, code: KeyCode) {
     dispatcher.dispatch(Event::Key(KeyEvent::new_with_kind(
         code,
         KeyModifiers::empty(),
@@ -55,8 +56,8 @@ fn key(dispatcher: &icmd::EventDispatcher, code: KeyCode) {
 struct Harness {
     // Held so the pipeline stays open for the lifetime of the test.
     _input: crossbeam_channel::Sender<Node>,
-    output: crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
-    dispatcher: icmd::EventDispatcher,
+    output: crossbeam_channel::Receiver<Result<String, icmd::advanced::FrameError>>,
+    dispatcher: icmd::advanced::EventDispatcher,
 }
 
 impl Harness {

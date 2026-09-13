@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use crossbeam_channel::select;
 use crossbeam_channel::{Receiver, Sender};
-use icmd::{
-    Commit, Lower, Node, PipelineComponent, Renderer, ResourceLimits, Runtime, RuntimeError,
-    ShutdownPolicy, Size, Stage,
+use icmd::advanced::{
+    Commit, Lower, PipelineComponent, Renderer, ResourceLimits, Runtime, RuntimeError,
+    ShutdownPolicy, Stage,
 };
+use icmd::{Node, Size};
 
 fn leaf() -> Node {
     Node::element(icmd::DomProps::default(), [])
@@ -73,7 +74,7 @@ fn tree_exactly_at_the_limits_renders() {
 fn tree_one_node_over_the_limit_is_rejected() {
     let outcome = run_once(limits(3, 1_000), nested(3));
     match outcome {
-        Err(RuntimeError::Lower(icmd::LowerError::TreeTooLarge { limit, observed })) => {
+        Err(RuntimeError::Lower(icmd::advanced::LowerError::TreeTooLarge { limit, observed })) => {
             assert_eq!(limit, 3);
             assert_eq!(observed, 4);
         }
@@ -85,7 +86,7 @@ fn tree_one_node_over_the_limit_is_rejected() {
 fn tree_over_the_depth_limit_returns_a_typed_error() {
     let outcome = run_once(limits(1_000, 4), nested(5));
     match outcome {
-        Err(RuntimeError::Lower(icmd::LowerError::TreeTooDeep { limit, .. })) => {
+        Err(RuntimeError::Lower(icmd::advanced::LowerError::TreeTooDeep { limit, .. })) => {
             assert_eq!(limit, 4);
         }
         other => panic!("expected TreeTooDeep, got {other:?}"),
@@ -97,7 +98,7 @@ fn tree_over_the_node_limit_returns_a_typed_error() {
     // Root plus 16 children is 17 nodes.
     let outcome = run_once(limits(10, 1_000), wide(16));
     match outcome {
-        Err(RuntimeError::Lower(icmd::LowerError::TreeTooLarge { limit, observed })) => {
+        Err(RuntimeError::Lower(icmd::advanced::LowerError::TreeTooLarge { limit, observed })) => {
             assert_eq!(limit, 10);
             assert!(observed >= 11);
         }
@@ -123,7 +124,9 @@ fn a_rejected_tree_leaves_the_worker_alive() {
     let rejected = errors.recv_timeout(Duration::from_secs(2));
     assert!(matches!(
         rejected,
-        Ok(RuntimeError::Lower(icmd::LowerError::TreeTooLarge { .. }))
+        Ok(RuntimeError::Lower(
+            icmd::advanced::LowerError::TreeTooLarge { .. }
+        ))
     ));
 
     // A subsequent valid root still renders on the same worker.
@@ -158,10 +161,10 @@ fn shutdown_joins_all_workers() {
     // The live-worker counter is global and other tests run concurrently, so
     // wait for the process-wide count to fall back to its baseline rather than
     // asserting an exact transient value.
-    let before = icmd::live_worker_count();
+    let before = icmd::advanced::live_worker_count();
     let mut settled = false;
     for _ in 0..400 {
-        if icmd::live_worker_count() <= before {
+        if icmd::advanced::live_worker_count() <= before {
             settled = true;
             break;
         }
@@ -317,7 +320,7 @@ fn zero_resource_limits_are_rejected() {
 // above the configured in-flight byte budget.
 #[test]
 fn image_byte_budget_is_concurrency_safe() {
-    use icmd::ResourceLimits;
+    use icmd::advanced::ResourceLimits;
     // The budget is private to the manager, so this exercises the public
     // contract instead: a tiny in-flight budget plus a real decode still
     // completes and reports a bounded in-flight count.
@@ -334,9 +337,9 @@ fn image_byte_budget_is_concurrency_safe() {
     limits.validate().unwrap();
     let renderer = Renderer::with_config(
         viewport,
-        icmd::RendererConfig {
+        icmd::advanced::RendererConfig {
             limits,
-            ..icmd::RendererConfig::default()
+            ..icmd::advanced::RendererConfig::default()
         },
     )
     .unwrap();
@@ -357,16 +360,16 @@ fn renderer_rejects_a_cell_size_that_cannot_meet_the_transform_budget() {
     };
     let error = Renderer::with_config(
         Size::new(8, 4),
-        icmd::RendererConfig {
+        icmd::advanced::RendererConfig {
             cell_pixel_size: Some(Size::new(8, 16)),
             limits,
-            ..icmd::RendererConfig::default()
+            ..icmd::advanced::RendererConfig::default()
         },
     )
     .err()
     .expect("an impossible cell size must be rejected before allocation");
     assert!(
-        matches!(error, icmd::FrameError::Config { .. }),
+        matches!(error, icmd::advanced::FrameError::Config { .. }),
         "got {error:?}"
     );
 }
@@ -375,15 +378,15 @@ fn renderer_rejects_a_cell_size_that_cannot_meet_the_transform_budget() {
 fn zero_cell_pixel_size_is_rejected() {
     let error = Renderer::with_config(
         Size::new(8, 4),
-        icmd::RendererConfig {
+        icmd::advanced::RendererConfig {
             cell_pixel_size: Some(Size::new(0, 16)),
-            ..icmd::RendererConfig::default()
+            ..icmd::advanced::RendererConfig::default()
         },
     )
     .err()
     .expect("a zero cell pixel width must be rejected");
     assert!(
-        matches!(error, icmd::FrameError::Config { .. }),
+        matches!(error, icmd::advanced::FrameError::Config { .. }),
         "got {error:?}"
     );
 }
@@ -403,9 +406,9 @@ fn an_over_budget_frame_writes_nothing_and_keeps_presented_state() {
     limits.validate().unwrap();
     let mut renderer = Renderer::with_config(
         viewport,
-        icmd::RendererConfig {
+        icmd::advanced::RendererConfig {
             limits,
-            ..icmd::RendererConfig::default()
+            ..icmd::advanced::RendererConfig::default()
         },
     )
     .unwrap();
@@ -422,7 +425,7 @@ fn an_over_budget_frame_writes_nothing_and_keeps_presented_state() {
         .render_diff()
         .expect_err("an over-budget frame must fail before writing");
     assert!(
-        matches!(error, icmd::FrameError::OutputTooLarge { .. }),
+        matches!(error, icmd::advanced::FrameError::OutputTooLarge { .. }),
         "got {error:?}"
     );
 
@@ -557,7 +560,9 @@ fn duplicate_sibling_keys_are_a_typed_error() {
     let node = Node::element(DomProps::default(), [child("dup"), child("dup")]);
     let outcome = run_once(ResourceLimits::default(), node);
     match outcome {
-        Err(RuntimeError::Lower(icmd::LowerError::DuplicateKey { key })) => assert_eq!(key, "dup"),
+        Err(RuntimeError::Lower(icmd::advanced::LowerError::DuplicateKey { key })) => {
+            assert_eq!(key, "dup")
+        }
         other => panic!("expected DuplicateKey, got {other:?}"),
     }
 }
@@ -572,9 +577,9 @@ fn one_cell_damage_does_not_scale_with_viewport_area() {
     fn examined_for(viewport: Size, cells: usize) -> (u64, usize) {
         let mut renderer = Renderer::with_config(
             viewport,
-            icmd::RendererConfig {
+            icmd::advanced::RendererConfig {
                 image_protocol: icmd::ImageProtocol::Symbols,
-                ..icmd::RendererConfig::default()
+                ..icmd::advanced::RendererConfig::default()
             },
         )
         .unwrap();
@@ -633,7 +638,8 @@ fn one_cell_damage_does_not_scale_with_viewport_area() {
 // tree; it records the current counts so a regression is a test failure.
 #[test]
 fn layout_visits_stay_linear_in_node_count() {
-    use icmd::{Commit, DomProps, Lower, Node, Renderer, Runtime, ShutdownPolicy};
+    use icmd::advanced::{Commit, Lower, Renderer, Runtime, ShutdownPolicy};
+    use icmd::{DomProps, Node};
     use std::time::Duration;
 
     fn chain(depth: usize) -> NumberedTree {

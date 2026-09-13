@@ -4,15 +4,16 @@
 
 use std::{sync::Arc, thread, time::Duration};
 
+use icmd::advanced::{Commit, Lower, Renderer, RendererConfig, Runtime};
 use icmd::{
-    Attr, Cell, Commit, Component, Dimension, DomProps, Frame, Image, ImageMode, ImageProtocol,
-    ImageSource, ImageUpdatePolicy, Layout, Lower, Node, Operation, RasterImage, RasterImageError,
-    RasterPlacement, Renderer, RendererConfig, Runtime, Size, Style, canvas, raster_image, ui,
+    Attr, Cell, Component, Dimension, DomProps, Frame, Image, ImageMode, ImageProtocol,
+    ImageSource, ImageUpdatePolicy, Layout, Node, Operation, RasterImage, RasterImageError,
+    RasterPlacement, Size, Style, canvas, raster_image, ui,
 };
 
 fn render(node: Node) -> String {
-    let (commit, _) = icmd::Commit::new(Size::new(8, 4));
-    let (input, output) = Runtime::new(icmd::Lower::default())
+    let (commit, _) = icmd::advanced::Commit::new(Size::new(8, 4));
+    let (input, output) = Runtime::new(icmd::advanced::Lower::default())
         .then(commit)
         .then(
             Renderer::with_config(
@@ -655,7 +656,7 @@ fn adaptive_sixel_uses_symbols_until_the_scene_settles() {
 // submits raw operation batches rather than lowering a widget tree.
 fn validation_pipeline() -> (
     crossbeam_channel::Sender<Frame>,
-    crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+    crossbeam_channel::Receiver<Result<String, icmd::advanced::FrameError>>,
 ) {
     let viewport = Size::new(8, 4);
     let runtime = Runtime::new(
@@ -712,10 +713,10 @@ fn cell_patches_targeting_a_raster_surface_are_rejected() {
     assert!(
         matches!(
             error,
-            icmd::FrameError::WrongSurface {
+            icmd::advanced::FrameError::WrongSurface {
                 operation: 0,
-                expected: icmd::SurfaceKind::Cells,
-                actual: icmd::SurfaceKind::Raster,
+                expected: icmd::advanced::SurfaceKind::Cells,
+                actual: icmd::advanced::SurfaceKind::Raster,
                 ..
             }
         ),
@@ -749,10 +750,10 @@ fn raster_clips_targeting_a_cell_surface_are_rejected() {
     assert!(
         matches!(
             error,
-            icmd::FrameError::WrongSurface {
+            icmd::advanced::FrameError::WrongSurface {
                 operation: 0,
-                expected: icmd::SurfaceKind::Raster,
-                actual: icmd::SurfaceKind::Cells,
+                expected: icmd::advanced::SurfaceKind::Raster,
+                actual: icmd::advanced::SurfaceKind::Cells,
                 ..
             }
         ),
@@ -785,7 +786,7 @@ fn use_after_remove_and_duplicate_create_report_operation_indexes() {
         .expect("expected a validation error")
         .expect_err("use after remove must not render");
     assert!(
-        matches!(error, icmd::FrameError::UnknownImage(id) if id == icmd::ImageId(1)),
+        matches!(error, icmd::advanced::FrameError::UnknownImage(id) if id == icmd::ImageId(1)),
         "got {error:?}"
     );
 
@@ -811,7 +812,7 @@ fn use_after_remove_and_duplicate_create_report_operation_indexes() {
         .expect("expected a validation error")
         .expect_err("a duplicate create must not render");
     assert!(
-        matches!(error, icmd::FrameError::DuplicateImage(id) if id == icmd::ImageId(2)),
+        matches!(error, icmd::advanced::FrameError::DuplicateImage(id) if id == icmd::ImageId(2)),
         "got {error:?}"
     );
 }
@@ -864,7 +865,10 @@ fn an_invalid_batch_leaves_the_previous_frame_intact() {
         .recv_timeout(Duration::from_secs(1))
         .expect("expected a validation error")
         .expect_err("the batch must be rejected as a whole");
-    assert!(matches!(error, icmd::FrameError::WrongSurface { .. }));
+    assert!(matches!(
+        error,
+        icmd::advanced::FrameError::WrongSurface { .. }
+    ));
 
     // A later valid patch on the original surface still works, proving the
     // rejected batch did not partially mutate retained state.

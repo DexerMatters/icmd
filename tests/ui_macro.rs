@@ -5,10 +5,11 @@ use std::sync::{
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use icmd::advanced::{Commit, Lower, Renderer, Runtime};
 #[allow(unused_imports)]
 use icmd::{
-    Attr, Commit, Component, ComponentContext, Lower, Node, Props, Renderer, Runtime, StateSetter,
-    button, checkbox, column, heading, progress_bar, ui, view,
+    Attr, Component, ComponentContext, Node, Props, StateSetter, button, checkbox, column, heading,
+    progress_bar, ui, view,
 };
 
 fn render_node(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
@@ -83,8 +84,8 @@ fn macro_event_attribute_is_dispatched() {
             "Go"
         </button>
     };
-    let (commit, _, dispatcher) = icmd::Commit::new_with_events(icmd::Size::new(8, 2));
-    let (input, output) = icmd::Runtime::new(icmd::Lower::default())
+    let (commit, _, dispatcher) = icmd::advanced::Commit::new_with_events(icmd::Size::new(8, 2));
+    let (input, output) = icmd::advanced::Runtime::new(icmd::advanced::Lower::default())
         .then(commit)
         .start();
     input.send(node).unwrap();

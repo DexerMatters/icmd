@@ -1,6 +1,7 @@
 #[cfg(not(feature = "native-raster"))]
-use icmd::FrameError;
-use icmd::{ImageProtocol, Renderer, RendererConfig, Size, SurfaceKind};
+use icmd::advanced::FrameError;
+use icmd::advanced::{Renderer, RendererConfig, SurfaceKind};
+use icmd::{ImageProtocol, Size};
 
 // SAF-13: the renderer holds no foreign pointer after terminal detection, so it
 // is `Send` by construction. This assertion would fail to compile if a raw

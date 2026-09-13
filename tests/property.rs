@@ -18,9 +18,10 @@ fn rng(seed: u64) -> impl FnMut() -> u64 {
 
 mod frames {
     use super::rng;
+    use icmd::advanced::{FrameError, Renderer};
     use icmd::{
-        Cell, CellEdit, Frame, FrameError, Image, ImageId, ImagePosition, Operation, RasterImage,
-        RasterPlacement, Rect, Renderer, ScreenPosition, Size,
+        Cell, CellEdit, Frame, Image, ImageId, ImagePosition, Operation, RasterImage,
+        RasterPlacement, Rect, ScreenPosition, Size,
     };
 
     fn cell(symbol: &str) -> Cell {
@@ -97,9 +98,9 @@ mod frames {
             let mut rng = rng(seed);
             let mut renderer = Renderer::with_config(
                 Size::new(6, 3),
-                icmd::RendererConfig {
+                icmd::advanced::RendererConfig {
                     image_protocol: icmd::ImageProtocol::Symbols,
-                    ..icmd::RendererConfig::default()
+                    ..icmd::advanced::RendererConfig::default()
                 },
             )
             .expect("renderer");
@@ -144,9 +145,9 @@ mod frames {
     fn a_valid_frame_after_a_rejected_one_still_renders() {
         let mut renderer = Renderer::with_config(
             Size::new(6, 3),
-            icmd::RendererConfig {
+            icmd::advanced::RendererConfig {
                 image_protocol: icmd::ImageProtocol::Symbols,
-                ..icmd::RendererConfig::default()
+                ..icmd::advanced::RendererConfig::default()
             },
         )
         .expect("renderer");
@@ -181,7 +182,8 @@ mod frames {
 
 mod trees {
     use super::rng;
-    use icmd::{DomProps, Node, ResourceLimits, RuntimeError};
+    use icmd::advanced::{ResourceLimits, RuntimeError};
+    use icmd::{DomProps, Node};
 
     fn leaf() -> Node {
         Node::element(DomProps::default(), Vec::<Node>::new())
@@ -253,7 +255,9 @@ mod trees {
                     ..ResourceLimits::default()
                 };
                 match render_with(tight, shape.node) {
-                    Err(RuntimeError::Lower(icmd::LowerError::TreeTooLarge { .. })) => {}
+                    Err(RuntimeError::Lower(icmd::advanced::LowerError::TreeTooLarge {
+                        ..
+                    })) => {}
                     other => panic!("seed {seed}: expected TreeTooLarge, got {other:?}"),
                 }
             }
@@ -261,7 +265,8 @@ mod trees {
     }
 
     fn render_with(limits: ResourceLimits, node: Node) -> Result<String, RuntimeError> {
-        use icmd::{Commit, Lower, Renderer, Runtime, ShutdownPolicy, Size};
+        use icmd::Size;
+        use icmd::advanced::{Commit, Lower, Renderer, Runtime, ShutdownPolicy};
         use std::time::Duration;
 
         let viewport = Size::new(8, 2);
@@ -278,15 +283,15 @@ mod trees {
         // channel, a success on the output channel.
         let result = crossbeam_channel::select! {
             recv(errors) -> error => Err(error.unwrap_or(RuntimeError::StageClosed {
-                stage: icmd::Stage::Lower,
+                stage: icmd::advanced::Stage::Lower,
             })),
             recv(output) -> frame => match frame {
                 Ok(Ok(frame)) => Ok(frame),
                 Ok(Err(error)) => Err(RuntimeError::Frame(error)),
-                Err(_) => Err(RuntimeError::StageClosed { stage: icmd::Stage::Renderer }),
+                Err(_) => Err(RuntimeError::StageClosed { stage: icmd::advanced::Stage::Renderer }),
             },
             default(Duration::from_secs(5)) => Err(RuntimeError::StageClosed {
-                stage: icmd::Stage::Renderer,
+                stage: icmd::advanced::Stage::Renderer,
             }),
         };
         drop(input);

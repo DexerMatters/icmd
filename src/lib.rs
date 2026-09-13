@@ -53,13 +53,6 @@ pub use raster::{
     ImageAlign, ImageFit, ImageLoading, ImageMode, ImageProtocol, ImageRenderOptions, ImageSource,
     ImageUpdatePolicy, RasterImage, RasterImageError, RasterPlacement,
 };
-pub use runtime::{
-    ChannelRenderer, Commit, CommitConfig, ConfigError, DispatchOutcome, EventDispatcher,
-    FocusError, FocusOutcome, FrameError, ImageMetrics, ImageResource, LayoutInstrument,
-    LimitError, Lower, LowerError, PipelineComponent, Renderer, RendererConfig,
-    RendererConfigError, ResourceLimits, Runtime, RuntimeError, RuntimeHandle, ShutdownPolicy,
-    Stage, SurfaceKind, ViewportSetter, live_worker_count,
-};
 
 pub mod prelude {
     pub use crate::{
@@ -97,11 +90,12 @@ pub mod style {
 }
 
 pub mod events {
-    pub use crate::{
-        DispatchOutcome, EventHandlers, EventListener, FocusError, FocusEvent, FocusOutcome,
-        KeyboardEvent, PasteEvent, PointerButton, PointerEvent, PointerEventKind, PointerId,
-        PointerType, ResizeEvent, ScrollEvent, TerminalFocusEvent, WheelEvent,
+    pub use crate::basic::{
+        EventHandlers, EventListener, FocusEvent, KeyboardEvent, PasteEvent, PointerButton,
+        PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent, ScrollEvent,
+        TerminalFocusEvent, WheelEvent,
     };
+    pub use crate::runtime::{DispatchOutcome, FocusError, FocusOutcome};
     // Raw terminal event types, for applications that read the event stream.
     pub use crossterm::event::{KeyEvent, MouseEvent};
 }
@@ -120,12 +114,16 @@ pub mod image {
 // Explicitly advanced tier: renderer protocol, runtime ownership, and raw
 // frame operations. A high-level application should not need to import this.
 pub mod advanced {
-    pub use crate::{
-        Cell, CellEdit, CellError, Commit, CommitConfig, DomNode, DomProps, EventDispatcher, Frame,
-        FrameError, ImageId, ImageMetrics, ImageResource, LimitError, Lower, LowerError, Operation,
-        PipelineComponent, Rect, Renderer, RendererConfig, ResourceLimits, Runtime, RuntimeError,
-        RuntimeHandle, ScreenPosition, ShutdownPolicy, Size, Stage, SurfaceKind, ViewportSetter,
-        live_worker_count,
+    pub use crate::basic::DomNode;
+    pub use crate::data::{
+        Cell, CellEdit, CellError, Frame, ImageId, Operation, Rect, ScreenPosition, Size,
+    };
+    pub use crate::runtime::{
+        ChannelRenderer, Commit, CommitConfig, ConfigError, DispatchOutcome, EventDispatcher,
+        FocusError, FocusOutcome, FrameError, ImageMetrics, ImageResource, LayoutInstrument,
+        LimitError, Lower, LowerError, PipelineComponent, Renderer, RendererConfig,
+        RendererConfigError, ResourceLimits, Runtime, RuntimeError, RuntimeHandle, ShutdownPolicy,
+        Stage, SurfaceKind, ViewportSetter, live_worker_count,
     };
 
     // The terminal-cell surface keeps its historical `Image` name at the root

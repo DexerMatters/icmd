@@ -7,9 +7,9 @@ use std::time::Duration;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use icmd::advanced::{Commit, Lower, Runtime};
 use icmd::{
-    Commit, Component, ComponentContext, Dimension, EventListener, Layout, Lower, Node, Props,
-    Runtime, Size, ui, view,
+    Component, ComponentContext, Dimension, EventListener, Layout, Node, Props, Size, ui, view,
 };
 
 fn root(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
@@ -221,7 +221,7 @@ fn deep_key_routing_scales_with_depth_not_region_count() {
     );
 
     drop(input);
-    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
 }
 
 #[test]
@@ -275,13 +275,14 @@ fn programmatic_focus_is_checked_and_rejects_unknown_targets() {
     assert!(
         matches!(
             outcome,
-            Err(icmd::FocusError::UnknownTarget(_) | icmd::FocusError::NotFocusable(_))
+            Err(icmd::advanced::FocusError::UnknownTarget(_)
+                | icmd::advanced::FocusError::NotFocusable(_))
         ),
         "an unfocusable root must be rejected: {outcome:?}"
     );
 
     drop(input);
-    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
 }
 
 #[test]
@@ -329,11 +330,11 @@ fn focus_transitions_report_a_structured_outcome() {
     let id = dispatcher.focused().expect("a focused region");
     assert!(matches!(
         dispatcher.try_focus(id),
-        Err(icmd::FocusError::AlreadyFocused(_))
+        Err(icmd::advanced::FocusError::AlreadyFocused(_))
     ));
 
     drop(input);
-    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
 }
 
 // API-04: every event family shares one propagation frame, so pointer and wheel
@@ -397,7 +398,7 @@ fn pointer_events_can_stop_propagation() {
     );
 
     drop(input);
-    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
 }
 
 #[test]
@@ -444,7 +445,7 @@ fn keyboard_events_can_prevent_the_default_action() {
     assert!(outcome.default_prevented, "{outcome:?}");
 
     drop(input);
-    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
 }
 
 #[test]
@@ -495,5 +496,5 @@ fn wheel_scrolling_is_restored_when_default_is_prevented() {
     );
 
     drop(input);
-    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
 }

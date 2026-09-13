@@ -10,18 +10,19 @@ use crossbeam_channel::{Receiver, Sender};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use icmd::advanced::{Commit, Lower, Renderer, Runtime};
 use icmd::{
-    Attr, Commit, Component, ComponentContext, Dimension, Layout, Lower, Node, Overflow, Props,
-    Renderer, Runtime, ScrollAreaProps, ScrollAxes, ScrollEvent, ScrollOffset, ScrollbarVisibility,
-    Size, StateSetter, scroll_area, text,
+    Attr, Component, ComponentContext, Dimension, Layout, Node, Overflow, Props, ScrollAreaProps,
+    ScrollAxes, ScrollEvent, ScrollOffset, ScrollbarVisibility, Size, StateSetter, scroll_area,
+    text,
 };
 
 fn render_pipeline(
     viewport: Size,
 ) -> (
     Sender<Node>,
-    Receiver<Result<String, icmd::FrameError>>,
-    icmd::EventDispatcher,
+    Receiver<Result<String, icmd::advanced::FrameError>>,
+    icmd::advanced::EventDispatcher,
 ) {
     let (commit, _, dispatcher) = Commit::new_with_events(viewport);
     let (input, output) = Runtime::new(Lower::default())

@@ -691,7 +691,7 @@ pub(crate) fn render_rgba_with_cell_size(
     let mut full: Vec<u8> = Vec::new();
     full.try_reserve_exact(bytes).map_err(|_| {
         RasterImageError::limit(LimitError::Exceeded {
-            resource: crate::ImageResource::TransformPixels,
+            resource: crate::runtime::limits::ImageResource::TransformPixels,
             limit: limits.max_transform_pixels,
             requested: bytes as u64,
         })
@@ -934,7 +934,7 @@ mod limit_tests {
             matches!(
                 error,
                 RasterImageError::Limit(LimitError::Exceeded {
-                    resource: crate::ImageResource::EncodedBytes,
+                    resource: crate::runtime::limits::ImageResource::EncodedBytes,
                     ..
                 })
             ),

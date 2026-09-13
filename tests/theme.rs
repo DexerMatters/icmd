@@ -7,9 +7,9 @@
 use std::time::Duration;
 
 use crossterm::style::Color;
+use icmd::advanced::{Commit, Lower, Renderer, Runtime};
 use icmd::{
-    Attr, BadgeProps, BadgeVariant, Commit, Component, Lower, Node, Renderer, Runtime, Size, Span,
-    Text, TextStyle, badge,
+    Attr, BadgeProps, BadgeVariant, Component, Node, Size, Span, Text, TextStyle, badge,
     theme::{Theme, ThemeColors, ThemeMode, ThemePreset},
     theme_provider, ui, view,
 };

@@ -1,8 +1,6 @@
 use crossterm::style::Color;
-use icmd::{
-    BorderKind, Commit, Component, ComponentContext, Edges, Lower, Node, PointerEvent, Renderer,
-    Runtime, Size, paragraph,
-};
+use icmd::advanced::{Commit, Lower, Renderer, Runtime};
+use icmd::{BorderKind, Component, ComponentContext, Edges, Node, PointerEvent, Size, paragraph};
 use std::time::Duration;
 
 fn button(cx: &mut ComponentContext, _: &icmd::Props<()>) -> Node {

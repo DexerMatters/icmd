@@ -4,11 +4,11 @@ use super::image::{
     surround_native,
 };
 use super::pipeline::PipelineComponent;
-use crate::ResourceLimits;
 use crate::data::{
     Cell, CellSlot, EmojiMerging, Frame, Image, ImageError, ImageId, MAX_SURFACE_CELLS, Operation,
     Rect, ScreenPosition, Size,
 };
+use crate::runtime::limits::ResourceLimits;
 use crate::{
     ImageMode, ImageProtocol, ImageSource, ImageUpdatePolicy, RasterImage, RasterPlacement,
     raster::{RasterPixels, render_rgba_with_cell_size, symbols_from_pixels},

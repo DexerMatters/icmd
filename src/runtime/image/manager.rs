@@ -6,8 +6,8 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::ResourceLimits;
 use crate::raster::ImageSourceKey;
+use crate::runtime::limits::ResourceLimits;
 use crate::{Cell, Image, ImageSource, RasterImage, RasterImageError, RasterPlacement};
 
 pub(crate) type LoadResult = (ImageSource, Result<RasterImage, RasterImageError>);

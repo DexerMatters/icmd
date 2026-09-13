@@ -5,9 +5,10 @@ use std::sync::{
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use icmd::advanced::{Commit, Lower, Renderer, Runtime};
 use icmd::{
-    AxisPosition, Cell, Commit, Component, Dimension, Fill, Image, Justify, Layout, Lower, Node,
-    Operation, Overflow, Renderer, Runtime, Size, canvas, fragment, text, view,
+    AxisPosition, Cell, Component, Dimension, Fill, Image, Justify, Layout, Node, Operation,
+    Overflow, Size, canvas, fragment, text, view,
 };
 
 fn render(node: Node, viewport: Size) -> String {
@@ -362,7 +363,7 @@ fn a_second_identical_frame_emits_no_operations() {
         second.operations
     );
     drop(input);
-    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
 }
 
 // PERF-10: the composition pass must not clone the layer list per frame, and
@@ -374,9 +375,9 @@ fn layer_order_survives_repeated_composition_without_cloning() {
     let viewport = Size::new(6, 2);
     let mut renderer = Renderer::with_config(
         viewport,
-        icmd::RendererConfig {
+        icmd::advanced::RendererConfig {
             image_protocol: icmd::ImageProtocol::Symbols,
-            ..icmd::RendererConfig::default()
+            ..icmd::advanced::RendererConfig::default()
         },
     )
     .unwrap();

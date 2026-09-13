@@ -18,10 +18,12 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
+use crate::runtime::{
+    Commit, CommitConfig, ConfigError, FrameError, Lower, Renderer, RendererConfig, ResourceLimits,
+    Runtime, RuntimeError, ShutdownPolicy,
+};
 use crate::{
-    Commit, CommitConfig, Component, ComponentContext, ConfigError, EmojiMerging, FrameError,
-    ImageProtocol, ImageUpdatePolicy, Lower, Node, Props, Renderer, RendererConfig, ResourceLimits,
-    Runtime, RuntimeError, ShutdownPolicy, Size,
+    Component, ComponentContext, EmojiMerging, ImageProtocol, ImageUpdatePolicy, Node, Props, Size,
 };
 
 #[derive(Debug, Clone)]

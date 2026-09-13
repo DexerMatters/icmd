@@ -1,10 +1,11 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use icmd::advanced::{Commit, Lower, Renderer, RendererConfig, Runtime};
 use icmd::{
-    Cell, CellEdit, Commit, Dimension, Frame, Image, ImageId, ImageMode, ImageProtocol,
-    ImageRenderOptions, ImageSource, Lower, Node, Operation, RasterImage, RasterPlacement,
-    Renderer, RendererConfig, Runtime, ScreenPosition, Size, Text, TextWrap, style,
+    Cell, CellEdit, Dimension, Frame, Image, ImageId, ImageMode, ImageProtocol, ImageRenderOptions,
+    ImageSource, Node, Operation, RasterImage, RasterPlacement, ScreenPosition, Size, Text,
+    TextWrap, style,
 };
 
 const VIEWPORT: Size = Size::new(240, 80);

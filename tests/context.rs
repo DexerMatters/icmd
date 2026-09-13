@@ -1,10 +1,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use icmd::{
-    Commit, Component, ComponentContext, Lower, Node, Props, Renderer, Runtime, Size, StateSetter,
-    create_context,
-};
+use icmd::advanced::{Commit, Lower, Renderer, Runtime};
+use icmd::{Component, ComponentContext, Node, Props, Size, StateSetter, create_context};
 
 #[derive(Clone, PartialEq, Eq)]
 struct Theme(&'static str);

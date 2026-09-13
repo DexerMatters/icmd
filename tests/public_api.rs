@@ -3,6 +3,7 @@
 #![allow(unused_imports)]
 
 use icmd::Attr;
+use icmd::advanced::{Renderer, RendererConfig, ResourceLimits, Runtime};
 use icmd::events::{
     DispatchOutcome, EventHandlers, EventListener, FocusEvent, KeyboardEvent, PasteEvent,
     PointerButton, PointerEvent, ScrollEvent, TerminalFocusEvent, WheelEvent,
@@ -16,18 +17,15 @@ use icmd::style::{
 };
 use icmd::theme::{Theme, ThemeColors, ThemeMode, ThemePreset};
 use icmd::widgets::{column, input, raster_image, scroll_area, text, view};
-use icmd::{
-    Component, ComponentContext, Node, Props, Renderer, RendererConfig, ResourceLimits, Runtime,
-    RuntimeConfig, Size, run,
-};
+use icmd::{Component, ComponentContext, Node, Props, RuntimeConfig, Size, run};
 use std::time::Duration;
 
 // Helper: build the standard three-stage pipeline and return its handle.
 fn build_test_pipeline(
     viewport: Size,
-) -> icmd::RuntimeHandle<icmd::Node, Result<String, icmd::FrameError>> {
-    let (commit, _) = icmd::Commit::new(viewport);
-    Runtime::new(icmd::Lower::default())
+) -> icmd::advanced::RuntimeHandle<icmd::Node, Result<String, icmd::advanced::FrameError>> {
+    let (commit, _) = icmd::advanced::Commit::new(viewport);
+    Runtime::new(icmd::advanced::Lower::default())
         .then(commit)
         .then(Renderer::new(viewport).unwrap())
         .start_handle()
@@ -131,7 +129,7 @@ fn runtime_handle_owns_channels_and_acknowledges_shutdown() {
     let _ = output.recv_timeout(std::time::Duration::from_secs(2));
     drop(input);
     handle
-        .shutdown(icmd::ShutdownPolicy::default())
+        .shutdown(icmd::advanced::ShutdownPolicy::default())
         .expect("shutdown must join every worker");
 }
 
@@ -167,7 +165,7 @@ fn renderer_config_rejects_impossible_geometry() {
     .err()
     .expect("a zero cell pixel width must be rejected");
     assert!(
-        matches!(error, icmd::FrameError::Config { .. }),
+        matches!(error, icmd::advanced::FrameError::Config { .. }),
         "{error:?}"
     );
 }
@@ -195,9 +193,10 @@ fn text_and_canvas_naming_is_domain_qualified() {
 // duplicate/removal mistakes before the renderer sees them.
 #[test]
 fn typed_frame_builder_tracks_kind_and_removal() {
+    use icmd::advanced::Renderer;
     use icmd::{
         BuildError, Cell, CellEdit, CellSurfaceHandle, FrameBuilder, Image, ImagePosition,
-        RasterImage, RasterPlacement, Renderer, ScreenPosition, Size,
+        RasterImage, RasterPlacement, ScreenPosition, Size,
     };
 
     let mut builder = FrameBuilder::new().with_viewport(Size::new(6, 3));
@@ -297,4 +296,51 @@ fn props_payload_has_one_accessor_path() {
     assert_eq!(props.extra(), "payload!");
     props.set_data(String::from("replaced"));
     assert_eq!(props.into_data(), "replaced");
+}
+
+// API-01 gate: the root and prelude contain no renderer implementation detail.
+// The check is textual because a compiled test cannot observe a name's absence;
+// the value is that removing an `advanced` item from the root cannot silently
+// reappear.
+#[test]
+fn root_does_not_reexport_the_advanced_tier() {
+    let lib = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+    )
+    .expect("the crate root must be readable");
+    // Only the `advanced` module and the internal facades may name these.
+    let root = lib
+        .split("pub mod advanced")
+        .next()
+        .expect("the advanced module must exist");
+    // Match the identifier itself, not a longer name such as `RuntimeConfig`.
+    let names_identifier = |root: &str, name: &str| -> bool {
+        let bytes = root.as_bytes();
+        root.match_indices(name).any(|(index, _)| {
+            let after = bytes.get(index + name.len()).copied();
+            !after.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+                && !(index > 0
+                    && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_'))
+        })
+    };
+    for name in [
+        "Commit",
+        "Renderer",
+        "Lower",
+        "Runtime",
+        "FrameError",
+        "PipelineComponent",
+        "ResourceLimits",
+        "ShutdownPolicy",
+    ] {
+        assert!(
+            !names_identifier(root, name),
+            "`{name}` must not be re-exported at the crate root"
+        );
+    }
+    // The macro helpers live only in the hidden module.
+    assert!(
+        !root.contains("__ui_apply"),
+        "macro helpers must not pollute the crate root"
+    );
 }

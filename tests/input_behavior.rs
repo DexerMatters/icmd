@@ -9,10 +9,12 @@ use std::{
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use icmd::advanced::{
+    Commit, CommitConfig, EventDispatcher, Lower, Renderer, RendererConfig, Runtime,
+};
 use icmd::{
-    Attr, Commit, CommitConfig, Component, ComponentContext, Dimension, EmojiMerging,
-    EventDispatcher, EventListener, FocusEvent, InputProps, Lower, Node, Props, Renderer,
-    RendererConfig, Runtime, Size, TerminalFocusEvent, TextValueEvent, TextWrap, TextareaProps,
+    Attr, Component, ComponentContext, Dimension, EmojiMerging, EventListener, FocusEvent,
+    InputProps, Node, Props, Size, TerminalFocusEvent, TextValueEvent, TextWrap, TextareaProps,
     column, input, textarea, ui, view,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -21,7 +23,7 @@ fn pipeline(
     viewport: Size,
 ) -> (
     crossbeam_channel::Sender<icmd::Node>,
-    crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+    crossbeam_channel::Receiver<Result<String, icmd::advanced::FrameError>>,
     EventDispatcher,
 ) {
     let (commit, _, dispatcher) = Commit::new_with_events(viewport);
@@ -1277,7 +1279,7 @@ impl Screen {
 /// Replay every frame the commit pipeline emits until it settles.
 fn drain(
     screen: &mut Screen,
-    output: &crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+    output: &crossbeam_channel::Receiver<Result<String, icmd::advanced::FrameError>>,
 ) {
     while let Ok(frame) = output.recv_timeout(Duration::from_millis(200)) {
         screen.apply(&frame.unwrap());
@@ -1784,7 +1786,7 @@ fn emoji_sequence_paste_counts_as_one_grapheme_for_max_length() {
 
 /// Dispatch a paste and settle, so the emitted value is observable.
 fn dispatch_paste(
-    output: &crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+    output: &crossbeam_channel::Receiver<Result<String, icmd::advanced::FrameError>>,
     dispatcher: &EventDispatcher,
     text: &str,
 ) {
