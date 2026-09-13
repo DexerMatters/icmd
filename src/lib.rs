@@ -33,9 +33,10 @@ pub use basic::{
     Forward, Justify, Key, KeyboardEvent, Layout, Node, Overflow, PasteEvent, Percent,
     PercentBasis, Point, PointerButton, PointerEvent, PointerEventKind, PointerId, PointerType,
     Props, PropsTransform, ProviderProps, Ref, ResizeEvent, ScrollAxes, ScrollDelta, ScrollEvent,
-    ScrollOffset, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Span, StateSetter, Style,
-    StylePatch, TerminalFocusEvent, Text, TextAlign, TextOverflow, TextStyle, TextWrap, Visibility,
-    WheelEvent, create_context, empty, fragment, provider, style, style_patch, text, view,
+    ScrollOffset, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Span, StateError, StateRef,
+    StateSetter, Style, StylePatch, TerminalFocusEvent, Text, TextAlign, TextOverflow, TextStyle,
+    TextWrap, Visibility, WheelEvent, create_context, empty, fragment, provider, style,
+    style_patch, text, view,
 };
 pub use data::{
     Cell, CellEdit, CellError, EmojiMerging, Frame, Image, ImageError, ImageId, ImagePosition,

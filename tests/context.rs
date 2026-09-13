@@ -165,3 +165,53 @@ fn fill_operator_assignment_ignores_invalid_input_instead_of_panicking() {
     style.fill /= 'x';
     assert_eq!(style.fill.fill().map(|fill| fill.symbol()), Some("x"));
 }
+
+// API-08: shared state is encapsulated behind `StateRef`, and poisoning is a
+// typed error rather than a panic at every call site.
+#[test]
+fn state_ref_read_update_and_poison_report_typed_results() {
+    use icmd::StateRef;
+    use std::sync::{Arc, Mutex};
+
+    let state = StateRef::new(1u32);
+    assert_eq!(state.read(|value| *value).unwrap(), 1);
+    state.update(|value| *value += 1).unwrap();
+    assert_eq!(state.read(|value| *value).unwrap(), 2);
+
+    // `try_update` succeeds when the lock is free.
+    assert_eq!(
+        state
+            .try_update(|value| {
+                *value += 10;
+                *value
+            })
+            .unwrap(),
+        Some(12)
+    );
+
+    // Wrapping an existing allocation observes the same value.
+    let plain: icmd::Ref<u32> = Arc::new(Mutex::new(5));
+    let shared = StateRef::from_shared(plain.clone());
+    assert_eq!(shared.read(|value| *value).unwrap(), 5);
+    shared.update(|value| *value = 9).unwrap();
+    assert_eq!(*plain.lock().unwrap(), 9);
+}
+
+#[test]
+fn poisoned_state_reports_an_error_instead_of_panicking() {
+    use icmd::{Ref, StateRef};
+    use std::sync::{Arc, Mutex};
+
+    // Simulate a poisoned lock: a thread panics while holding it.
+    let inner: Ref<u32> = Arc::new(Mutex::new(1));
+    let poison = inner.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poison.lock().unwrap();
+        panic!("poison the lock");
+    })
+    .join();
+
+    let state = StateRef::from_shared(inner);
+    assert!(state.read(|value| *value).is_err());
+    assert!(state.update(|value| *value += 1).is_err());
+}

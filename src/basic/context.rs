@@ -153,7 +153,70 @@ impl<T: Send + 'static> StateSetter<T> {
     }
 }
 
+// Transitional alias. New code should use `StateRef`, which encapsulates the
+// lock and reports poisoning instead of exposing the synchronization primitive
+// as permanent API policy.
 pub type Ref<T> = Arc<Mutex<T>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateError {
+    Poisoned,
+}
+
+impl std::fmt::Display for StateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Poisoned => write!(f, "state was poisoned by a panicking holder"),
+        }
+    }
+}
+
+impl std::error::Error for StateError {}
+
+// Encapsulated shared state. The lock strategy is an implementation detail, so
+// it can change without a public compatibility event, and poison handling is
+// centralized here instead of being repeated at every call site.
+pub struct StateRef<T> {
+    inner: Arc<Mutex<T>>,
+}
+
+impl<T> StateRef<T> {
+    pub fn new(value: T) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(value)),
+        }
+    }
+
+    pub(crate) fn from_ref(inner: Ref<T>) -> Self {
+        Self { inner }
+    }
+
+    // Wrap an existing shared allocation. Used by callers migrating from
+    // `Ref<T>`, and by tests that need to observe poisoning behavior.
+    pub fn from_shared(inner: Ref<T>) -> Self {
+        Self { inner }
+    }
+
+    pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> Result<R, StateError> {
+        let guard = self.inner.lock().map_err(|_| StateError::Poisoned)?;
+        Ok(f(&guard))
+    }
+
+    pub fn update<R>(&self, f: impl FnOnce(&mut T) -> R) -> Result<R, StateError> {
+        let mut guard = self.inner.lock().map_err(|_| StateError::Poisoned)?;
+        Ok(f(&mut guard))
+    }
+
+    // Non-blocking update: returns `None` when the lock is currently held, so a
+    // reentrant caller is rejected instead of deadlocking.
+    pub fn try_update<R>(&self, f: impl FnOnce(&mut T) -> R) -> Result<Option<R>, StateError> {
+        match self.inner.try_lock() {
+            Ok(mut guard) => Ok(Some(f(&mut guard))),
+            Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => Err(StateError::Poisoned),
+        }
+    }
+}
 
 pub trait EffectResult: Send + 'static {
     fn into_cleanup(self) -> Option<Box<dyn FnOnce() + Send>>;
@@ -277,6 +340,12 @@ where
                 .clone(),
             _ => panic!("hook order changed between renders: expected ref hook"),
         }
+    }
+
+    // Shared reference state with an encapsulated lock. Shares the same
+    // allocation as `use_ref`, so both views observe the same value.
+    pub fn use_state_ref<T: Send + 'static>(&mut self, initial: impl FnOnce() -> T) -> StateRef<T> {
+        StateRef::from_ref(self.use_ref(initial))
     }
 
     pub fn use_memo<T, D>(&mut self, dependencies: D, compute: impl FnOnce() -> T) -> T
