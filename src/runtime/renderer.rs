@@ -1146,7 +1146,11 @@ impl Renderer {
         // composition pass is deliberately bottom-to-top, so an assignment is
         // the exact deterministic equivalent of selecting the highest rank at
         // every cell.
-        let layers = self.layers.clone();
+        // The layer order is moved out for the duration of the pass instead of
+        // cloned: iteration only needs to read it, and it is restored before
+        // returning. This removes a per-frame allocation of the whole layer
+        // list for scenes with many images.
+        let layers = std::mem::take(&mut self.layers);
         let symbols_for_native = self.symbols_for_native;
         let protocol = self.protocol;
         let cell_pixels = self.cell_pixels;
@@ -1156,7 +1160,7 @@ impl Renderer {
         let rows = &self.damage_rows;
         let owners = &mut self.owners;
 
-        for (ordinal, id) in layers.into_iter().enumerate() {
+        for (ordinal, id) in layers.iter().copied().enumerate() {
             let Some(node) = images.get(&id) else {
                 continue;
             };
@@ -1269,6 +1273,9 @@ impl Renderer {
                 }
             }
         }
+
+        // Restore the layer order that was moved out for the pass.
+        self.layers = layers;
     }
 
     pub fn render_diff(&mut self) -> Result<Option<String>, FrameError> {

@@ -364,3 +364,57 @@ fn a_second_identical_frame_emits_no_operations() {
     drop(input);
     let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
 }
+
+// PERF-10: the composition pass must not clone the layer list per frame, and
+// the retained order must survive a render unchanged.
+#[test]
+fn layer_order_survives_repeated_composition_without_cloning() {
+    use icmd::{Cell, Frame, Image, ImageId, Operation, ScreenPosition};
+
+    let viewport = Size::new(6, 2);
+    let mut renderer = Renderer::with_config(
+        viewport,
+        icmd::RendererConfig {
+            image_protocol: icmd::ImageProtocol::Symbols,
+            ..icmd::RendererConfig::default()
+        },
+    )
+    .unwrap();
+
+    // Several overlapping layers with distinct z-order and level.
+    let mut operations = Vec::new();
+    for index in 0..8u64 {
+        operations.push(Operation::Create {
+            id: ImageId(index + 1),
+            image: Image::new(4, 1, Cell::plain((b'a' + index as u8) as char).unwrap()).unwrap(),
+            position: ScreenPosition::new(0, index as i32 % 3),
+            level: (index % 3) as i32,
+        });
+        operations.push(Operation::SetOrder {
+            id: ImageId(index + 1),
+            order: 8 - index,
+        });
+    }
+    renderer.apply_frame(Frame::new(operations)).unwrap();
+    let first = renderer.render_diff().unwrap().expect("first frame");
+
+    // A second identical render is a no-op: the retained order is unchanged.
+    assert!(renderer.render_diff().unwrap().is_none());
+
+    // A single-cell update repaints only its damage and keeps the same layering.
+    renderer
+        .apply_frame(Frame::new(vec![Operation::PatchCells {
+            id: ImageId(1),
+            edits: vec![icmd::CellEdit {
+                position: icmd::ImagePosition::new(0, 0),
+                cell: Cell::plain("Z").unwrap(),
+            }],
+        }]))
+        .unwrap();
+    let updated = renderer
+        .render_diff()
+        .unwrap()
+        .expect("a cell update must repaint");
+    assert!(updated.contains('Z'), "{updated:?}");
+    assert!(!first.is_empty());
+}
