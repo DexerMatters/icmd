@@ -22,6 +22,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --no-default-features -- -D warnings
       - run: cargo test --no-default-features
+      - name: Downstream high-level fixture
+        run: cargo build -p icmd-high-level-fixture --no-default-features
 
   native-raster:
     name: native raster (minimum and newest Chafa)
@@ -35,6 +37,29 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libchafa-dev pkg-config clang
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+
+  msrv:
+    name: minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The declared MSRV must build the default (pure-Rust) feature set.
+      - uses: dtolnay/rust-toolchain@1.88
+      - run: cargo build --no-default-features
+
+  miri:
+    name: Miri on the unsafe-free core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Miri (pure-Rust core paths)
+        run: |
+          # Miri cannot model the Chafa FFI boundary, so it runs the
+          # no-native-raster build where every path is pure Rust.
+          MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --no-default-features --lib
 
   supply-chain:
     name: package and dependency gates

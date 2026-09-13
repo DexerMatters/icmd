@@ -26,7 +26,7 @@ fn manifest_declares_release_metadata_and_content_allowlist() {
         .nth(1)
         .and_then(|rest| rest.split(']').next())
         .expect("the manifest must declare a package exclude list");
-    for excluded in ["agents/", ".scratch/", "examples/res/"] {
+    for excluded in ["agents/", ".scratch/", "examples/res/", "fixtures/"] {
         assert!(
             excludes.contains(excluded),
             "`{excluded}` must be excluded from the published package"

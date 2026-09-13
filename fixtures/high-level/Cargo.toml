@@ -1,0 +1,11 @@
+# Downstream compile fixture. It depends on icmd as an ordinary crate and uses
+# only the curated high-level tiers, so an accidental dependency on an
+# `advanced` item or a macro helper fails this build.
+[package]
+name = "icmd-high-level-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+icmd = { path = "../..", default-features = false }
