@@ -4,6 +4,7 @@ pub(crate) mod controls;
 pub(crate) mod feedback;
 pub(crate) mod image;
 pub(crate) mod input;
+pub(crate) mod interactive;
 pub(crate) mod scroll;
 
 use crate::{DomProps, Node, Props, Style, basic::ComponentContext, theme::Theme, ui};
@@ -31,8 +32,8 @@ fn themed(
 }
 
 pub use basic::{
-    blockquote, button, card, center, code, column, container, divider, footer, heading, kbd,
-    label, muted, paragraph, row, section, spacer,
+    ButtonProps, ButtonVariant, blockquote, button, card, center, code, column, container, divider,
+    footer, heading, kbd, label, muted, paragraph, row, section, spacer,
 };
 pub use canvas::{CanvasContext, CanvasDraw, CanvasError, CanvasProps, canvas};
 pub use controls::{CheckboxProps, RadioProps, SwitchProps, checkbox, radio, switch};

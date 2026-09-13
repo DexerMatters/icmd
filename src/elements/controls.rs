@@ -1,17 +1,27 @@
 use crossterm::style::Color;
 
 use crate::{
-    Attr, Node, Props, Span, Text,
-    basic::{ComponentContext, view},
-    theme::Theme,
+    Attr, DomProps, EventListener, Node, Props, Span, Text, basic::ComponentContext, theme::Theme,
     ui,
 };
+
+// The controls add no host styling of their own; the themed visuals are the
+// child text node.
+fn icmd_dom() -> DomProps {
+    DomProps::default()
+}
+
+use super::interactive::{Activation, interactive};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CheckboxProps {
     pub checked: Attr<bool>,
     pub label: Attr<String>,
     pub disabled: Attr<bool>,
+    pub autofocus: Attr<bool>,
+    // Proposed new state. The component is controlled: it renders `checked` and
+    // requests the toggle rather than mutating itself.
+    pub on_change: Attr<EventListener<bool>>,
 }
 
 fn selection_control(
@@ -44,15 +54,23 @@ fn selection_control(
 
 pub fn checkbox(cx: &mut ComponentContext, props: &Props<CheckboxProps>) -> Node {
     let theme = cx.use_theme();
+    let checked = props.checked | false;
+    let disabled = props.disabled | false;
     let child = selection_control(
         &theme,
-        props.checked | false,
-        props.disabled | false,
+        checked,
+        disabled,
         props.label.clone() | String::new(),
         ("☑", "☐"),
         theme.colors.foreground,
     );
-    ui! { <view dom={props.dom.clone()}>{child}</view> }
+    let on_change = props.on_change.as_ref().cloned();
+    let activation = Activation::new(disabled, props.autofocus | false).on_activate(move || {
+        if let Some(listener) = &on_change {
+            listener.call(!checked);
+        }
+    });
+    interactive(icmd_dom(), &props.dom, activation, vec![child])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -60,19 +78,30 @@ pub struct RadioProps {
     pub selected: Attr<bool>,
     pub label: Attr<String>,
     pub disabled: Attr<bool>,
+    pub autofocus: Attr<bool>,
+    // Selection is exclusive, so the request carries no value: the group owner
+    // decides which radio becomes selected.
+    pub on_select: Attr<EventListener<()>>,
 }
 
 pub fn radio(cx: &mut ComponentContext, props: &Props<RadioProps>) -> Node {
     let theme = cx.use_theme();
+    let disabled = props.disabled | false;
     let child = selection_control(
         &theme,
         props.selected | false,
-        props.disabled | false,
+        disabled,
         props.label.clone() | String::new(),
         ("◉", "○"),
         theme.colors.foreground,
     );
-    ui! { <view dom={props.dom.clone()}>{child}</view> }
+    let on_select = props.on_select.as_ref().cloned();
+    let activation = Activation::new(disabled, props.autofocus | false).on_activate(move || {
+        if let Some(listener) = &on_select {
+            listener.call(());
+        }
+    });
+    interactive(icmd_dom(), &props.dom, activation, vec![child])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -80,17 +109,27 @@ pub struct SwitchProps {
     pub on: Attr<bool>,
     pub label: Attr<String>,
     pub disabled: Attr<bool>,
+    pub autofocus: Attr<bool>,
+    pub on_change: Attr<EventListener<bool>>,
 }
 
 pub fn switch(cx: &mut ComponentContext, props: &Props<SwitchProps>) -> Node {
     let theme = cx.use_theme();
+    let on = props.on | false;
+    let disabled = props.disabled | false;
     let child = selection_control(
         &theme,
-        props.on | false,
-        props.disabled | false,
+        on,
+        disabled,
         props.label.clone() | String::new(),
         ("━●", "●━"),
         theme.colors.muted_foreground,
     );
-    ui! { <view dom={props.dom.clone()}>{child}</view> }
+    let on_change = props.on_change.as_ref().cloned();
+    let activation = Activation::new(disabled, props.autofocus | false).on_activate(move || {
+        if let Some(listener) = &on_change {
+            listener.call(!on);
+        }
+    });
+    interactive(icmd_dom(), &props.dom, activation, vec![child])
 }

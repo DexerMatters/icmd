@@ -1,8 +1,41 @@
 use crate::{
-    Align, BorderKind, Dimension, Edges, Justify, Layout, Node, Props, basic::ComponentContext,
+    Align, Attr, BorderKind, Dimension, Edges, EventListener, Justify, Layout, Node, Props,
+    basic::ComponentContext,
 };
 
+use super::interactive::{Activation, interactive};
 use super::themed;
+
+// A button is interactive: it owns press, disabled, and autofocus semantics
+// instead of leaving every caller to attach its own click listener.
+#[derive(Clone, Default)]
+pub struct ButtonProps {
+    pub disabled: Attr<bool>,
+    pub autofocus: Attr<bool>,
+    // One semantic activation per press, however it was triggered.
+    pub on_press: Attr<EventListener<()>>,
+    // Presentation-only override of the themed style.
+    pub variant: Attr<ButtonVariant>,
+}
+
+// The listener slot is opaque, so it is omitted from the debug output.
+impl std::fmt::Debug for ButtonProps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ButtonProps")
+            .field("disabled", &self.disabled)
+            .field("autofocus", &self.autofocus)
+            .field("variant", &self.variant)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ButtonVariant {
+    #[default]
+    Primary,
+    Secondary,
+    Destructive,
+}
 
 pub fn container(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
@@ -94,17 +127,62 @@ pub fn code(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
-pub fn button(cx: &mut ComponentContext, props: &Props<()>) -> Node {
-    themed(cx, props, |style, theme| {
-        style.padding /= Edges::symmetric(theme.spacing.xs, theme.spacing.sm);
-        style.background /= theme.colors.primary;
-        style.text.foreground /= theme.colors.primary_foreground;
-        style.text.attr.bold /= true;
-        style.border.kind /= theme.borders.kind;
-        style.border.edges /= Edges::all(false);
-        style.border.foreground /= theme.colors.primary;
-        style.border.background /= theme.colors.primary;
-    })
+pub fn button(cx: &mut ComponentContext, props: &Props<ButtonProps>) -> Node {
+    let theme = cx.use_theme();
+    let disabled = props.disabled | false;
+    let variant = props.variant | ButtonVariant::Primary;
+
+    // Disabled suppresses activation and focus, not just color.
+    let (background, foreground, border) = match (disabled, variant) {
+        (true, _) => (
+            theme.colors.muted,
+            theme.colors.muted_foreground,
+            theme.colors.border,
+        ),
+        (false, ButtonVariant::Primary) => (
+            theme.colors.primary,
+            theme.colors.primary_foreground,
+            theme.colors.primary,
+        ),
+        (false, ButtonVariant::Secondary) => (
+            theme.colors.secondary,
+            theme.colors.secondary_foreground,
+            theme.colors.secondary,
+        ),
+        (false, ButtonVariant::Destructive) => (
+            theme.colors.destructive,
+            theme.colors.destructive_foreground,
+            theme.colors.destructive,
+        ),
+    };
+
+    let mut style = crate::Style {
+        text: theme.typography.body.clone(),
+        ..crate::Style::default()
+    };
+    style.padding /= Edges::symmetric(theme.spacing.xs, theme.spacing.sm);
+    style.background /= background;
+    style.text.foreground /= foreground;
+    style.text.attr.bold /= !disabled;
+    style.border.kind /= theme.borders.kind;
+    style.border.edges /= Edges::all(false);
+    style.border.foreground /= border;
+    style.border.background /= background;
+
+    let on_press = props.on_press.as_ref().cloned();
+    let activation = Activation::new(disabled, props.autofocus | false).on_activate(move || {
+        if let Some(listener) = &on_press {
+            listener.call(());
+        }
+    });
+    // The listener node owns the themed style, so it is the painted and
+    // hit-tested node rather than a wrapper around one.
+    interactive(
+        crate::DomProps::default().with_style(style),
+        &props.dom,
+        activation,
+        vec![props.children_node()],
+    )
 }
 
 pub fn divider(cx: &mut ComponentContext, props: &Props<()>) -> Node {

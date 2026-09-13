@@ -13,13 +13,13 @@ pub use app::{RenderError, RuntimeConfig, render};
 pub use theme::{ThemeBuilder, ThemeProviderProps, theme_context, theme_provider};
 
 pub use elements::{
-    AlertProps, AlertVariant, BadgeProps, BadgeVariant, CanvasContext, CanvasDraw, CanvasError,
-    CanvasProps, CheckboxProps, ImageProps, InputProps, ProgressBarProps, RadioProps,
-    RawInputAppearance, RawInputMode, RawInputProps, ScrollAreaProps, SkeletonProps, SpinnerProps,
-    SwitchProps, TextClipboardAction, TextClipboardEvent, TextValueEvent, TextareaProps, alert,
-    badge, blockquote, button, canvas, card, center, checkbox, code, column, container, divider,
-    footer, heading, input, kbd, label, muted, paragraph, progress_bar, radio, raw_input, row,
-    scroll_area, section, skeleton, spacer, spinner, switch, textarea,
+    AlertProps, AlertVariant, BadgeProps, BadgeVariant, ButtonProps, ButtonVariant, CanvasContext,
+    CanvasDraw, CanvasError, CanvasProps, CheckboxProps, ImageProps, InputProps, ProgressBarProps,
+    RadioProps, RawInputAppearance, RawInputMode, RawInputProps, ScrollAreaProps, SkeletonProps,
+    SpinnerProps, SwitchProps, TextClipboardAction, TextClipboardEvent, TextValueEvent,
+    TextareaProps, alert, badge, blockquote, button, canvas, card, center, checkbox, code, column,
+    container, divider, footer, heading, input, kbd, label, muted, paragraph, progress_bar, radio,
+    raw_input, row, scroll_area, section, skeleton, spacer, spinner, switch, textarea,
 };
 
 // Canonical raster widget constructor. The historical `image` spelling is kept
