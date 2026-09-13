@@ -17,7 +17,7 @@ pub use context::{
 };
 pub use dom::{DomId, DomNode};
 pub use events::{
-    EventHandlers, EventListener, FocusEvent, KeyboardEvent, PasteEvent, PointerButton,
+    EventHandlers, EventListener, EventPhase, FocusEvent, KeyboardEvent, PasteEvent, PointerButton,
     PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent, ScrollEvent,
     TerminalFocusEvent, WheelEvent,
 };

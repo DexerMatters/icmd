@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
@@ -494,6 +494,173 @@ fn wheel_scrolling_is_restored_when_default_is_prevented() {
         !outcome.redraw_requested,
         "a prevented scroll must not request a redraw"
     );
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
+}
+
+// API-04: capture runs root-to-target before the target and bubble pass, and a
+// capture listener can stop the rest of the dispatch.
+#[test]
+fn capture_listeners_run_before_target_and_bubble() {
+    let viewport = Size::new(20, 5);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    // Order is recorded as "root-capture", "target-capture", "target", "root".
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let o1 = order.clone();
+    let o2 = order.clone();
+    let o3 = order.clone();
+    let o4 = order.clone();
+
+    let child = icmd::view
+        .events(move |events| {
+            events.pointer_down_capture /= EventListener::new(move |_event| {
+                o2.lock().unwrap().push("target-capture");
+            });
+            events.pointer_down /= EventListener::new(move |_event| {
+                o3.lock().unwrap().push("target");
+            });
+        })
+        .apply(
+            icmd::Props::new(()).with_dom(icmd::DomProps::default().with_style(icmd::style(
+                |style| {
+                    style.width /= icmd::Dimension::Cells(10);
+                    style.height /= icmd::Dimension::Cells(3);
+                },
+            ))),
+        );
+    let node = icmd::view
+        .events(move |events| {
+            events.pointer_down_capture /= EventListener::new(move |_event| {
+                o1.lock().unwrap().push("root-capture");
+            });
+            events.pointer_down /= EventListener::new(move |_event| {
+                o4.lock().unwrap().push("root");
+            });
+        })
+        .apply(icmd::Props::new(()).children([child]).with_dom(
+            icmd::DomProps::default().with_style(icmd::style(|style| {
+                style.width /= icmd::Dimension::Max;
+                style.height /= icmd::Dimension::Max;
+            })),
+        ));
+    input.send(node).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert_eq!(
+        &*order.lock().unwrap(),
+        &["root-capture", "target-capture", "target", "root"],
+        "capture must run root-to-target before target and bubble"
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
+}
+
+#[test]
+fn a_capture_listener_can_stop_the_whole_dispatch() {
+    let viewport = Size::new(20, 5);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    let target = Arc::new(AtomicUsize::new(0));
+    let target_for_listener = target.clone();
+    let node = icmd::view
+        .events(move |events| {
+            events.pointer_down_capture /= EventListener::new(|event: icmd::PointerEvent| {
+                event.stop_propagation();
+            });
+            events.pointer_down /= EventListener::new(move |_event| {
+                target_for_listener.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .apply(
+            icmd::Props::new(()).with_dom(icmd::DomProps::default().with_style(icmd::style(
+                |style| {
+                    style.width /= icmd::Dimension::Max;
+                    style.height /= icmd::Dimension::Max;
+                },
+            ))),
+        );
+    input.send(node).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let outcome = dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(outcome.propagation_stopped, "{outcome:?}");
+    assert_eq!(
+        target.load(Ordering::SeqCst),
+        0,
+        "a stopping capture listener must suppress the target phase"
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
+}
+
+#[test]
+fn key_capture_runs_before_the_target_and_can_prevent_the_default() {
+    let viewport = Size::new(20, 5);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let capture_order = order.clone();
+    let target_order = order.clone();
+    let node = icmd::view
+        .events(move |events| {
+            events.key_down_capture /= EventListener::new(move |event: icmd::KeyboardEvent| {
+                capture_order.lock().unwrap().push("capture");
+                event.prevent_default();
+            });
+            events.key_down /= EventListener::new(move |_event| {
+                target_order.lock().unwrap().push("target");
+            });
+        })
+        .apply(
+            icmd::Props::new(()).with_dom(
+                icmd::DomProps::default()
+                    .with_focusable(true)
+                    .with_style(icmd::style(|style| {
+                        style.width /= icmd::Dimension::Max;
+                        style.height /= icmd::Dimension::Max;
+                    })),
+            ),
+        );
+    input.send(node).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    let outcome = dispatcher.dispatch(Event::Key(KeyEvent::new_with_kind(
+        KeyCode::PageDown,
+        KeyModifiers::empty(),
+        KeyEventKind::Press,
+    )));
+    assert!(outcome.default_prevented, "{outcome:?}");
+    assert_eq!(&*order.lock().unwrap(), &["capture", "target"]);
 
     drop(input);
     let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());

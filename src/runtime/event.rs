@@ -609,6 +609,13 @@ impl EventDispatcher {
     }
 
     fn dispatch_mouse(&self, event: MouseEvent) -> DispatchOutcome {
+        // Capture pass: root to target, before any default action or pointer
+        // state change. Stopping here suppresses the target/bubble phase and
+        // every built-in action for this event.
+        let capture_outcome = self.dispatch_pointer_capture(event);
+        if capture_outcome.propagation_stopped {
+            return capture_outcome;
+        }
         let mut pointer_deliveries = Vec::new();
         let mut wheel_deliveries = Vec::new();
         let mut scroll_deliveries = Vec::new();
@@ -996,14 +1003,96 @@ impl EventDispatcher {
             count += self.change_focus(target).1;
         }
         DispatchOutcome {
-            delivered: count,
+            delivered: count + capture_outcome.delivered,
             propagation_stopped: stopped,
-            default_prevented: prevented,
+            default_prevented: prevented || capture_outcome.default_prevented,
             redraw_requested: scroll_changed && !prevented,
         }
     }
 
+    // Runs capture listeners for the event's family, in root-to-target order.
+    fn dispatch_pointer_capture(&self, event: MouseEvent) -> DispatchOutcome {
+        let position = ScreenPosition::new(event.row as i32, event.column as i32);
+        let (pointer_events, wheel_events) = {
+            let state = self.state.read().expect("event registry poisoned");
+            let Some(target) = state.hit_target(position) else {
+                return DispatchOutcome::default();
+            };
+            let pointer =
+                match mouse_details(event).0 {
+                    PointerEventKind::Down => state
+                        .route_capture(target, |handlers| listener(&handlers.pointer_down_capture)),
+                    PointerEventKind::Up => state
+                        .route_capture(target, |handlers| listener(&handlers.pointer_up_capture)),
+                    PointerEventKind::Click => {
+                        state.route_capture(target, |handlers| listener(&handlers.click_capture))
+                    }
+                    _ => Vec::new(),
+                };
+            let wheel = if wheel_delta(event.kind).is_some() {
+                state.route_capture(target, |handlers| listener(&handlers.wheel_capture))
+            } else {
+                Vec::new()
+            };
+            (pointer, wheel)
+        };
+        if pointer_events.is_empty() && wheel_events.is_empty() {
+            return DispatchOutcome::default();
+        }
+
+        let dispatch = crate::basic::events::begin_dispatch();
+        let mut delivered = 0;
+        if !pointer_events.is_empty() {
+            let pointer = PointerEvent::new(
+                mouse_details(event).0,
+                position,
+                mouse_details(event).1,
+                0,
+                event.modifiers,
+            );
+            for listener in pointer_events {
+                listener.call(pointer);
+                delivered += 1;
+                if crate::basic::events::propagation_stopped() {
+                    break;
+                }
+            }
+        }
+        if !crate::basic::events::propagation_stopped()
+            && let Some((delta_x, delta_y)) = wheel_delta(event.kind)
+        {
+            let wheel = WheelEvent {
+                position,
+                delta_x,
+                delta_y,
+                modifiers: event.modifiers,
+            };
+            for listener in wheel_events {
+                listener.call(wheel);
+                delivered += 1;
+                if crate::basic::events::propagation_stopped() {
+                    break;
+                }
+            }
+        }
+        let stopped = crate::basic::events::propagation_stopped();
+        let prevented = crate::basic::events::default_prevented();
+        drop(dispatch);
+        DispatchOutcome {
+            delivered,
+            propagation_stopped: stopped,
+            default_prevented: prevented,
+            redraw_requested: false,
+        }
+    }
+
     fn dispatch_key(&self, event: KeyboardEvent) -> DispatchOutcome {
+        // Capture pass first: root to target, before the target and bubble
+        // listeners and before the built-in key scrolling.
+        let capture_outcome = self.dispatch_key_capture(event);
+        if capture_outcome.propagation_stopped {
+            return capture_outcome;
+        }
         let mut scroll_changed = false;
         let mut scroll_deliveries = Vec::new();
         // Targeted delivery requires an actual focused target. Falling back to
@@ -1111,10 +1200,46 @@ impl EventDispatcher {
             self.viewport.request_redraw();
         }
         DispatchOutcome {
-            delivered: count,
+            delivered: count + capture_outcome.delivered,
             propagation_stopped: consumed,
+            default_prevented: prevented || capture_outcome.default_prevented,
+            redraw_requested: scroll_changed && !prevented,
+        }
+    }
+
+    // Runs capture listeners for a key routed at the focused target.
+    fn dispatch_key_capture(&self, event: KeyboardEvent) -> DispatchOutcome {
+        let callbacks = {
+            let state = self.state.read().expect("event registry poisoned");
+            let Some(target) = state.focused else {
+                return DispatchOutcome::default();
+            };
+            if event.key.kind == crossterm::event::KeyEventKind::Release {
+                state.route_capture(target, |handlers| listener(&handlers.key_up_capture))
+            } else {
+                state.route_capture(target, |handlers| listener(&handlers.key_down_capture))
+            }
+        };
+        if callbacks.is_empty() {
+            return DispatchOutcome::default();
+        }
+        let dispatch = crate::basic::events::begin_dispatch();
+        let mut delivered = 0;
+        for listener in callbacks {
+            listener.call(event);
+            delivered += 1;
+            if crate::basic::events::propagation_stopped() {
+                break;
+            }
+        }
+        let stopped = crate::basic::events::propagation_stopped();
+        let prevented = crate::basic::events::default_prevented();
+        drop(dispatch);
+        DispatchOutcome {
+            delivered,
+            propagation_stopped: stopped,
             default_prevented: prevented,
-            redraw_requested: scroll_changed,
+            redraw_requested: false,
         }
     }
 
@@ -1746,7 +1871,20 @@ impl EventState {
         target: DomId,
         listener: impl Fn(&EventHandlers) -> Option<EventListener<T>>,
     ) -> Vec<EventListener<T>> {
+        let mut callbacks = self.route_capture(target, listener);
+        callbacks.reverse();
+        callbacks
+    }
+
+    // Root-to-target order, which is the order capture listeners run in. The
+    // bubble pass is the same route reversed, so both share one traversal.
+    fn route_capture<T>(
+        &self,
+        target: DomId,
+        listener: impl Fn(&EventHandlers) -> Option<EventListener<T>>,
+    ) -> Vec<EventListener<T>> {
         let mut callbacks = Vec::new();
+        let mut chain = Vec::new();
         let mut current = Some(target);
         let mut visited = HashSet::new();
         while let Some(id) = current {
@@ -1756,10 +1894,17 @@ impl EventState {
             let Some(region) = self.region(id) else {
                 break;
             };
+            chain.push(id);
+            current = region.parent;
+        }
+        // `chain` is target-to-root; capture runs the other way.
+        for id in chain.into_iter().rev() {
+            let Some(region) = self.region(id) else {
+                continue;
+            };
             if let Some(callback) = listener(&region.handlers) {
                 callbacks.push(callback);
             }
-            current = region.parent;
         }
         callbacks
     }

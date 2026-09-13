@@ -91,9 +91,9 @@ pub mod style {
 
 pub mod events {
     pub use crate::basic::{
-        EventHandlers, EventListener, FocusEvent, KeyboardEvent, PasteEvent, PointerButton,
-        PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent, ScrollEvent,
-        TerminalFocusEvent, WheelEvent,
+        EventHandlers, EventListener, EventPhase, FocusEvent, KeyboardEvent, PasteEvent,
+        PointerButton, PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent,
+        ScrollEvent, TerminalFocusEvent, WheelEvent,
     };
     pub use crate::runtime::{DispatchOutcome, FocusError, FocusOutcome};
     // Raw terminal event types, for applications that read the event stream.

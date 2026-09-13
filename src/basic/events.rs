@@ -375,8 +375,26 @@ pub struct PasteEvent {
     pub text: String,
 }
 
+// Which pass of DOM-style event propagation a listener is running in.
+// Capture runs root-to-target before the target and its ancestors bubble.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EventPhase {
+    Capture,
+    #[default]
+    Target,
+    Bubble,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EventHandlers {
+    // Capture-phase listeners. They run before the target and bubble listeners
+    // and can stop the rest of the dispatch.
+    pub pointer_down_capture: Attr<EventListener<PointerEvent>>,
+    pub pointer_up_capture: Attr<EventListener<PointerEvent>>,
+    pub click_capture: Attr<EventListener<PointerEvent>>,
+    pub key_down_capture: Attr<EventListener<KeyboardEvent>>,
+    pub key_up_capture: Attr<EventListener<KeyboardEvent>>,
+    pub wheel_capture: Attr<EventListener<WheelEvent>>,
     pub pointer_down: Attr<EventListener<PointerEvent>>,
     pub pointer_up: Attr<EventListener<PointerEvent>>,
     pub pointer_move: Attr<EventListener<PointerEvent>>,
@@ -413,6 +431,12 @@ impl EventHandlers {
             };
         }
         merge!(
+            pointer_down_capture,
+            pointer_up_capture,
+            click_capture,
+            key_down_capture,
+            key_up_capture,
+            wheel_capture,
             pointer_down,
             pointer_up,
             pointer_move,
