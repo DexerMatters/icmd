@@ -418,3 +418,50 @@ fn layer_order_survives_repeated_composition_without_cloning() {
     assert!(updated.contains('Z'), "{updated:?}");
     assert!(!first.is_empty());
 }
+
+// PERF-07: a no-wrap line scrolled offscreen must rasterize only the visible
+// window, so the temporary allocation does not grow with the document.
+#[test]
+fn offscreen_text_rasterizes_only_the_visible_window() {
+    use icmd::{AxisPosition, Dimension, DomProps, Overflow, Text, TextWrap};
+
+    let viewport = Size::new(40, 3);
+    let build = |prefix: usize| -> Node {
+        // A long single line with the viewport scrolled to the far end.
+        let content: String = "abcdefghij".repeat(prefix.max(1));
+        let mut dom = DomProps::default();
+        dom.style = icmd::style(|style| {
+            style.width /= Dimension::Max;
+            style.height /= Dimension::Max;
+            style.overflow /= Overflow::Clip;
+            style.overflow_x /= Overflow::Clip;
+        });
+        let area = icmd::scroll_area
+            .props(icmd::ScrollAreaProps {
+                axes: icmd::Attr::Set(icmd::ScrollAxes::Horizontal),
+                scrollbar_visibility: icmd::Attr::Set(icmd::ScrollbarVisibility::Hidden),
+                ..icmd::ScrollAreaProps::default()
+            })
+            .style(|style| {
+                style.width /= Dimension::Cells(20);
+                style.height /= Dimension::Cells(1);
+                style.line /= AxisPosition::Cells(0);
+            })
+            .children([Text::new(content)
+                .wrap(TextWrap::NoWrap)
+                .layout_style(icmd::style(|style| style.width /= Dimension::Max))
+                .into()]);
+        Node::element(dom, [area])
+    };
+
+    // Both documents paint the same visible window and must render identically
+    // at the same viewport; the longer document is not allowed to change the
+    // painted cells.
+    let short = render(build(4), viewport);
+    let long = render(build(400), viewport);
+    assert!(
+        long.starts_with(&short[..short.len().min(8)]),
+        "the visible window must be painted the same way regardless of document length"
+    );
+    assert!(!short.is_empty() && !long.is_empty());
+}

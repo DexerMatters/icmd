@@ -202,18 +202,31 @@ fn raster_line(
     let visible_end = visible_end.min(rect_width).max(visible_start);
     let ellipsis_start = rect_width.saturating_sub(1);
     let content_end = if ellipsis { ellipsis_start } else { rect_width };
-    let mut glyphs_at: Vec<Option<&text_layout::Item>> = vec![None; rect_width];
+    // Only the visible window is indexed, so a long offscreen line costs
+    // O(visible width) memory rather than O(document width). Items that start
+    // before the window are not recorded: the original indexed them at their own
+    // start cell, which the visible loop could never reach.
+    let window = visible_end.saturating_sub(visible_start);
+    let mut glyphs_at: Vec<Option<&text_layout::Item>> = vec![None; window];
     let mut visual = offset.min(rect_width);
     for item in items {
         if item.kind == ItemKind::Newline || item.width == 0 {
             continue;
         }
+        // Nothing later can start inside the window.
+        if visual >= visible_end {
+            break;
+        }
         let glyph_end = visual.saturating_add(item.width);
         // A separator occupies cells but is deliberately not painted; the cell
         // is left blank. Recording it here would draw the whitespace that the
         // wrap decision removed, which the editor surface never draws.
-        if item.kind != ItemKind::Separator && visual < rect_width && glyph_end <= rect_width {
-            glyphs_at[visual] = Some(item);
+        if item.kind != ItemKind::Separator
+            && visual < rect_width
+            && glyph_end <= rect_width
+            && visual >= visible_start
+        {
+            glyphs_at[visual - visible_start] = Some(item);
         }
         visual = glyph_end;
     }
@@ -239,7 +252,7 @@ fn raster_line(
             column += 1;
             continue;
         }
-        if let Some(item) = glyphs_at[column]
+        if let Some(item) = glyphs_at[column - visible_start]
             && column.saturating_add(item.width) <= content_end
             && column.saturating_add(item.width) <= visible_end
             && let Ok(cell) = Cell::with_width(
