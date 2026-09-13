@@ -7,6 +7,18 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::RasterPlacement;
 
+// Translation from the shared glyph error to the cell-specific public error.
+// The variants are intentionally one-to-one; only the domain wrapper differs.
+pub(crate) fn cell_error_from_glyph(error: crate::glyph::GlyphError) -> CellError {
+    match error {
+        crate::glyph::GlyphError::Empty => CellError::Empty,
+        crate::glyph::GlyphError::SymbolTooLong(bytes) => CellError::SymbolTooLong(bytes),
+        crate::glyph::GlyphError::MultipleGraphemes => CellError::MultipleGraphemes,
+        crate::glyph::GlyphError::ControlCharacter => CellError::ControlCharacter,
+        crate::glyph::GlyphError::UnsupportedWidth(width) => CellError::UnsupportedWidth(width),
+    }
+}
+
 pub const MAX_SURFACE_CELLS: usize = 1_048_576;
 
 pub const MAX_GLYPH_BYTES: usize = 256;
@@ -228,29 +240,19 @@ impl Cell {
         background: Color,
         attributes: Attributes,
     ) -> Result<Self, CellError> {
-        let symbol = symbol.into();
-        if symbol.is_empty() {
-            return Err(CellError::Empty);
-        }
-        if symbol.len() > MAX_GLYPH_BYTES {
-            return Err(CellError::SymbolTooLong(symbol.len()));
-        }
-        if symbol.graphemes(true).count() != 1 {
-            return Err(CellError::MultipleGraphemes);
-        }
-        if symbol.chars().any(char::is_control) {
-            return Err(CellError::ControlCharacter);
-        }
-        let width = UnicodeWidthStr::width(symbol.as_str());
-        if !(1..=2).contains(&width) {
-            return Err(CellError::UnsupportedWidth(width));
-        }
+        // One shared validator owns the terminal-glyph invariant; `Cell`
+        // translates its error into the cell-specific public error.
+        let glyph = crate::glyph::validate_terminal_glyph(
+            symbol.into().as_str(),
+            crate::glyph::AllowedGlyphWidth::OneOrTwo,
+        )
+        .map_err(cell_error_from_glyph)?;
         Ok(Self {
             foreground,
             background,
             attributes,
-            symbol: Arc::from(symbol),
-            width: width as u8,
+            width: glyph.width() as u8,
+            symbol: glyph.into_text(),
         })
     }
     pub(crate) fn with_width(

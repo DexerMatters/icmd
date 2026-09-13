@@ -6,8 +6,6 @@ use std::{
 };
 
 use crossterm::style::{Attribute, Attributes as CrosstermAttributes, Color};
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::{Node, data::MAX_GLYPH_BYTES};
 
@@ -168,7 +166,21 @@ impl ScrollDelta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Fill(String);
+pub struct Fill {
+    symbol: Arc<str>,
+    width: usize,
+}
+
+// Translation from the shared glyph error to the fill-specific public error.
+pub(crate) fn fill_error_from_glyph(error: crate::glyph::GlyphError) -> FillError {
+    match error {
+        crate::glyph::GlyphError::Empty => FillError::Empty,
+        crate::glyph::GlyphError::SymbolTooLong(bytes) => FillError::SymbolTooLong(bytes),
+        crate::glyph::GlyphError::MultipleGraphemes => FillError::MultipleGraphemes,
+        crate::glyph::GlyphError::ControlCharacter => FillError::ControlCharacter,
+        crate::glyph::GlyphError::UnsupportedWidth(width) => FillError::UnsupportedWidth(width),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FillError {
@@ -199,32 +211,26 @@ impl Error for FillError {}
 
 impl Fill {
     pub fn new(symbol: impl Into<String>) -> Result<Self, FillError> {
-        let symbol = symbol.into();
-        if symbol.is_empty() {
-            return Err(FillError::Empty);
-        }
-        if symbol.len() > MAX_GLYPH_BYTES {
-            return Err(FillError::SymbolTooLong(symbol.len()));
-        }
-        if symbol.graphemes(true).count() != 1 {
-            return Err(FillError::MultipleGraphemes);
-        }
-        if symbol.chars().any(char::is_control) {
-            return Err(FillError::ControlCharacter);
-        }
-        let width = UnicodeWidthStr::width(symbol.as_str());
-        if !(1..=2).contains(&width) {
-            return Err(FillError::UnsupportedWidth(width));
-        }
-        Ok(Self(symbol))
+        // The shared validator owns the terminal-glyph invariant; `Fill`
+        // translates its failure into the fill-specific public error. The
+        // validated display width is cached so width is never recomputed.
+        let glyph = crate::glyph::validate_terminal_glyph(
+            symbol.into().as_str(),
+            crate::glyph::AllowedGlyphWidth::OneOrTwo,
+        )
+        .map_err(fill_error_from_glyph)?;
+        Ok(Self {
+            width: glyph.width(),
+            symbol: glyph.into_text(),
+        })
     }
 
     pub fn symbol(&self) -> &str {
-        &self.0
+        &self.symbol
     }
 
     pub fn width(&self) -> usize {
-        UnicodeWidthStr::width(self.0.as_str())
+        self.width
     }
 }
 
@@ -249,11 +255,16 @@ pub struct ScrollbarGlyph(Fill);
 
 impl ScrollbarGlyph {
     pub fn new(symbol: impl Into<String>) -> Result<Self, FillError> {
-        let fill = Fill::new(symbol)?;
-        if fill.width() != 1 {
-            return Err(FillError::UnsupportedWidth(fill.width()));
-        }
-        Ok(Self(fill))
+        // A scrollbar glyph is the same invariant with a one-column policy.
+        let glyph = crate::glyph::validate_terminal_glyph(
+            symbol.into().as_str(),
+            crate::glyph::AllowedGlyphWidth::One,
+        )
+        .map_err(fill_error_from_glyph)?;
+        Ok(Self(Fill {
+            width: glyph.width(),
+            symbol: glyph.into_text(),
+        }))
     }
 
     pub fn symbol(&self) -> &str {

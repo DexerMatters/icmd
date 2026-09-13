@@ -2,6 +2,7 @@ mod app;
 pub mod basic;
 pub mod data;
 pub mod elements;
+mod glyph;
 mod raster;
 mod runtime;
 pub mod theme;
