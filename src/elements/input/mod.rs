@@ -81,23 +81,69 @@ impl std::fmt::Debug for TextareaProps {
     }
 }
 
-pub fn input(cx: &mut ComponentContext, props: &Props<InputProps>) -> Node {
+// The fields both editor controls share. Single-line and multi-line policy is
+// expressed separately in `EditorMode`, so common prop translation and listener
+// wiring exist exactly once.
+struct EditorHost {
+    value: Attr<String>,
+    default_value: Attr<String>,
+    placeholder: Attr<String>,
+    max_length: Attr<usize>,
+    disabled: Attr<bool>,
+    read_only: Attr<bool>,
+    autofocus: Attr<bool>,
+    on_change: Attr<EventListener<TextValueEvent>>,
+    on_clipboard: Attr<EventListener<TextClipboardEvent>>,
+}
+
+enum EditorMode {
+    SingleLine {
+        on_submit: Attr<EventListener<TextValueEvent>>,
+    },
+    Multiline {
+        wrap: Attr<TextWrap>,
+    },
+}
+
+// One owner for host construction and raw-prop translation. Every semantic
+// difference between the two public controls is explicit here rather than
+// spread across two near-identical component bodies.
+fn editor_host(
+    cx: &mut ComponentContext,
+    host_dom: &DomProps,
+    host: EditorHost,
+    mode: EditorMode,
+) -> Node {
     let theme = cx.use_theme();
-    let dom = props.host_props(input_host(&theme));
+    let (default_dom, raw_mode, wrap, on_submit) = match mode {
+        EditorMode::SingleLine { on_submit } => (
+            input_host(&theme),
+            RawInputMode::SingleLine,
+            Attr::Unset,
+            on_submit,
+        ),
+        EditorMode::Multiline { wrap } => (
+            textarea_host(&theme),
+            RawInputMode::Multiline,
+            wrap,
+            Attr::Unset,
+        ),
+    };
+    let dom = default_dom.with_overrides(host_dom);
     let raw = RawInputProps {
-        mode: Attr::Set(RawInputMode::SingleLine),
-        value: props.value.clone(),
-        default_value: props.default_value.clone(),
-        placeholder: props.placeholder.clone(),
-        max_length: props.max_length,
-        disabled: props.disabled,
-        read_only: props.read_only,
-        autofocus: props.autofocus,
+        mode: Attr::Set(raw_mode),
+        value: host.value,
+        default_value: host.default_value,
+        placeholder: host.placeholder,
+        wrap,
+        max_length: host.max_length,
+        disabled: host.disabled,
+        read_only: host.read_only,
+        autofocus: host.autofocus,
         appearance: Attr::Set(appearance(&theme)),
-        on_change: props.on_change.clone(),
-        on_submit: props.on_submit.clone(),
-        on_clipboard: props.on_clipboard.clone(),
-        ..RawInputProps::default()
+        on_change: host.on_change,
+        on_submit,
+        on_clipboard: host.on_clipboard,
     };
     raw_input.apply(Props {
         dom,
@@ -106,29 +152,44 @@ pub fn input(cx: &mut ComponentContext, props: &Props<InputProps>) -> Node {
     })
 }
 
+pub fn input(cx: &mut ComponentContext, props: &Props<InputProps>) -> Node {
+    editor_host(
+        cx,
+        &props.dom,
+        EditorHost {
+            value: props.value.clone(),
+            default_value: props.default_value.clone(),
+            placeholder: props.placeholder.clone(),
+            max_length: props.max_length,
+            disabled: props.disabled,
+            read_only: props.read_only,
+            autofocus: props.autofocus,
+            on_change: props.on_change.clone(),
+            on_clipboard: props.on_clipboard.clone(),
+        },
+        EditorMode::SingleLine {
+            on_submit: props.on_submit.clone(),
+        },
+    )
+}
+
 pub fn textarea(cx: &mut ComponentContext, props: &Props<TextareaProps>) -> Node {
-    let theme = cx.use_theme();
-    let dom = props.host_props(textarea_host(&theme));
-    let raw = RawInputProps {
-        mode: Attr::Set(RawInputMode::Multiline),
-        value: props.value.clone(),
-        default_value: props.default_value.clone(),
-        placeholder: props.placeholder.clone(),
-        wrap: props.wrap,
-        max_length: props.max_length,
-        disabled: props.disabled,
-        read_only: props.read_only,
-        autofocus: props.autofocus,
-        appearance: Attr::Set(appearance(&theme)),
-        on_change: props.on_change.clone(),
-        on_clipboard: props.on_clipboard.clone(),
-        ..RawInputProps::default()
-    };
-    raw_input.apply(Props {
-        dom,
-        children: Vec::new(),
-        user_defined: raw,
-    })
+    editor_host(
+        cx,
+        &props.dom,
+        EditorHost {
+            value: props.value.clone(),
+            default_value: props.default_value.clone(),
+            placeholder: props.placeholder.clone(),
+            max_length: props.max_length,
+            disabled: props.disabled,
+            read_only: props.read_only,
+            autofocus: props.autofocus,
+            on_change: props.on_change.clone(),
+            on_clipboard: props.on_clipboard.clone(),
+        },
+        EditorMode::Multiline { wrap: props.wrap },
+    )
 }
 
 fn appearance(theme: &Theme) -> RawInputAppearance {

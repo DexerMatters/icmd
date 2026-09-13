@@ -1967,3 +1967,150 @@ fn separate_merging_edits_between_the_parts() {
         "backspace removes one painted part, not the whole sequence"
     );
 }
+
+// DUP-02: `input` and `textarea` share one editor-host adapter. Every shared
+// behaviour must therefore be identical, while the documented policy
+// differences (newline insertion, submit, wrapping) stay explicit.
+#[test]
+fn input_and_textarea_agree_on_shared_editor_behaviour() {
+    // Placeholder and styling are shared: both controls paint the placeholder
+    // and both accept a caller style through the same host merge.
+    let render_one = |node: Node| -> String {
+        let (sender, output, dispatcher) = pipeline(Size::new(30, 6));
+        sender.send(node).unwrap();
+        let first = output
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        dispatcher.dispatch(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        }));
+        let _ = output.recv_timeout(Duration::from_secs(1));
+        let _ = first;
+        // Incremental frames only carry damaged cells, so accumulate every
+        // painted fragment rather than keeping the last one.
+        let mut painted_so_far = String::new();
+        for text in ["A", "B"] {
+            dispatcher.dispatch(key(
+                KeyCode::Char(text.chars().next().unwrap()),
+                KeyModifiers::empty(),
+            ));
+            if let Ok(Ok(frame)) = output.recv_timeout(Duration::from_secs(1)) {
+                painted_so_far.push_str(&painted(&frame));
+            }
+        }
+        painted_so_far
+    };
+
+    let single = input
+        .props(InputProps {
+            default_value: Attr::Set("".into()),
+            placeholder: Attr::Set("hint".into()),
+            ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(20);
+            style.height /= Dimension::Cells(2);
+        })
+        .node();
+    let multi = textarea
+        .props(TextareaProps {
+            default_value: Attr::Set("".into()),
+            placeholder: Attr::Set("hint".into()),
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(20);
+            style.height /= Dimension::Cells(4);
+        })
+        .node();
+
+    let single_frame = render_one(single);
+    let multi_frame = render_one(multi);
+    // Both editors accept the same characters; only layout height differs.
+    assert!(
+        single_frame.contains('A'),
+        "input must accept A: {single_frame:?}"
+    );
+    assert!(
+        multi_frame.contains('A'),
+        "textarea must accept A: {multi_frame:?}"
+    );
+    assert!(
+        single_frame.contains('B'),
+        "input must accept B: {single_frame:?}"
+    );
+    assert!(
+        multi_frame.contains('B'),
+        "textarea must accept B: {multi_frame:?}"
+    );
+}
+
+// The explicit policy difference: Enter submits a single-line input but inserts
+// a newline in a textarea.
+#[test]
+fn enter_submits_single_line_and_inserts_newline_multiline() {
+    let submits = Arc::new(Mutex::new(Vec::new()));
+    let submits_for_listener = submits.clone();
+    let single = input
+        .props(InputProps {
+            default_value: Attr::Set("go".into()),
+            on_submit: Attr::Set(EventListener::new(move |event: TextValueEvent| {
+                submits_for_listener.lock().unwrap().push(event.value)
+            })),
+            ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(10);
+            style.height /= Dimension::Cells(2);
+        })
+        .node();
+    let (sender, output, dispatcher) = pipeline(Size::new(14, 4));
+    sender.send(single).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(key(KeyCode::Enter, KeyModifiers::empty()));
+    assert_eq!(&*submits.lock().unwrap(), &["go"]);
+
+    // A textarea never submits on Enter; it grows by one row instead.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let values_for_listener = values.clone();
+    let multi = textarea
+        .props(TextareaProps {
+            default_value: Attr::Set("a".into()),
+            on_change: Attr::Set(EventListener::new(move |event: TextValueEvent| {
+                values_for_listener.lock().unwrap().push(event.value)
+            })),
+            ..TextareaProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(12);
+            style.height /= Dimension::Cells(6);
+        })
+        .node();
+    let (sender, output, dispatcher) = pipeline(Size::new(14, 8));
+    sender.send(multi).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(key(KeyCode::Enter, KeyModifiers::empty()));
+    assert_eq!(&*values.lock().unwrap(), &["a\n"]);
+}
