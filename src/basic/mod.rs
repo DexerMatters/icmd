@@ -18,7 +18,8 @@ pub use context::{
 pub use dom::{DomId, DomNode};
 pub use events::{
     EventHandlers, EventListener, FocusEvent, KeyboardEvent, PasteEvent, PointerButton,
-    PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent, ScrollEvent, WheelEvent,
+    PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent, ScrollEvent,
+    TerminalFocusEvent, WheelEvent,
 };
 pub use props::{
     Align, Attributes, AxisPosition, BorderKind, BorderStyle, Dimension, DomProps, Edges, Fill,

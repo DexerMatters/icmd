@@ -39,8 +39,6 @@ impl<'a> ScrollLayout<'a> {
     }
 }
 
-/// Canonical geometry for a scrollbar thumb.  Paint and hit-testing consume
-/// the same metrics produced from the layout extent and retained offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ScrollbarMetrics {
     pub(crate) length: i32,
@@ -146,8 +144,13 @@ impl Commit {
                 let text_width = explicit_width
                     .map(|value| value.saturating_sub(insets.left as i32 + insets.right as i32))
                     .or(offered_content_width);
-                let (intrinsic_width, intrinsic_height) =
-                    text_measure(text, text_width, offered_height, style.text);
+                let (intrinsic_width, intrinsic_height) = text_measure(
+                    text,
+                    text_width,
+                    offered_height,
+                    style.text,
+                    self.emoji_merging,
+                );
                 let intrinsic_outer_width = intrinsic_width
                     .saturating_add(insets.left as i32)
                     .saturating_add(insets.right as i32);

@@ -8,13 +8,8 @@ use super::props::{Style, TextStyle};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextWrap {
     #[default]
-    /// Only explicit newline characters create visual rows.
     NoWrap,
-    /// Prefer Unicode line-break opportunities, falling back to extended
-    /// grapheme boundaries for an overlong unbreakable fragment.
     Soft,
-    /// Wrap strictly at the available cell width, splitting only at extended
-    /// grapheme boundaries.
     Hard,
 }
 
@@ -100,11 +95,7 @@ pub struct Text {
     pub(crate) wrap: TextWrap,
     pub(crate) align: TextAlign,
     pub(crate) overflow: TextOverflow,
-    /// Editor-only decorations (selection, caret, placeholder) painted from the
-    /// canonical layout at the committed content width. `None` for ordinary
-    /// text.
     pub(crate) editor: Option<Arc<EditorSurface>>,
-    /// Passive channel the commit pass publishes its layout into.
     pub(crate) probe: Option<LayoutProbe>,
 }
 
@@ -119,7 +110,6 @@ impl fmt::Debug for Text {
     }
 }
 
-/// Equality describes the rendered content only.
 impl PartialEq for Text {
     fn eq(&self, other: &Self) -> bool {
         self.spans == other.spans
@@ -153,8 +143,6 @@ impl Text {
         }
     }
 
-    /// Attach editor-only paint instructions and the probe the commit pass
-    /// publishes its layout into.
     pub(crate) fn editor_surface(mut self, surface: EditorSurface, probe: LayoutProbe) -> Self {
         self.editor = Some(Arc::new(surface));
         self.probe = Some(probe);

@@ -7,11 +7,80 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::RasterPlacement;
 
-/// Maximum number of terminal cells in one retained surface.
 pub const MAX_SURFACE_CELLS: usize = 1_048_576;
 
-/// Maximum UTF-8 size of one terminal grapheme emitted as a cell.
 pub const MAX_GLYPH_BYTES: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmojiMerging {
+    #[default]
+    Auto,
+    Merge,
+    Separate,
+}
+
+impl EmojiMerging {
+    pub const fn merges(self) -> bool {
+        !matches!(self, Self::Separate)
+    }
+}
+
+pub(crate) fn is_emoji_sequence_mark(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{200D}'                  // zero-width joiner
+        | '\u{FE0E}' | '\u{FE0F}'   // variation selectors
+        | '\u{20E3}'                // combining enclosing keycap
+        | '\u{1F3FB}'..='\u{1F3FF}' // skin-tone modifiers
+        | '\u{1F1E6}'..='\u{1F1FF}' // regional indicators
+        | '\u{E0020}'..='\u{E007F}' // tag characters
+    )
+}
+
+pub(crate) fn separate_units(grapheme: &str) -> Option<Vec<(std::ops::Range<usize>, usize)>> {
+    if !grapheme.chars().any(is_emoji_sequence_mark) || grapheme.chars().any(char::is_control) {
+        return None;
+    }
+    let mut units: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+    let mut start = 0usize;
+    let mut width = 0usize;
+    for (index, ch) in grapheme.char_indices() {
+        let ch_width = UnicodeWidthStr::width(ch.to_string().as_str());
+        if ch_width == 0 {
+            if index == 0 {
+                // A leading zero-width codepoint has no unit to attach to.
+                return None;
+            }
+            continue;
+        }
+        if width > 0 {
+            units.push((start..index, width));
+        }
+        start = index;
+        width = ch_width;
+    }
+    if width == 0 {
+        return None;
+    }
+    units.push((start..grapheme.len(), width));
+    Some(units)
+}
+
+pub(crate) fn display_units(value: &str, merging: EmojiMerging) -> Vec<std::ops::Range<usize>> {
+    let mut units = Vec::new();
+    for (index, grapheme) in value.grapheme_indices(true) {
+        if !merging.merges()
+            && let Some(parts) = separate_units(grapheme)
+        {
+            for (range, _) in parts {
+                units.push(index + range.start..index + range.end);
+            }
+            continue;
+        }
+        units.push(index..index + grapheme.len());
+    }
+    units
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord)]
 pub struct ScreenPosition {
@@ -184,6 +253,21 @@ impl Cell {
             width: width as u8,
         })
     }
+    pub(crate) fn with_width(
+        symbol: impl Into<String>,
+        foreground: Color,
+        background: Color,
+        attributes: Attributes,
+        width: usize,
+    ) -> Result<Self, CellError> {
+        let mut cell = Self::new(symbol, foreground, background, attributes)?;
+        if !(1..=2).contains(&width) {
+            return Err(CellError::UnsupportedWidth(width));
+        }
+        cell.width = width as u8;
+        Ok(cell)
+    }
+
     pub fn blank() -> Self {
         Self {
             foreground: Color::Reset,
@@ -574,10 +658,6 @@ impl Image {
         Self::from_rows(rows)
     }
 
-    /// Return the smallest rectangular replacement that changes `self` into
-    /// `next`, provided it is smaller than the full surface. Boundaries are
-    /// expanded around wide glyphs in both images so `PatchRect` can never
-    /// split a continuation cell.
     pub(crate) fn diff_patch_rect(&self, next: &Self) -> Option<(Rect, Vec<Vec<Cell>>)> {
         if self.width != next.width || self.height != next.height || self == next {
             return None;
@@ -727,8 +807,6 @@ pub enum Operation {
         id: ImageId,
         raster: RasterPlacement,
     },
-    /// Restrict a retained raster to a local cell rectangle without changing
-    /// its source image or transform. `None` means its full destination.
     SetRasterClip {
         id: ImageId,
         clip: Option<Rect>,

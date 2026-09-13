@@ -6,7 +6,7 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded};
 use crossterm::style::Color;
 
-use crate::{DomId, DomNode, Frame, Image, ImageId, Size, Text};
+use crate::{DomId, DomNode, EmojiMerging, Frame, Image, ImageId, Size, Text};
 
 use super::event::{EventDispatcher, EventRegion, RuntimeScrollOffset};
 use geometry::RectI;
@@ -21,6 +21,11 @@ mod scene;
 mod style;
 pub(crate) mod text;
 mod types;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommitConfig {
+    pub emoji_merging: EmojiMerging,
+}
 
 struct CachedTextRaster {
     text: Text,
@@ -67,16 +72,28 @@ pub struct Commit {
     text_cache: HashMap<DomId, Vec<CachedTextRaster>>,
     text_cache_tick: u64,
     text_seen: HashSet<DomId>,
+    emoji_merging: EmojiMerging,
 }
 
 impl Commit {
     pub fn new_with_events(viewport: Size) -> (Self, ViewportSetter, EventDispatcher) {
-        let (commit, setter) = Self::new(viewport);
-        let dispatcher = commit.event_dispatcher();
-        (commit, setter, dispatcher)
+        Self::with_config_and_events(viewport, CommitConfig::default())
     }
 
     pub fn new(viewport: Size) -> (Self, ViewportSetter) {
+        let (commit, setter, _) = Self::with_config_and_events(viewport, CommitConfig::default());
+        (commit, setter)
+    }
+
+    pub fn with_config(viewport: Size, config: CommitConfig) -> (Self, ViewportSetter) {
+        let (commit, setter, _) = Self::with_config_and_events(viewport, config);
+        (commit, setter)
+    }
+
+    pub fn with_config_and_events(
+        viewport: Size,
+        config: CommitConfig,
+    ) -> (Self, ViewportSetter, EventDispatcher) {
         let (wake, viewport_rx) = bounded(1);
         let viewport_state = Arc::new(Mutex::new(viewport));
         let setter = ViewportSetter {
@@ -85,24 +102,23 @@ impl Commit {
         };
         let event_dispatcher = EventDispatcher::new(setter.clone());
         let scroll_offsets = event_dispatcher.scroll_offsets();
-        (
-            Self {
-                viewport,
-                viewport_state,
-                viewport_rx,
-                latest: None,
-                scene: HashMap::new(),
-                scene_order: Vec::new(),
-                image_ids: HashMap::new(),
-                next_image_id: 1,
-                event_dispatcher,
-                scroll_offsets,
-                text_cache: HashMap::new(),
-                text_cache_tick: 0,
-                text_seen: HashSet::new(),
-            },
-            setter,
-        )
+        let commit = Self {
+            viewport,
+            viewport_state,
+            viewport_rx,
+            latest: None,
+            scene: HashMap::new(),
+            scene_order: Vec::new(),
+            image_ids: HashMap::new(),
+            next_image_id: 1,
+            event_dispatcher: event_dispatcher.clone(),
+            scroll_offsets,
+            text_cache: HashMap::new(),
+            text_cache_tick: 0,
+            text_seen: HashSet::new(),
+            emoji_merging: config.emoji_merging,
+        };
+        (commit, setter, event_dispatcher)
     }
 
     pub fn event_dispatcher(&self) -> EventDispatcher {
@@ -140,7 +156,15 @@ impl Commit {
             entry.used = used;
             return Some(entry.image.clone());
         }
-        let image = text::raster_text(text, content, visible, inherited, backdrop, scroll)?;
+        let image = text::raster_text(
+            text,
+            content,
+            visible,
+            inherited,
+            backdrop,
+            scroll,
+            self.emoji_merging,
+        )?;
         if entries.len() >= 2 {
             let oldest = entries
                 .iter()
@@ -205,6 +229,12 @@ impl Commit {
             &mut event_order,
             (0, 0),
         );
+        // Autofocus is an explicit post-publication focus request: the runtime
+        // grants it on the next published region set. This is how an input
+        // starts focused without inferring focus from receiving input.
+        if let Some(region) = event_regions.iter().find(|region| region.autofocus) {
+            self.event_dispatcher.request_focus(region.id);
+        }
         self.event_dispatcher
             .publish(event_regions, &retained_scroll_ids);
 

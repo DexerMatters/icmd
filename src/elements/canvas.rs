@@ -246,9 +246,6 @@ impl CanvasContext {
         Ok(())
     }
 
-    /// Draw an image using Chafa's symbol renderer. Canvas drawing is
-    /// immediate, so converting to cells here preserves exact ordering with
-    /// subsequent `set`, shape, and text calls on every terminal.
     pub fn draw_image(
         &mut self,
         source: &RasterImage,

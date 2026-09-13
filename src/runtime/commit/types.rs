@@ -11,8 +11,6 @@ use super::geometry::RectI;
 
 type AxisBounds = Option<(i32, i32)>;
 
-/// The effective text style is owned by the canonical text layout engine so the
-/// editor surface and the commit pipeline share one style type.
 pub(super) use crate::basic::text_layout::ComputedText;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,8 +244,6 @@ pub(super) struct PaintKey {
 pub(super) struct PaintFragment {
     pub(super) content: PaintContent,
     pub(super) position: ScreenPosition,
-    /// Raster-only local visibility. Cell fragments are physically cropped
-    /// while painting; rasters retain their full transform for cache reuse.
     pub(super) raster_clip: Option<crate::Rect>,
     pub(super) level: i32,
     pub(super) order: u64,

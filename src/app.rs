@@ -19,8 +19,8 @@ use crossterm::{
 };
 
 use crate::{
-    Commit, Component, ComponentContext, FrameError, ImageProtocol, ImageUpdatePolicy, Lower, Node,
-    Props, Renderer, RendererConfig, Runtime, Size,
+    Commit, CommitConfig, Component, ComponentContext, EmojiMerging, FrameError, ImageProtocol,
+    ImageUpdatePolicy, Lower, Node, Props, Renderer, RendererConfig, Runtime, Size,
 };
 
 #[derive(Debug, Clone)]
@@ -31,12 +31,10 @@ pub struct RuntimeConfig {
     pub mouse_capture: bool,
     pub bracketed_paste: bool,
     pub focus_change: bool,
-    /// Native protocol selection. `Auto` uses Chafa's environment detection.
     pub image_protocol: ImageProtocol,
-    /// Shared budget for decoded lazy sources and renderer image caches.
     pub image_cache_bytes: usize,
-    /// Native update behavior for protocols without targeted deletion.
     pub image_update_policy: ImageUpdatePolicy,
+    pub emoji_merging: EmojiMerging,
 }
 
 impl Default for RuntimeConfig {
@@ -51,6 +49,7 @@ impl Default for RuntimeConfig {
             image_protocol: ImageProtocol::Auto,
             image_cache_bytes: 64 * 1024 * 1024,
             image_update_policy: ImageUpdatePolicy::Adaptive,
+            emoji_merging: EmojiMerging::default(),
         }
     }
 }
@@ -187,7 +186,12 @@ fn receive_frame(
 pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), RenderError> {
     let viewport = terminal::size().map(|(width, height)| Size::new(width, height))?;
     let mut terminal = TerminalSession::enter(config.clone())?;
-    let (commit, _, dispatcher) = Commit::new_with_events(viewport);
+    let (commit, _, dispatcher) = Commit::with_config_and_events(
+        viewport,
+        CommitConfig {
+            emoji_merging: config.emoji_merging,
+        },
+    );
     let renderer = Renderer::with_config(
         viewport,
         RendererConfig {
@@ -198,6 +202,7 @@ pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), Render
             // viewport resizes. Standalone renderers can still set an exact
             // value for deterministic tests.
             cell_pixel_size: None,
+            emoji_merging: config.emoji_merging,
         },
     )
     .map_err(RenderError::Frame)?;

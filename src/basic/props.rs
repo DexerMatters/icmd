@@ -13,17 +13,13 @@ use crate::{Node, data::MAX_GLYPH_BYTES};
 
 use super::{common::Attr, events::EventHandlers, text::Text};
 
-/// The reference space used when resolving a percentage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum PercentBasis {
-    /// Resolve against the space offered by the parent layout.
     #[default]
     Available,
-    /// Resolve against the terminal viewport on the corresponding axis.
     Viewport,
 }
 
-/// A percentage whose reference space is either the parent or the viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Percent {
     basis_points: i32,
@@ -35,12 +31,10 @@ impl Percent {
     pub const FULL: Self = Self::available(100);
     pub const VIEWPORT_FULL: Self = Self::viewport(100);
 
-    /// Construct a percentage relative to the space offered by the parent.
     pub const fn available(value: i32) -> Self {
         Self::available_basis_points(value.saturating_mul(100))
     }
 
-    /// Construct a percentage relative to the terminal viewport.
     pub const fn viewport(value: i32) -> Self {
         Self::viewport_basis_points(value.saturating_mul(100))
     }
@@ -67,10 +61,6 @@ impl Percent {
         self.basis
     }
 
-    /// Resolve the percentage against an explicitly supplied reference size.
-    ///
-    /// Layout uses [`Self::basis`] to select either the available space or
-    /// viewport before calling this method.
     pub fn resolve(self, reference: i32) -> i32 {
         ((reference as i64 * self.basis_points as i64) / 10_000)
             .clamp(i32::MIN as i64, i32::MAX as i64) as i32
@@ -82,8 +72,6 @@ pub enum Dimension {
     #[default]
     Auto,
     Cells(u16),
-    /// A percentage of either available parent space or the viewport,
-    /// selected by [`Percent::basis`].
     Percent(Percent),
     Max,
 }
@@ -93,8 +81,6 @@ pub enum AxisPosition {
     #[default]
     Start,
     Cells(i32),
-    /// An offset relative to the available travel or the viewport,
-    /// selected by [`Percent::basis`].
     Percent(Percent),
     Center,
     End,
@@ -137,9 +123,7 @@ pub enum Align {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Overflow {
     #[default]
-    /// Clip content at the element's content edge without scrolling.
     Clip,
-    /// Paint content outside the element when the parent clip allows it.
     Visible,
 }
 
@@ -260,7 +244,6 @@ impl TryFrom<String> for Fill {
     }
 }
 
-/// A terminal glyph that occupies exactly one column, suitable for a scrollbar.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScrollbarGlyph(Fill);
 
@@ -541,11 +524,8 @@ pub struct Style {
     pub gap: Attr<u16>,
     pub justify: Attr<Justify>,
     pub align: Attr<Align>,
-    /// Shorthand applied to both axes unless an axis-specific value is set.
     pub overflow: Attr<Overflow>,
-    /// Horizontal overflow behavior.
     pub overflow_x: Attr<Overflow>,
-    /// Vertical overflow behavior.
     pub overflow_y: Attr<Overflow>,
     pub visibility: Attr<Visibility>,
     pub z_index: Attr<i32>,
@@ -555,10 +535,8 @@ pub struct Style {
     pub text: TextStyle,
 }
 
-/// A reusable, thread-safe style mutation.
 pub type StylePatch = Arc<dyn Fn(&mut Style) + Send + Sync + 'static>;
 
-/// Create a reusable style mutation for composing component defaults.
 pub fn style_patch(apply: impl Fn(&mut Style) + Send + Sync + 'static) -> StylePatch {
     Arc::new(apply)
 }
@@ -610,12 +588,10 @@ impl TextStyle {
 }
 
 impl Style {
-    /// Apply a reusable style patch.
     pub fn patch(&mut self, patch: &StylePatch) {
         patch(self);
     }
 
-    /// Merge caller overrides over these defaults, preserving unset fields.
     pub fn with_overrides(mut self, overrides: &Self) -> Self {
         macro_rules! merge {
             ($($field:ident),+ $(,)?) => {
@@ -673,12 +649,11 @@ impl ops::DivAssign<&StylePatch> for Style {
 pub struct DomProps {
     pub style: Style,
     pub events: EventHandlers,
-    /// Whether a pointer press on this host moves keyboard focus to it.
-    ///
-    /// Focus is an explicit property rather than inferred from which event
-    /// callbacks happen to be installed: a component that wants keyboard focus
-    /// opts in, and everyone else stays non-focusable by default.
     pub focusable: bool,
+    // Ask the runtime to focus this region after it is published, if nothing
+    // else owns focus. This is the explicit post-publication focus request an
+    // input uses to start focused without inferring focus from input delivery.
+    pub autofocus: bool,
     pub(crate) scroll: Option<Box<ScrollConfig>>,
 }
 
@@ -696,11 +671,11 @@ pub(crate) struct ScrollConfig {
 }
 
 impl DomProps {
-    /// Merge caller DOM props over component defaults field by field.
     pub fn with_overrides(mut self, overrides: &Self) -> Self {
         self.style = self.style.with_overrides(&overrides.style);
         self.events.merge(&overrides.events);
         self.focusable |= overrides.focusable;
+        self.autofocus |= overrides.autofocus;
         if overrides.scroll.is_some() {
             self.scroll = overrides.scroll.clone();
         }
@@ -710,9 +685,6 @@ impl DomProps {
 
 #[derive(Clone)]
 pub struct Props<T> {
-    /// DOM props supplied to this component. Function components must
-    /// explicitly forward these to a host [`crate::view`] to make them
-    /// visible; logical components do not create a renderer node themselves.
     pub dom: DomProps,
     pub children: Vec<Node>,
     pub user_defined: T,
@@ -734,12 +706,10 @@ impl<T> Props<T> {
         &mut self.user_defined
     }
 
-    /// Merge caller-supplied host props over component defaults.
     pub fn host_props(&self, defaults: DomProps) -> DomProps {
         defaults.with_overrides(&self.dom)
     }
 
-    /// Collect this component's children into a logical fragment node.
     pub fn children_node(&self) -> Node {
         self.children.clone().into_iter().collect()
     }

@@ -1,28 +1,3 @@
-//! One canonical text layout engine.
-//!
-//! This module is the single owner of text shaping geometry: it turns styled
-//! source text into visual rows of extended grapheme clusters, and answers
-//! every geometric question the commit pipeline and the editor surface have:
-//!
-//! - cell measurement and visual row count;
-//! - source byte boundary to caret cell and visual row;
-//! - visual cell to source byte boundary with an explicit hit bias;
-//! - vertical movement through a preferred terminal-cell column; and
-//! - ordered iteration for rasterization, selection, and caret decoration.
-//!
-//! Everything is expressed over three coordinate systems that are never used
-//! interchangeably: UTF-8 source bytes, extended grapheme clusters, and
-//! terminal cells. Every source position the layout returns is an extended
-//! grapheme boundary.
-//!
-//! Wrapping follows the terminal text model used by the renderer. `Soft`
-//! wrapping prefers Unicode line-break opportunities (falling back to grapheme
-//! boundaries for an overlong unbreakable fragment), `Hard` wrapping splits at
-//! the cell limit, and `NoWrap` only breaks at explicit newlines. At a
-//! non-final soft-wrap boundary the trailing whitespace that caused the break is
-//! dropped from the painted row but stays navigable as an
-//! [`ItemKind::Separator`].
-
 use std::ops::Range;
 
 use textwrap::core::Fragment;
@@ -30,41 +5,27 @@ use textwrap::wrap_algorithms::wrap_first_fit;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::MAX_GLYPH_BYTES;
+use crate::{EmojiMerging, MAX_GLYPH_BYTES};
 
 use super::props::TextStyle;
 use super::text::{Text, TextWrap};
 
-/// The tab stop width used by both the renderer and the editor.
 pub(crate) const TAB_WIDTH: usize = 4;
 
-/// How a pointer hit inside an ambiguous cell is resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum HitBias {
-    /// A hit on a wide grapheme before its halfway cell resolves to the
-    /// grapheme's leading boundary. This is what vertical navigation wants.
     #[default]
     Leading,
-    /// A hit before a wide grapheme's halfway cell resolves to its trailing
-    /// boundary. This is the pointer-selection default: clicking a glyph places
-    /// the caret after it.
     Trailing,
 }
 
-/// The role a laid-out item plays in the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ItemKind {
-    /// A visible grapheme cluster. It may have cell width zero.
     Glyph,
-    /// Whitespace dropped at a soft-wrap boundary. It owns source bytes but is
-    /// not painted.
     Separator,
-    /// An explicit line break (`\n` after normalization). It owns its source
-    /// bytes and ends the current row.
     Newline,
 }
 
-/// Effective (resolved) text style attached to each laid-out item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ComputedText {
     pub foreground: crossterm::style::Color,
@@ -82,44 +43,27 @@ impl Default for ComputedText {
     }
 }
 
-/// One laid-out unit: a grapheme cluster, a dropped wrap separator, or an
-/// explicit newline.
-///
-/// `source` is the UTF-8 range in the caller's source string; `text` is the
-/// same unit inside the layout's normalized string. `symbol` is what the
-/// renderer paints (for example a tab expands to spaces).
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // `text`/`cell`/`row` are the layout's public geometry surface.
 pub(crate) struct Item {
     pub(crate) source: Range<usize>,
     pub(crate) text: Range<usize>,
-    /// Cell offset of this item inside its visual row.
     pub(crate) cell: usize,
-    /// Terminal cells this item occupies. Always zero for newlines and
-    /// zero-width graphemes.
     pub(crate) width: usize,
     pub(crate) kind: ItemKind,
-    /// Row index this item belongs to.
     pub(crate) row: usize,
     pub(crate) symbol: String,
     pub(crate) style: ComputedText,
 }
 
-/// One visual row: a contiguous, ordered range of items.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Row {
     pub(crate) first_item: usize,
-    /// Number of items in this row. A row can be empty (an empty logical line).
     pub(crate) len: usize,
-    /// First source byte this row owns.
     pub(crate) source_start: usize,
-    /// End of the source bytes this row owns, including a dropped wrap
-    /// separator and the explicit newline that terminates it. Ranges tile the
-    /// value exactly: each row's end is the next row's start.
     pub(crate) source_end: usize,
 }
 
-/// One shaped grapheme handed to [`TextLayout::layout`].
 #[derive(Debug, Clone)]
 pub(crate) struct ShapedGlyph<S> {
     pub source: Range<usize>,
@@ -131,44 +75,36 @@ pub(crate) struct ShapedGlyph<S> {
     pub style: S,
 }
 
-/// An immutable layout of one styled text value at one cell width.
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)] // Operations are the API; storage stays private.
 pub(crate) struct TextLayout {
     text: String,
     items: Vec<Item>,
     rows: Vec<Row>,
-    /// Every valid source boundary in ascending order: 0, each grapheme edge,
-    /// each explicit-newline edge, and the end of the value. Navigation clamps
-    /// and steps through this table, so a returned position is always a real
-    /// boundary and newlines stay navigable even though they own no items.
     boundaries: Vec<usize>,
-    /// Total cell width of the layout (the widest row).
     width: usize,
-    /// Total source length the layout owns (including the final newline).
     source_len: usize,
 }
 
-/// Build the canonical layout of `text` for `width` cells, merging each span's
-/// style over `inherited` with `merge`.
 pub(crate) fn layout_text<S>(
     text: &Text,
     width: usize,
     inherited: ComputedText,
+    merging: EmojiMerging,
     merge: impl Fn(ComputedText, &TextStyle) -> S,
     into_computed: impl Fn(&S) -> ComputedText,
 ) -> TextLayout
 where
     S: Clone,
 {
-    let shaped = shape_text(text, inherited, merge);
+    let shaped = shape_text(text, inherited, merging, merge);
     TextLayout::layout(shaped, text.wrap, width, into_computed)
 }
 
-/// Shape every grapheme of `text` without wrapping, preserving span styles.
 fn shape_text<S>(
     text: &Text,
     inherited: ComputedText,
+    merging: EmojiMerging,
     merge: impl Fn(ComputedText, &TextStyle) -> S,
 ) -> Vec<ShapedGlyph<S>>
 where
@@ -184,6 +120,30 @@ where
         let style = merge(inherited, &span.style);
         let content = span.content.replace("\r\n", "\n").replace('\r', "\n");
         for (source_index, grapheme) in content.grapheme_indices(true) {
+            if !merging.merges()
+                && let Some(parts) = crate::data::separate_units(grapheme)
+            {
+                // Each unit owns its own codepoints' source range, so a caret
+                // boundary exists between the parts - exactly the cells a
+                // non-merging terminal paints - and pointer hits are monotonic
+                // across them.
+                for (range, width) in parts {
+                    let symbol = grapheme[range.clone()].to_string();
+                    let text_end = text_offset + symbol.len();
+                    shaped.push(ShapedGlyph {
+                        source: source_origin + source_index + range.start
+                            ..source_origin + source_index + range.end,
+                        text_start: text_offset,
+                        text_end,
+                        width,
+                        symbol,
+                        kind: ItemKind::Glyph,
+                        style: style.clone(),
+                    });
+                    text_offset = text_end;
+                }
+                continue;
+            }
             let (symbol, width, kind) = display_glyph(grapheme);
             let text_end = text_offset + symbol.len();
             shaped.push(ShapedGlyph {
@@ -202,7 +162,6 @@ where
     shaped
 }
 
-/// The display symbol, cell width, and role of one grapheme.
 fn display_glyph(grapheme: &str) -> (String, usize, ItemKind) {
     if grapheme == "\n" {
         return ("\n".to_string(), 0, ItemKind::Newline);
@@ -224,8 +183,6 @@ fn display_glyph(grapheme: &str) -> (String, usize, ItemKind) {
 }
 
 impl TextLayout {
-    /// Lay out pre-shaped graphemes. `into_computed` projects the caller's
-    /// style type onto the effective text style stored per item.
     pub(crate) fn layout<S>(
         shaped: Vec<ShapedGlyph<S>>,
         wrap: TextWrap,
@@ -278,7 +235,6 @@ impl TextLayout {
         // Whitespace is dropped only on a non-final row of its logical line.
         struct Placed {
             range: Range<usize>,
-            /// First source byte this visual row owns.
             source_start: usize,
             pieces: Vec<Piece>,
             is_last_row: bool,
@@ -409,30 +365,25 @@ impl TextLayout {
         }
     }
 
-    /// Number of visual rows this layout occupies.
     #[allow(dead_code)]
     pub(crate) fn row_count(&self) -> usize {
         self.rows.len()
     }
 
-    /// Intrinsic content width in terminal cells.
     pub(crate) fn width(&self) -> usize {
         self.width
     }
 
-    /// Total UTF-8 source length the layout owns.
     #[allow(dead_code)]
     pub(crate) fn source_len(&self) -> usize {
         self.source_len
     }
 
-    /// The normalized string the layout was shaped from.
     #[allow(dead_code)]
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
-    /// Layout items in visual order.
     #[allow(dead_code)]
     pub(crate) fn items(&self) -> &[Item] {
         &self.items
@@ -444,18 +395,13 @@ impl TextLayout {
         })
     }
 
-    /// First UTF-8 source byte this row owns.
     pub(crate) fn row_start(&self, index: usize) -> usize {
         self.rows
             .get(index)
             .map_or(self.source_len, |row| row.source_start)
     }
 
-    /// End of the UTF-8 source bytes painted on `index`.
     #[allow(dead_code)]
-    ///
-    /// Whitespace dropped at a soft-wrap boundary is not painted, so this stops
-    /// before it even though [`Self::row_source_end`] owns it.
     pub(crate) fn row_end(&self, index: usize) -> usize {
         self.row_items(index)
             .iter()
@@ -463,12 +409,6 @@ impl TextLayout {
             .map_or_else(|| self.row_start(index), |item| item.source.end)
     }
 
-    /// End of the UTF-8 source bytes owned by `index`, including whitespace
-    /// dropped at a soft-wrap boundary.
-    ///
-    /// Together with [`Self::row_start`], row ranges tile the source with no
-    /// gaps or overlaps: each row starts where the previous one ended, and an
-    /// explicit newline is the last byte the next row does not own.
     #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
     pub(crate) fn row_source_end(&self, index: usize) -> usize {
         self.rows
@@ -476,7 +416,6 @@ impl TextLayout {
             .map_or(self.source_len, |row| row.source_end)
     }
 
-    /// Total painted cell width of `index`.
     pub(crate) fn row_width(&self, index: usize) -> usize {
         // A separator is deliberately not painted, so it contributes no cells
         // even though it owns source bytes.
@@ -486,7 +425,6 @@ impl TextLayout {
             .fold(0usize, |sum, item| sum.saturating_add(item.width))
     }
 
-    /// The maximum painted row width across the layout.
     pub(crate) fn max_row_width(&self) -> usize {
         (0..self.rows.len())
             .map(|index| self.row_width(index))
@@ -494,10 +432,6 @@ impl TextLayout {
             .unwrap_or(0)
     }
 
-    /// The visual row that owns `source`, clamped into range.
-    ///
-    /// Row ranges tile the value, so this is the first row whose owned range
-    /// contains `source`; a position at the very end resolves to the final row.
     pub(crate) fn row_of_source(&self, source: usize) -> usize {
         if self.rows.is_empty() {
             return 0;
@@ -511,11 +445,6 @@ impl TextLayout {
         self.rows.len() - 1
     }
 
-    /// The nearest valid source boundary to `source`, clamped to the value.
-    ///
-    /// The boundary table includes explicit newlines, so a position on a line
-    /// break resolves to a real boundary instead of jumping to the next
-    /// grapheme.
     pub(crate) fn clamp(&self, source: usize) -> usize {
         if self.boundaries.is_empty() {
             return 0;
@@ -543,9 +472,6 @@ impl TextLayout {
         }
     }
 
-    /// Source boundary immediately before `source`.
-    ///
-    /// Used by backward navigation.
     #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
     pub(crate) fn previous_boundary(&self, source: usize) -> usize {
         let source = self.clamp(source);
@@ -557,9 +483,6 @@ impl TextLayout {
         }
     }
 
-    /// Source boundary immediately after `source`.
-    ///
-    /// This always advances, so walking it terminates.
     #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
     pub(crate) fn next_boundary(&self, source: usize) -> usize {
         let clamped = self.clamp(source);
@@ -573,9 +496,6 @@ impl TextLayout {
         }
     }
 
-    /// The caret position for a source boundary: the visual row, the cell
-    /// column the caret sits at, and the width of the grapheme it precedes
-    /// (1 at end of row).
     pub(crate) fn caret(&self, source: usize) -> (usize, usize, usize) {
         if self.rows.is_empty() {
             return (0, 0, 1);
@@ -613,12 +533,6 @@ impl TextLayout {
         (row, cell, 1)
     }
 
-    /// Map a pointer hit at `cell` inside `row` to a source boundary.
-    ///
-    /// [`HitBias::Leading`] resolves to the hit grapheme's leading boundary;
-    /// [`HitBias::Trailing`] resolves to its trailing boundary. A width-two
-    /// grapheme is split at its halfway cell: the left half uses the leading
-    /// boundary and the right half the trailing boundary under either bias.
     pub(crate) fn hit(&self, row: usize, cell: usize, bias: HitBias) -> usize {
         let row = row.min(self.rows.len().saturating_sub(1));
         let mut offset = 0usize;
@@ -658,32 +572,18 @@ impl TextLayout {
         self.row_last_boundary(row)
     }
 
-    /// The last source boundary that still belongs to `row`: the end of its
-    /// final painted item, or its own start for an empty row.
-    /// The last source boundary a hit inside `row` can resolve to.
-    ///
-    /// This is the end of the row's final item of any kind. Using only painted
-    /// glyphs would make `hit` non-monotonic: the item loop above already
-    /// resolves cells inside a trailing dropped separator, so a hit one cell
-    /// further right must not jump backwards to the last painted glyph.
     fn row_last_boundary(&self, row: usize) -> usize {
         self.row_items(row)
             .last()
             .map_or_else(|| self.row_start(row), |item| item.source.end)
     }
 
-    /// The cell column of a source boundary inside its visual row.
     #[allow(dead_code)]
     pub(crate) fn column(&self, source: usize) -> usize {
         let (_, cell, _) = self.caret(source);
         cell
     }
 
-    /// Move `source` vertically by `direction` rows, keeping `preferred` as the
-    /// target terminal-cell column when the caller supplied one.
-    ///
-    /// Returns the new boundary and the preferred column that should be carried
-    /// into the next vertical move.
     #[allow(dead_code)]
     pub(crate) fn vertical(
         &self,
@@ -702,11 +602,6 @@ impl TextLayout {
     }
 }
 
-/// Split the logical line `first..first + len` into wrapping pieces.
-///
-/// The returned pieces cover the line in order; a soft wrap boundary may drop
-/// trailing whitespace, but that whitespace stays inside the owning piece so
-/// source navigation remains complete.
 fn line_pieces<S>(
     shaped: &[ShapedGlyph<S>],
     widths: &[usize],
@@ -755,7 +650,6 @@ fn line_pieces<S>(
     pieces
 }
 
-/// Hard wrapping splits at grapheme boundaries and never drops a glyph.
 fn hard_pieces(widths: &[usize], first: usize, last: usize) -> Vec<Piece> {
     (first..last)
         .map(|index| Piece {
@@ -768,11 +662,6 @@ fn hard_pieces(widths: &[usize], first: usize, last: usize) -> Vec<Piece> {
         .collect()
 }
 
-/// True when `index` is whitespace dropped at a soft-wrap boundary.
-///
-/// Dropping happens only on a row that is not the final row of its logical
-/// line: whitespace inside a piece ("hello world" fitting on one row) and
-/// trailing whitespace on the last row both stay painted.
 fn item_is_dropped_separator(pieces: &[Piece], index: usize, is_last_row: bool) -> bool {
     if is_last_row {
         // The last row of a logical line paints its trailing whitespace.
@@ -792,8 +681,6 @@ fn item_is_dropped_separator(pieces: &[Piece], index: usize, is_last_row: bool) 
     is_last_piece && index >= piece.content_end
 }
 
-/// Painted cell width of a row. Separators are excluded: they own source bytes
-/// but are deliberately not drawn, so they contribute no cells.
 fn row_cells(items: &[Item], row: &Row) -> usize {
     items[row.first_item..row.first_item + row.len]
         .iter()
@@ -801,7 +688,6 @@ fn row_cells(items: &[Item], row: &Row) -> usize {
         .fold(0usize, |sum, item| sum.saturating_add(item.width))
 }
 
-/// A wrapping fragment over a half-open item range.
 #[derive(Debug, Clone, Copy)]
 struct Piece {
     start: usize,
@@ -825,7 +711,6 @@ impl Fragment for Piece {
     }
 }
 
-/// Build soft-wrap pieces from Unicode line-break opportunities.
 fn soft_pieces<S>(
     shaped: &[ShapedGlyph<S>],
     widths: &[usize],
@@ -946,6 +831,24 @@ pub(crate) fn layout_for_test(value: &str, wrap: TextWrap, width: usize) -> Text
         &Text::new(value).wrap(wrap),
         width,
         ComputedText::default(),
+        EmojiMerging::Merge,
+        |parent, _| parent,
+        |style| *style,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn layout_for_test_with(
+    value: &str,
+    wrap: TextWrap,
+    width: usize,
+    merging: EmojiMerging,
+) -> TextLayout {
+    layout_text(
+        &Text::new(value).wrap(wrap),
+        width,
+        ComputedText::default(),
+        merging,
         |parent, _| parent,
         |style| *style,
     )
@@ -960,6 +863,7 @@ mod tests {
             &Text::new(value).wrap(wrap),
             width,
             ComputedText::default(),
+            EmojiMerging::Merge,
             |parent, _| parent,
             |style| *style,
         )
@@ -1152,8 +1056,6 @@ mod tests {
         assert_eq!(layout.column(moved), 2);
     }
 
-    /// A row that packs several wrapping pieces paints the whitespace between
-    /// them: only the whitespace that pushed a piece to a later row is dropped.
     #[test]
     fn separators_inside_a_row_are_painted() {
         let layout = build("ab cd efgh", TextWrap::Soft, 6);
@@ -1197,11 +1099,8 @@ mod tests {
     }
 }
 
-/// Shared helpers for the layout property tests below.
 #[cfg(test)]
 mod parity {
-    /// The normalized form an editor lays out: CRLF/CR to LF, other controls
-    /// discarded.
     pub(crate) fn normalized(value: &str) -> String {
         value
             .replace("\r\n", "\n")
@@ -1254,14 +1153,27 @@ mod property_tests {
             "e\u{301}\u{301}f",
             "🇺🇸🇨🇳",
             "👍🏽ok",
+            // Emoji sequences whose clusters merge at runtime.
+            "👩\u{200D}💻",
+            "👨\u{200D}👩\u{200D}👧\u{200D}👦",
+            "👩\u{200D}",
+            "\u{200D}💻",
+            "a\u{200D}b",
+            "\u{200D}",
+            "\u{FE0F}",
+            "\u{301}",
+            "1\u{FE0F}\u{20E3}",
+            "❤\u{FE0F}",
+            "❤",
+            "👍👍",
+            "🇺🇸🇨🇳🇯🇵",
+            "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
         ]
     }
 
     const WRAPS: [W; 3] = [W::NoWrap, W::Soft, W::Hard];
     const WIDTHS: [usize; 10] = [1, 2, 3, 4, 5, 6, 8, 12, 24, 80];
 
-    /// Every source position the layout returns is an extended-grapheme
-    /// boundary of the normalized value.
     #[test]
     fn every_returned_position_is_a_grapheme_boundary() {
         use unicode_segmentation::UnicodeSegmentation;
@@ -1307,8 +1219,6 @@ mod property_tests {
         }
     }
 
-    /// `hit(caret(position))` round-trips for every boundary whose visual
-    /// position is unambiguous.
     #[test]
     fn hit_test_round_trips_caret_positions() {
         for value in corpus() {
@@ -1343,8 +1253,6 @@ mod property_tests {
         }
     }
 
-    /// Every displayed cell is reachable by pointer hit-testing: walking the
-    /// cells of a row never skips past a painted grapheme.
     #[test]
     fn every_displayed_cell_is_reachable() {
         for value in corpus() {
@@ -1374,8 +1282,6 @@ mod property_tests {
         }
     }
 
-    /// Measure and paint agree on the row count and the widest row for every
-    /// viewport width, including zero and one cell.
     #[test]
     fn measure_and_paint_agree_on_extents() {
         for value in corpus() {
@@ -1395,9 +1301,6 @@ mod property_tests {
         }
     }
 
-    /// `NoWrap`, `Soft`, and `Hard` never lose a source byte and never paint a
-    /// row wider than the viewport unless the text is unbreakable under that
-    /// policy.
     #[test]
     fn wrap_modes_preserve_source_and_respect_the_viewport() {
         for value in corpus() {
@@ -1434,8 +1337,6 @@ mod property_tests {
         }
     }
 
-    /// A width-two grapheme in a one-cell viewport keeps its leading boundary
-    /// visible instead of producing an invalid continuation cell.
     #[test]
     fn wide_graphemes_in_a_one_cell_viewport_are_safe() {
         // The wide grapheme overflows its one-cell viewport, but it still owns
@@ -1470,8 +1371,6 @@ mod property_tests {
         );
     }
 
-    /// Selection and caret never style only half of a wide glyph: a grapheme's
-    /// source range is indivisible in the item table.
     #[test]
     fn wide_glyphs_are_indivisible() {
         for value in ["界a", "你好", "👍🏽ok"] {
@@ -1498,8 +1397,183 @@ mod property_tests {
         }
     }
 
-    /// Vertical movement keeps a preferred terminal-cell column across short
-    /// rows and never leaves the row table.
+    #[test]
+    fn merging_sequences_are_single_graphemes() {
+        use unicode_segmentation::UnicodeSegmentation;
+        use unicode_width::UnicodeWidthStr;
+        for value in [
+            "👩\u{200D}💻",
+            "👨\u{200D}👩\u{200D}👧\u{200D}👦",
+            "👩\u{200D}",
+            "👍🏽",
+            "🇺🇸",
+            "1\u{FE0F}\u{20E3}",
+            "❤\u{FE0F}",
+            "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
+        ] {
+            assert_eq!(value.graphemes(true).count(), 1, "{value:?} is one cluster");
+            let measured = UnicodeWidthStr::width(value);
+            assert!(
+                (1..=2).contains(&measured),
+                "{value:?} measures {measured} cells"
+            );
+            for wrap in WRAPS {
+                for width in WIDTHS {
+                    let layout = layout_for_test(value, wrap, width);
+                    assert_eq!(
+                        layout.items().len(),
+                        1,
+                        "{value:?} {wrap:?} {width} must shape one item"
+                    );
+                    let item = &layout.items()[0];
+                    assert_eq!(
+                        item.source,
+                        0..value.len(),
+                        "{value:?} {wrap:?} {width} owns its whole source range"
+                    );
+                    assert_eq!(
+                        item.width, measured,
+                        "{value:?} {wrap:?} {width} keeps its measured width"
+                    );
+                }
+            }
+        }
+    }
+
+    fn separate_corpus() -> Vec<(&'static str, usize)> {
+        vec![
+            ("👩\u{200D}💻", 4),
+            ("👨\u{200D}👩\u{200D}👧\u{200D}👦", 8),
+            ("👍🏽", 4),
+            ("🇺🇸", 2),
+            ("1\u{FE0F}\u{20E3}", 1),
+            ("❤\u{FE0F}", 1),
+            ("a👩\u{200D}💻b", 6),
+            ("x👍🏽y", 6),
+        ]
+    }
+
+    #[test]
+    fn separate_merging_measures_each_codepoint() {
+        for (value, expected) in separate_corpus() {
+            for wrap in WRAPS {
+                for width in WIDTHS {
+                    let layout = layout_for_test_with(value, wrap, width, EmojiMerging::Separate);
+                    // Wrapping only moves whole groups between rows, so the
+                    // cells painted across the value are the same at every
+                    // width.
+                    let painted: usize = layout
+                        .items()
+                        .iter()
+                        .filter(|item| item.kind == ItemKind::Glyph)
+                        .map(|item| item.width)
+                        .sum();
+                    assert_eq!(
+                        painted, expected,
+                        "{value:?} {wrap:?} {width} must paint {expected} cells"
+                    );
+                    // No grapheme is ever painted in two rows: every item that
+                    // shares a source range shares a row.
+                    let mut ranges: Vec<Range<usize>> = layout
+                        .items()
+                        .iter()
+                        .map(|item| item.source.clone())
+                        .collect();
+                    ranges.sort_by_key(|range| (range.start, range.end));
+                    ranges.dedup();
+                    for range in ranges {
+                        let rows: Vec<usize> = layout
+                            .items()
+                            .iter()
+                            .filter(|item| item.source == range)
+                            .map(|item| item.row)
+                            .collect();
+                        assert!(
+                            rows.windows(2).all(|pair| pair[0] == pair[1]),
+                            "a grapheme split across rows for {value:?} {wrap:?} {width}"
+                        );
+                    }
+                    // Every part still resolves to the grapheme's own
+                    // boundaries, so navigation steps over the sequence whole.
+                    assert_eq!(layout.clamp(value.len()), value.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn separate_merging_tiles_the_source_without_splitting_a_unit() {
+        let sequence = "👩\u{200D}💻";
+        let value = format!("ab{sequence}cd");
+        for wrap in [W::Soft, W::Hard] {
+            for width in [1usize, 2, 3, 4, 6] {
+                let layout = layout_for_test_with(&value, wrap, width, EmojiMerging::Separate);
+                let mut cursor = 0usize;
+                for index in 0..layout.row_count() {
+                    assert_eq!(
+                        layout.row_start(index),
+                        cursor,
+                        "{wrap:?} {width} row start"
+                    );
+                    cursor = layout.row_source_end(index);
+                }
+                assert_eq!(cursor, value.len(), "{wrap:?} {width} rows cover the value");
+                // The sequence shapes two units, each two cells, and the value
+                // keeps its six cells in total.
+                let parts: Vec<_> = layout
+                    .items()
+                    .iter()
+                    .filter(|item| item.source.start >= 2 && item.source.end <= 2 + sequence.len())
+                    .collect();
+                assert_eq!(parts.len(), 2, "{wrap:?} {width}: two parts");
+                assert!(
+                    parts.iter().all(|item| item.width == 2),
+                    "{wrap:?} {width}: each part is two cells"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn separate_merging_refines_the_merged_boundaries() {
+        for (value, _) in separate_corpus() {
+            for wrap in WRAPS {
+                let merged = layout_for_test_with(value, wrap, 4, EmojiMerging::Merge);
+                let separate = layout_for_test_with(value, wrap, 4, EmojiMerging::Separate);
+                assert_eq!(merged.source_len(), separate.source_len(), "{value:?}");
+                for layout in [&merged, &separate] {
+                    let mut cursor = 0usize;
+                    for index in 0..layout.row_count() {
+                        assert_eq!(layout.row_start(index), cursor, "{value:?} row start");
+                        cursor = layout.row_source_end(index);
+                    }
+                    assert_eq!(cursor, value.len(), "{value:?} rows must cover the value");
+                }
+                // Every merged boundary is a separate boundary.
+                let mut merged_walk = 0usize;
+                loop {
+                    let mut candidate = 0usize;
+                    let mut found = false;
+                    loop {
+                        if candidate == merged_walk {
+                            found = true;
+                            break;
+                        }
+                        if candidate >= value.len() {
+                            break;
+                        }
+                        candidate = separate.next_boundary(candidate);
+                    }
+                    assert!(found, "{value:?}: {merged_walk} is not a separate boundary");
+                    if merged_walk >= value.len() {
+                        break;
+                    }
+                    merged_walk = merged.next_boundary(merged_walk);
+                }
+            }
+        }
+    }
+
     #[test]
     fn vertical_movement_keeps_a_preferred_column() {
         let layout = layout_for_test("abcdef\nxy\nabcdef", W::Soft, 3);
@@ -1523,9 +1597,6 @@ mod property_tests {
         assert_eq!(layout.row_of_source(back), 2);
     }
 
-    /// A multi-span `Text` produces source ranges that are global and
-    /// non-overlapping, so the layout's coordinate system holds for every
-    /// caller, not only single-span editor surfaces.
     #[test]
     fn multi_span_source_ranges_are_global() {
         let text = Text::from_spans([Span::new("ab"), Span::new("cd"), Span::new("ef")]);
@@ -1533,6 +1604,7 @@ mod property_tests {
             &text,
             80,
             ComputedText::default(),
+            EmojiMerging::Merge,
             |parent, _| parent,
             |style| *style,
         );
@@ -1548,9 +1620,6 @@ mod property_tests {
         assert_eq!(layout.caret(4).1, 4);
     }
 
-    /// The painted column of every item equals its `cell`, including across a
-    /// dropped separator, so the painter's column advance and the caret/hit
-    /// tables cannot drift apart.
     #[test]
     fn painted_columns_match_item_cells_across_separators() {
         for (value, wrap, width) in [
@@ -1607,10 +1676,6 @@ mod property_tests {
         }
     }
 
-    /// A pointer hit is monotonic in the cell coordinate: moving right inside a
-    /// row never resolves to an earlier source position. This holds across
-    /// dropped separators, whose cells are real even though they are not
-    /// painted.
     #[test]
     fn hits_are_monotonic_within_a_row() {
         for (value, wrap, width) in [
@@ -1639,7 +1704,6 @@ mod property_tests {
         }
     }
 
-    /// Zero-sized offered geometry is clamped safely and cannot loop.
     #[test]
     fn zero_width_geometry_is_clamped() {
         for value in corpus() {
@@ -1660,11 +1724,6 @@ mod mode_agreement_tests {
         super::layout_for_test(value, wrap, width)
     }
 
-    /// The three wrap policies agree with each other about what they may split:
-    /// `NoWrap` only breaks at explicit newlines, `Hard` never exceeds the
-    /// viewport for a breakable value, and `Soft` prefers word breaks over
-    /// mid-word splits. These are the same guarantees the editor surface and
-    /// the commit pipeline rely on, because both consume this one result.
     #[test]
     fn wrap_policies_have_consistent_row_counts() {
         for value in ["hello world", "abcdefghij", "abc def", "a b c d e f"] {
@@ -1706,9 +1765,6 @@ mod mode_agreement_tests {
         }
     }
 
-    /// Every navigable source range survives wrapping: dropped separators and
-    /// explicit newlines are still reachable by stepping boundaries, for all
-    /// three policies.
     #[test]
     fn navigable_ranges_survive_every_policy() {
         for value in ["hello world", "a\n\nb", "a\n", "  leading", "trailing  "] {

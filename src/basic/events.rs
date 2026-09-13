@@ -33,12 +33,6 @@ impl<E> EventListener<E> {
 }
 
 impl<E> EventListener<E> {
-    /// Compose a component-internal listener with a caller-supplied observer.
-    ///
-    /// The internal behavior runs first so it can reduce state before the
-    /// caller observes the same event. The caller's observer always runs, even
-    /// when the internal handler stopped propagation: `stop_propagation`
-    /// controls ancestor delivery, not the other observers on this host.
     pub fn compose(
         internal: impl FnMut(E) + Send + 'static,
         caller: Option<EventListener<E>>,
@@ -74,6 +68,16 @@ impl<E> Eq for EventListener<E> {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FocusEvent {
+    Gained,
+    Lost,
+}
+
+// Terminal activation is a different state machine from DOM focus ownership:
+// it says the operating-system window has or has not got input focus, not which
+// widget owns focus. Keeping it a distinct type makes it impossible to route
+// terminal activation into widget focus callbacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TerminalFocusEvent {
     Gained,
     Lost,
 }
@@ -136,7 +140,6 @@ pub struct PointerEvent {
     pub pointer_type: PointerType,
     pub kind: PointerEventKind,
     pub position: ScreenPosition,
-    /// Position relative to the event target's visible rectangle.
     pub local_position: ScreenPosition,
     pub button: PointerButton,
     pub buttons: u16,
@@ -204,11 +207,6 @@ thread_local! {
 }
 
 impl KeyboardEvent {
-    /// Prevent this keyboard event from reaching ancestor keyboard listeners.
-    ///
-    /// The runtime checks this flag between focused-target and ancestor
-    /// listeners. It is deliberately scoped to the current dispatch, so
-    /// nested event dispatches do not consume their parent event.
     pub fn stop_propagation(&self) {
         KEYBOARD_PROPAGATION.with(|stack| {
             if let Some(stopped) = stack.borrow_mut().last_mut() {
@@ -259,14 +257,20 @@ pub struct EventHandlers {
     pub scroll: Attr<EventListener<ScrollEvent>>,
     pub key_down: Attr<EventListener<KeyboardEvent>>,
     pub key_up: Attr<EventListener<KeyboardEvent>>,
+    // Targeted, bubbling keyboard hook. It only ever receives a key when this
+    // region is on the focused target's route.
     pub keyboard_event: Attr<EventListener<KeyboardEvent>>,
+    // Application-global keyboard hook. Unlike `keyboard_event` it is not a
+    // focused target: it receives a key that no focused widget consumed, which
+    // is what application shortcuts need.
+    pub app_key: Attr<EventListener<KeyboardEvent>>,
     pub resize_event: Attr<EventListener<ResizeEvent>>,
     pub focus_event: Attr<EventListener<FocusEvent>>,
+    pub terminal_focus: Attr<EventListener<TerminalFocusEvent>>,
     pub paste_event: Attr<EventListener<PasteEvent>>,
 }
 
 impl EventHandlers {
-    /// Merge caller-provided handlers over component defaults.
     pub fn merge(&mut self, overrides: &Self) {
         macro_rules! merge {
             ($($field:ident),+ $(,)?) => {
@@ -290,8 +294,10 @@ impl EventHandlers {
             key_down,
             key_up,
             keyboard_event,
+            app_key,
             resize_event,
             focus_event,
+            terminal_focus,
             paste_event,
         );
     }

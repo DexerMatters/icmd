@@ -1,5 +1,3 @@
-//! Raster loading, retained image state, and native protocol backends.
-
 mod kitty;
 mod lifecycle;
 mod manager;

@@ -77,9 +77,43 @@ fn mouse_listener_is_hit_tested_and_keyboard_focus_is_routed() {
         KeyModifiers::empty(),
         KeyEventKind::Press,
     );
-    assert_eq!(dispatcher.dispatch(Event::Key(key)), 1);
-    assert_eq!(key_hits.load(Ordering::SeqCst), 1);
+    // SAF-04: targeted keyboard delivery requires an actual focused DOM target.
+    // The press above focused only a node with pointer handlers, and the root is
+    // not focusable, so nothing owns focus and no targeted listener runs.
+    assert_eq!(dispatcher.dispatch(Event::Key(key)), 0);
+    assert_eq!(key_hits.load(Ordering::SeqCst), 0);
 
     assert_eq!(dispatcher.dispatch(Event::Resize(30, 6)), 0);
     assert_eq!(viewport.viewport(), Size::new(30, 6));
+}
+
+#[test]
+fn application_global_key_listener_fires_without_focus() {
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(Size::new(20, 5));
+    let (input, output) = Runtime::new(Lower::default()).then(commit).start();
+
+    let app_hits = Arc::new(AtomicUsize::new(0));
+    let app_hits_for_listener = app_hits.clone();
+    let node = root
+        .style(|style| {
+            style.width /= Dimension::Max;
+            style.height /= Dimension::Max;
+        })
+        .events(move |events| {
+            let app_hits = app_hits_for_listener.clone();
+            events.app_key /= EventListener::new(move |_event| {
+                app_hits.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .apply(());
+    input.send(node).unwrap();
+    output.recv().unwrap();
+
+    let key = KeyEvent::new_with_kind(
+        KeyCode::Char('q'),
+        KeyModifiers::empty(),
+        KeyEventKind::Press,
+    );
+    assert_eq!(dispatcher.dispatch(Event::Key(key)), 1);
+    assert_eq!(app_hits.load(Ordering::SeqCst), 1);
 }

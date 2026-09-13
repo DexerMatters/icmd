@@ -1,84 +1,3 @@
-//! `raw_input`, `input`, and `textarea`.
-//!
-//! This module owns text-entry behavior. `raw_input` is the single primitive;
-//! `input` and `textarea` are thin policy/theme wrappers over it. Neither
-//! wrapper holds edit state, geometry helpers, or internal event handling.
-//!
-//! # Value ownership
-//!
-//! `value` means *controlled* and `default_value` is read exactly once when the
-//! control is uncontrolled. Supplying both is permitted, and `value` wins.
-//!
-//! A controlled field follows an explicit, render-scoped contract:
-//!
-//! 1. At every render the supplied `value` is authoritative. The component
-//!    normalizes it and adopts it, whatever the optimistic state was.
-//! 2. Every input event dispatched before the next render reduces against one
-//!    optimistic draft, so rapid or repeated keystrokes accumulate without
-//!    waiting for the owner.
-//! 3. At the next render, the supplied value is compared to that one draft. If
-//!    it equals the emitted draft, the draft's selection snapshot is restored
-//!    (*acceptance*). Anything else is *rejection* or external replacement: the
-//!    owner's value wins and the selection is clamped into it.
-//! 4. Switching from uncontrolled to controlled adopts `value`; switching back
-//!    retains the last authoritative rendered value - never an unaccepted draft
-//!    - and resumes local ownership.
-//!
-//! Causality is therefore decided by the render boundary itself, not by
-//! comparing values against a history of previous strings. The owner has final
-//! authority at every render, and rejection is predictable: it happens on the
-//! first render after the edit, with no grace period.
-//!
-//! # Normalization, Unicode, and length
-//!
-//! Single-line mode maps CR, LF, and tab to spaces and discards other control
-//! characters. Multiline mode canonicalizes CRLF/CR to LF, keeps newlines and
-//! tabs, and discards other control characters. `max_length` counts extended
-//! grapheme clusters in the normalized value *after* the current selection is
-//! replaced, so a combining mark that merges with its base is measured in
-//! context.
-//!
-//! Layout, wrapping, caret placement, and pointer hit-testing all use extended
-//! grapheme clusters and terminal cells; source byte offsets are UTF-8 offsets
-//! that are always valid grapheme boundaries. Wide graphemes split at their
-//! halfway cell for pointer hits, and a width-two grapheme in a one-cell
-//! viewport keeps its leading boundary visible rather than scrolling into a
-//! continuation cell.
-//!
-//! # Host structure
-//!
-//! `raw_input` renders one semantic host. That host carries the caller's
-//! `DomProps`, is the focus target, and holds the composed internal-plus-caller
-//! event listeners. A `scroll_area` is nested inside it to supply the scrolling
-//! mechanism: the runtime remains the authority for clipping, extents, wheel
-//! behavior, and pointer coordinates, and the surface wraps to the content box
-//! the scroll area grants. There is no second event or focus identity, and the
-//! editor never subtracts padding or borders by hand.
-//!
-//! # Extension and styling
-//!
-//! Extension means wrapping `raw_input` in an ordinary function component and
-//! forwarding props, style, and events; there is no subclassing and no private
-//! API. Children passed to `raw_input` are **ignored**, because arbitrary nodes
-//! cannot be mapped to source positions.
-//!
-//! Sizing has exactly one owner: `props.dom.style`. Style dimensions are
-//! border-box dimensions, and caller style overrides component defaults field
-//! by field. Internal handlers and caller observers share one event slot: the
-//! editor reduces state first and the caller's observer then runs on the same
-//! host. Keys the editor handles stop propagation so ancestors do not also act
-//! on them; unrecognized keys continue to ancestors.
-//!
-//! Focus is the standard `DomProps.events.focus_event`; there is no separate
-//! input-specific focus callback.
-//!
-//! # Not supported
-//!
-//! Undo/redo history, validation, form integration, IME composition, terminal
-//! clipboard ownership, password masking, and platform-specific shortcut
-//! remapping are out of scope. The edit model leaves room for them without
-//! claiming support.
-
 pub(crate) mod model;
 pub(crate) mod view;
 
@@ -89,13 +8,11 @@ use crate::{
 
 pub use view::{RawInputAppearance, RawInputMode, RawInputProps, raw_input};
 
-/// A text value carried by change and submit events.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TextValueEvent {
     pub value: String,
 }
 
-/// The clipboard gesture a [`TextClipboardEvent`] describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextClipboardAction {
     #[default]
@@ -103,16 +20,12 @@ pub enum TextClipboardAction {
     Cut,
 }
 
-/// A clipboard request produced by the editor.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TextClipboardEvent {
     pub action: TextClipboardAction,
     pub text: String,
 }
 
-/// Semantic props for the single-line [`input`] control.
-///
-/// Sizing is `props.dom.style` only; there is no width or height prop.
 #[derive(Clone, Default)]
 pub struct InputProps {
     pub value: Attr<String>,
@@ -121,6 +34,7 @@ pub struct InputProps {
     pub max_length: Attr<usize>,
     pub disabled: Attr<bool>,
     pub read_only: Attr<bool>,
+    pub autofocus: Attr<bool>,
     pub on_change: Attr<EventListener<TextValueEvent>>,
     pub on_submit: Attr<EventListener<TextValueEvent>>,
     pub on_clipboard: Attr<EventListener<TextClipboardEvent>>,
@@ -139,10 +53,6 @@ impl std::fmt::Debug for InputProps {
     }
 }
 
-/// Semantic props for the multiline [`textarea`] control.
-///
-/// Sizing is `props.dom.style` only; there is no width or height prop. Enter
-/// inserts a newline, so there is no ambiguous submit gesture.
 #[derive(Clone, Default)]
 pub struct TextareaProps {
     pub value: Attr<String>,
@@ -152,6 +62,7 @@ pub struct TextareaProps {
     pub max_length: Attr<usize>,
     pub disabled: Attr<bool>,
     pub read_only: Attr<bool>,
+    pub autofocus: Attr<bool>,
     pub on_change: Attr<EventListener<TextValueEvent>>,
     pub on_clipboard: Attr<EventListener<TextClipboardEvent>>,
 }
@@ -170,11 +81,6 @@ impl std::fmt::Debug for TextareaProps {
     }
 }
 
-/// Render a themed, single-line editable text control.
-///
-/// This is a thin `raw_input` specialization: it chooses single-line policy,
-/// translates the theme into a host style and [`RawInputAppearance`], and
-/// forwards the caller's DOM props and events. It contains no editing logic.
 pub fn input(cx: &mut ComponentContext, props: &Props<InputProps>) -> Node {
     let theme = cx.use_theme();
     let dom = props.host_props(input_host(&theme));
@@ -186,6 +92,7 @@ pub fn input(cx: &mut ComponentContext, props: &Props<InputProps>) -> Node {
         max_length: props.max_length,
         disabled: props.disabled,
         read_only: props.read_only,
+        autofocus: props.autofocus,
         appearance: Attr::Set(appearance(&theme)),
         on_change: props.on_change.clone(),
         on_submit: props.on_submit.clone(),
@@ -199,11 +106,6 @@ pub fn input(cx: &mut ComponentContext, props: &Props<InputProps>) -> Node {
     })
 }
 
-/// Render a themed, multiline editable text control.
-///
-/// This is a thin `raw_input` specialization: it chooses multiline policy,
-/// translates the theme into a host style and [`RawInputAppearance`], and
-/// forwards the caller's DOM props and events. It contains no editing logic.
 pub fn textarea(cx: &mut ComponentContext, props: &Props<TextareaProps>) -> Node {
     let theme = cx.use_theme();
     let dom = props.host_props(textarea_host(&theme));
@@ -216,6 +118,7 @@ pub fn textarea(cx: &mut ComponentContext, props: &Props<TextareaProps>) -> Node
         max_length: props.max_length,
         disabled: props.disabled,
         read_only: props.read_only,
+        autofocus: props.autofocus,
         appearance: Attr::Set(appearance(&theme)),
         on_change: props.on_change.clone(),
         on_clipboard: props.on_clipboard.clone(),
@@ -228,7 +131,6 @@ pub fn textarea(cx: &mut ComponentContext, props: &Props<TextareaProps>) -> Node
     })
 }
 
-/// The editor appearance the theme translates to.
 fn appearance(theme: &Theme) -> RawInputAppearance {
     use crate::TextStyle;
     RawInputAppearance {
@@ -244,8 +146,6 @@ fn appearance(theme: &Theme) -> RawInputAppearance {
     }
 }
 
-/// The border-box host style for [`input`]: an underline rule under a padded
-/// content row.
 fn input_host(theme: &Theme) -> DomProps {
     let mut style = Style::default();
     style.layout /= Layout::Vertical;
@@ -276,8 +176,6 @@ fn input_host(theme: &Theme) -> DomProps {
     }
 }
 
-/// The border-box host style for [`textarea`]: a fully bordered,
-/// vertically-padded multiline box.
 fn textarea_host(theme: &Theme) -> DomProps {
     let mut style = Style::default();
     style.layout /= Layout::Vertical;
@@ -285,7 +183,7 @@ fn textarea_host(theme: &Theme) -> DomProps {
     style.align /= crate::Align::Start;
     style.background /= theme.colors.input;
     style.text.foreground /= theme.colors.foreground;
-    style.padding /= Edges::symmetric(1, 1);
+    style.padding /= Edges::symmetric(0, 1);
     style.border.kind /= theme.borders.kind;
     style.border.edges /= Edges::all(true);
     style.border.foreground /= theme.colors.border;
@@ -293,7 +191,7 @@ fn textarea_host(theme: &Theme) -> DomProps {
     style.overflow /= Overflow::Clip;
     style.overflow_x /= Overflow::Clip;
     style.overflow_y /= Overflow::Clip;
-    // Border box: a 40x5 content box plus padding and a full border.
+    // Border box: a 40x7 content box plus horizontal padding and a full border.
     style.width /= Dimension::Cells(44);
     style.height /= Dimension::Cells(9);
     DomProps {

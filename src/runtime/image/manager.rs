@@ -1,9 +1,3 @@
-//! Retained image-source lifecycle and asynchronous loading.
-//!
-//! The renderer owns scene composition, while this module owns the part of an
-//! image's lifecycle that is independent of terminal protocol: deduplicated
-//! file loading, decoded-source state, and the built-in fallback surface.
-
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     thread,
@@ -66,7 +60,6 @@ pub(crate) enum SourceRequest {
     Failed,
 }
 
-/// Owns decoded file sources and the bounded asynchronous loader.
 #[derive(Debug)]
 pub(crate) struct ImageManager {
     loader: ImageLoader,
@@ -123,11 +116,6 @@ impl ImageManager {
         }
     }
 
-    /// Return the initial framework fallback for a retained raster.
-    ///
-    /// This keeps source state and fallback policy together: loaded rasters
-    /// paint immediately, pending/unknown files show an ellipsis, and a
-    /// previously failed file remains an error without being retried.
     pub(crate) fn initial_fallback(&self, raster: &RasterPlacement) -> Option<Image> {
         if raster.invalid_source {
             return placeholder(raster.width, raster.height, "×");
@@ -232,7 +220,6 @@ impl ImageManager {
     }
 }
 
-/// Create the framework-owned centered placeholder used by all raster states.
 pub(crate) fn placeholder(width: u16, height: u16, symbol: &str) -> Option<Image> {
     if width == 0 || height == 0 {
         return None;

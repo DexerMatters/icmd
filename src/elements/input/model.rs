@@ -1,33 +1,15 @@
-//! The pure edit model for `raw_input`.
-//!
-//! This module owns the durable state of a text field: its normalized value,
-//! selection, caret, and the explicit controlled/uncontrolled value-ownership
-//! state machine. It performs no rendering and knows nothing about `Node`,
-//! `Theme`, events, or callbacks, so every rule below is unit-testable without
-//! constructing a runtime.
-//!
-//! Coordinates are UTF-8 source byte offsets into the model's normalized value
-//! and are always extended-grapheme boundaries.
+use crate::{EmojiMerging, data::display_units};
 
-use unicode_segmentation::UnicodeSegmentation;
-
-/// Where the editable value comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ValueOwnership {
-    /// The model owns the value after the initial render.
     #[default]
     Uncontrolled,
-    /// A render supplies the value; the model may still edit optimistically
-    /// between renders but the owner is authoritative at every render.
     Controlled,
 }
 
-/// The model's selection and caret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Caret {
-    /// The fixed end of the selection.
     pub anchor: usize,
-    /// The moving end of the selection (and the insertion point).
     pub cursor: usize,
 }
 
@@ -52,95 +34,58 @@ impl Caret {
     }
 }
 
-/// A draft emitted to a controlled owner that the owner has not yet
-/// acknowledged with a render.
-///
-/// The draft carries only what acceptance needs: the value that was emitted and
-/// the selection that produced it. Acceptance is decided by the owner's next
-/// render republishing that exact value; there is no causality heuristic over
-/// historical strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EmittedDraft {
-    /// The value emitted through `on_change`.
     pub(crate) value: String,
-    /// The selection/caret that produced the draft, restored when the owner
-    /// accepts it at the next render.
     pub(crate) caret: Caret,
 }
 
-/// What a render told the model about the value it supplied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// The render was accepted and changed the model.
     Changed,
-    /// The render matched the model exactly.
     Unchanged,
 }
 
-/// A typed editing command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EditAction {
     Insert(String),
     InsertNewline,
-    Backspace {
-        word: bool,
-    },
-    Delete {
-        word: bool,
-    },
-    MoveLeft {
-        extend: bool,
-        word: bool,
-    },
-    MoveRight {
-        extend: bool,
-        word: bool,
-    },
-    MoveUp {
-        extend: bool,
-    },
-    MoveDown {
-        extend: bool,
-    },
-    PageUp {
-        extend: bool,
-        rows: usize,
-    },
-    PageDown {
-        extend: bool,
-        rows: usize,
-    },
-    Home {
-        extend: bool,
-        document: bool,
-    },
-    End {
-        extend: bool,
-        document: bool,
-    },
+    Paste(String),
+    Cut,
+    Backspace { word: bool },
+    Delete { word: bool },
+    MoveLeft { extend: bool, word: bool },
+    MoveRight { extend: bool, word: bool },
+    MoveUp { extend: bool },
+    MoveDown { extend: bool },
+    PageUp { extend: bool, rows: usize },
+    PageDown { extend: bool, rows: usize },
+    Home { extend: bool, document: bool },
+    End { extend: bool, document: bool },
     SelectAll,
-    /// Place the caret from a pointer hit: the boundary the hit resolved to,
-    /// and whether the drag extension should keep the existing anchor.
-    PlaceCaret {
-        offset: usize,
-        extend: bool,
-    },
+    PlaceCaret { offset: usize, extend: bool },
 }
 
-/// The visible effect of one edit action.
+// Command intent is carried explicitly so hosts can tell a genuine Cut from an
+// ordinary deletion. Only `Cut` may cross the public clipboard boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum EditIntent {
+    #[default]
+    None,
+    Insert,
+    Paste,
+    DeleteBackward,
+    DeleteForward,
+    Cut,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct EditOutcome {
-    /// The action was recognized and consumed.
     pub(crate) handled: bool,
-    /// The value changed and must be emitted through `on_change`.
     pub(crate) changed: bool,
-    /// The value to emit; `Some` exactly when `changed` is true.
     pub(crate) value: Option<String>,
-    /// Text removed by a cut, for `on_clipboard`.
-    pub(crate) clipboard: Option<String>,
-    /// The current value when the user submitted, for `on_submit`.
-    pub(crate) submit: Option<String>,
-    /// The caret moved or moved to a place that must be scrolled into view.
+    pub(crate) removed_text: Option<String>,
+    pub(crate) intent: EditIntent,
     pub(crate) reveal_caret: bool,
 }
 
@@ -153,20 +98,15 @@ impl EditOutcome {
     }
 }
 
-/// The model's configurable policy, derived from the component props.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct EditPolicy {
     pub(crate) multiline: bool,
     pub(crate) max_length: Option<usize>,
     pub(crate) read_only: bool,
     pub(crate) disabled: bool,
+    pub(crate) emoji_merging: EmojiMerging,
 }
 
-/// Normalize a value for the given mode.
-///
-/// Multiline canonicalizes CRLF/CR to LF and keeps newlines and tabs while
-/// discarding other control characters. Single line maps CR, LF, and tab to
-/// spaces and discards other control characters.
 pub(crate) fn normalize(value: &str, multiline: bool) -> String {
     let canonical = value.replace("\r\n", "\n").replace('\r', "\n");
     if multiline {
@@ -186,20 +126,16 @@ pub(crate) fn normalize(value: &str, multiline: bool) -> String {
     }
 }
 
-/// The pure editor model.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EditModel {
     pub(crate) value: String,
     pub(crate) caret: Caret,
-    /// Preferred terminal-cell column for vertical movement.
     preferred_column: Option<usize>,
     ownership: ValueOwnership,
-    /// The value the owner last published (or the uncontrolled value).
     authoritative: String,
-    /// Set once the first render has initialized the model.
     initialized: bool,
-    /// The open draft for a controlled field, if any.
     draft: Option<EmittedDraft>,
+    emoji_merging: EmojiMerging,
 }
 
 impl EditModel {
@@ -216,62 +152,59 @@ impl EditModel {
         self.ownership
     }
 
-    /// The model's normalized value is the selection coordinate space.
     #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.value.len()
     }
 
-    /// Grapheme boundaries in the current value, including 0 and `len`.
     #[allow(dead_code)]
     pub(crate) fn boundaries(&self) -> Vec<usize> {
         let mut boundaries = vec![0usize];
         boundaries.extend(
-            self.value
-                .grapheme_indices(true)
-                .map(|(index, grapheme)| index + grapheme.len()),
+            display_units(&self.value, self.emoji_merging)
+                .into_iter()
+                .map(|unit| unit.end),
         );
         boundaries
     }
 
-    /// Snap an arbitrary byte offset to the nearest grapheme boundary.
+    fn units(&self) -> Vec<std::ops::Range<usize>> {
+        display_units(&self.value, self.emoji_merging)
+    }
+
     pub(crate) fn clamp(&self, offset: usize) -> usize {
         let offset = offset.min(self.value.len());
         if offset == 0 || offset == self.value.len() {
             return offset;
         }
         let mut previous = 0usize;
-        for (index, grapheme) in self.value.grapheme_indices(true) {
-            let end = index + grapheme.len();
-            if offset >= end {
-                previous = end;
+        for unit in self.units() {
+            if offset >= unit.end {
+                previous = unit.end;
                 continue;
             }
-            // `offset` lies inside this grapheme; pick the nearer boundary.
-            return if offset - index <= end - offset {
-                index
+            // `offset` lies inside this unit; pick the nearer boundary.
+            return if offset - unit.start <= unit.end - offset {
+                unit.start
             } else {
-                end
+                unit.end
             };
         }
         previous
     }
 
-    /// Reconcile the model with a render.
-    ///
-    /// - `value` is the controlled value when the caller supplied one.
-    /// - `default_value` seeds an uncontrolled model exactly once.
-    ///
-    /// The owner is authoritative: on every render of a controlled field the
-    /// supplied value wins. When it equals the emitted draft the draft's
-    /// selection is restored (acceptance); otherwise the selection is clamped
-    /// into the authoritative value (rejection or external replacement).
     pub(crate) fn render(
         &mut self,
         value: Option<&str>,
         default_value: Option<&str>,
         multiline: bool,
+        emoji_merging: EmojiMerging,
     ) -> Outcome {
+        // The layout that paints this render is the authority on which
+        // codepoints are separate cells, so the model adopts its mode before
+        // snapping any selection into the value.
+        let mode_changed = self.emoji_merging != emoji_merging;
+        self.emoji_merging = emoji_merging;
         let controlled = value.map(|value| normalize(value, multiline));
         if !self.initialized {
             self.initialized = true;
@@ -337,6 +270,7 @@ impl EditModel {
         if self.value == previous
             && self.caret == previous_caret
             && self.ownership == previous_ownership
+            && !mode_changed
         {
             Outcome::Unchanged
         } else {
@@ -351,14 +285,14 @@ impl EditModel {
         }
     }
 
-    /// Reduce one edit action against the model.
-    ///
-    /// For a controlled field the reduction is optimistic: it produces a draft
-    /// that bridges rapid events until the owner's next render.
     pub(crate) fn reduce(&mut self, action: EditAction, policy: EditPolicy) -> EditOutcome {
         if policy.disabled {
             return EditOutcome::default();
         }
+        // Edit on the units the committed layout painted. The component reads
+        // this from the layout probe, so an event that arrives before the next
+        // render still edits the cells the user can see.
+        self.emoji_merging = policy.emoji_merging;
         // Continue an unacknowledged controlled draft rather than the
         // authoritative echo, so rapid events accumulate.
         self.resume_draft();
@@ -372,7 +306,6 @@ impl EditModel {
         outcome
     }
 
-    /// Restore an open draft's speculative value and selection into the model.
     fn resume_draft(&mut self) {
         if let Some(draft) = &self.draft {
             self.value = draft.value.clone();
@@ -395,6 +328,26 @@ impl EditModel {
                 }
                 self.insert("\n", policy)
             }
+            EditAction::Paste(text) => {
+                if !editable {
+                    return EditOutcome::handled();
+                }
+                let mut outcome = self.insert(&text, policy);
+                if outcome.changed {
+                    outcome.intent = EditIntent::Paste;
+                }
+                outcome
+            }
+            EditAction::Cut => {
+                if !editable {
+                    return EditOutcome::handled();
+                }
+                let (start, end) = self.caret.range();
+                if start == end {
+                    return EditOutcome::handled();
+                }
+                self.delete_range(start, end, EditIntent::Cut)
+            }
             EditAction::Backspace { word } => {
                 if !editable {
                     return EditOutcome::handled();
@@ -404,13 +357,13 @@ impl EditModel {
                     (start, end)
                 } else {
                     let target = if word {
-                        word_left(&self.value, self.caret.cursor)
+                        word_left(&self.value, self.caret.cursor, self.emoji_merging)
                     } else {
                         self.previous_boundary(self.caret.cursor)
                     };
                     (target, self.caret.cursor)
                 };
-                self.delete_range(start, end)
+                self.delete_range(start, end, EditIntent::DeleteBackward)
             }
             EditAction::Delete { word } => {
                 if !editable {
@@ -421,20 +374,20 @@ impl EditModel {
                     (start, end)
                 } else {
                     let target = if word {
-                        word_right(&self.value, self.caret.cursor)
+                        word_right(&self.value, self.caret.cursor, self.emoji_merging)
                     } else {
                         self.next_boundary(self.caret.cursor)
                     };
                     (self.caret.cursor, target)
                 };
-                self.delete_range(start, end)
+                self.delete_range(start, end, EditIntent::DeleteForward)
             }
             EditAction::MoveLeft { extend, word } => {
                 let (start, end) = self.caret.range();
                 let target = if !extend && start != end {
                     start
                 } else if word {
-                    word_left(&self.value, self.caret.cursor)
+                    word_left(&self.value, self.caret.cursor, self.emoji_merging)
                 } else {
                     self.previous_boundary(self.caret.cursor)
                 };
@@ -446,7 +399,7 @@ impl EditModel {
                 let target = if !extend && start != end {
                     end
                 } else if word {
-                    word_right(&self.value, self.caret.cursor)
+                    word_right(&self.value, self.caret.cursor, self.emoji_merging)
                 } else {
                     self.next_boundary(self.caret.cursor)
                 };
@@ -500,9 +453,6 @@ impl EditModel {
         }
     }
 
-    /// Apply a vertical move whose target boundary was resolved by the caller
-    /// from the canonical layout, carrying the preferred terminal-cell column
-    /// forward so a caret crossing short rows returns to its column.
     pub(crate) fn move_vertical(&mut self, target: usize, extend: bool, preferred: Option<usize>) {
         let target = self.clamp(target);
         if extend {
@@ -518,10 +468,6 @@ impl EditModel {
         self.preferred_column
     }
 
-    /// Resolve a vertical movement against the row table and apply it.
-    ///
-    /// `direction` is a signed row delta and `page` repeats the move for
-    /// PageUp/PageDown. Returns the outcome the caller should act on.
     pub(crate) fn vertical_move(
         &mut self,
         layout: &crate::basic::text_layout::TextLayout,
@@ -560,7 +506,7 @@ impl EditModel {
         let before = &self.value[..start];
         let after = &self.value[end..];
         let inserted = match policy.max_length {
-            Some(limit) => constrain_insertion(before, &inserted, after, limit),
+            Some(limit) => constrain_insertion(before, &inserted, after, limit, self.emoji_merging),
             None => inserted,
         };
         if inserted.is_empty() {
@@ -577,11 +523,12 @@ impl EditModel {
             handled: true,
             changed: true,
             value: Some(self.value.clone()),
+            intent: EditIntent::Insert,
             ..EditOutcome::default()
         }
     }
 
-    fn delete_range(&mut self, start: usize, end: usize) -> EditOutcome {
+    fn delete_range(&mut self, start: usize, end: usize, intent: EditIntent) -> EditOutcome {
         if start >= end {
             return EditOutcome::handled();
         }
@@ -593,7 +540,8 @@ impl EditModel {
             handled: true,
             changed: true,
             value: Some(self.value.clone()),
-            clipboard: Some(removed),
+            removed_text: Some(removed),
+            intent,
             ..EditOutcome::default()
         }
     }
@@ -610,27 +558,23 @@ impl EditModel {
 
     fn previous_boundary(&self, offset: usize) -> usize {
         let offset = self.clamp(offset);
-        if offset == 0 {
-            return 0;
-        }
-        self.value[..offset]
-            .grapheme_indices(true)
+        self.units()
+            .into_iter()
+            .filter(|unit| unit.end <= offset)
+            .map(|unit| unit.start)
             .next_back()
-            .map_or(0, |(index, _)| index)
+            .unwrap_or(0)
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
         let offset = self.clamp(offset);
-        if offset >= self.value.len() {
-            return self.value.len();
-        }
-        self.value[offset..]
-            .graphemes(true)
-            .next()
-            .map_or(self.value.len(), |grapheme| offset + grapheme.len())
+        self.units()
+            .into_iter()
+            .map(|unit| unit.end)
+            .find(|end| *end > offset)
+            .unwrap_or(self.value.len())
     }
 
-    /// The byte range of the logical line containing `offset`.
     fn line_bounds(&self, offset: usize) -> (usize, usize) {
         let offset = self.clamp(offset);
         let start = self.value[..offset]
@@ -650,7 +594,6 @@ impl EditModel {
         self.line_bounds(offset).1
     }
 
-    /// Open (or extend) the optimistic draft for a controlled field.
     fn open_draft(&mut self) {
         if self.ownership != ValueOwnership::Controlled {
             return;
@@ -664,12 +607,13 @@ impl EditModel {
     }
 }
 
-/// Insert `inserted` at the selection while respecting `limit` graphemes.
-///
-/// Graphemes can merge across either insertion boundary (for example, a
-/// combining mark inserted after its base), so candidate ends are tested in
-/// context rather than by subtracting independent grapheme counts.
-fn constrain_insertion(before: &str, inserted: &str, after: &str, limit: usize) -> String {
+fn constrain_insertion(
+    before: &str,
+    inserted: &str,
+    after: &str,
+    limit: usize,
+    merging: EmojiMerging,
+) -> String {
     let with = |inserted: &str| {
         let mut value = String::with_capacity(before.len() + inserted.len() + after.len());
         value.push_str(before);
@@ -677,18 +621,19 @@ fn constrain_insertion(before: &str, inserted: &str, after: &str, limit: usize) 
         value.push_str(after);
         value
     };
-    if with(inserted).graphemes(true).count() <= limit {
+    let count = |value: &str| display_units(value, merging).len();
+    if count(&with(inserted)) <= limit {
         return inserted.to_owned();
     }
-    let base_count = with("").graphemes(true).count();
+    let base_count = count(&with(""));
     let available = limit.saturating_sub(base_count);
     let mut candidate_ends = vec![0usize];
     candidate_ends.extend(
-        inserted
-            .grapheme_indices(true)
-            .map(|(index, grapheme)| index + grapheme.len())
-            // Joining the first and last inserted clusters to their neighbors
-            // can recover at most two independently counted clusters.
+        display_units(inserted, merging)
+            .into_iter()
+            .map(|unit| unit.end)
+            // Joining the first and last inserted units to their neighbors can
+            // recover at most two independently counted units.
             .take(available.saturating_add(2)),
     );
     let mut accepted_end = 0usize;
@@ -696,26 +641,26 @@ fn constrain_insertion(before: &str, inserted: &str, after: &str, limit: usize) 
         .saturating_sub(2)
         .min(candidate_ends.len().saturating_sub(1));
     for &end in &candidate_ends[first_candidate..] {
-        if with(&inserted[..end]).graphemes(true).count() <= limit {
+        if count(&with(&inserted[..end])) <= limit {
             accepted_end = end;
         }
     }
     inserted[..accepted_end].to_owned()
 }
 
-fn word_left(value: &str, offset: usize) -> usize {
+fn word_left(value: &str, offset: usize, merging: EmojiMerging) -> usize {
     let offset = offset.min(value.len());
     let mut boundary = 0usize;
     let mut seen_word = false;
-    for (index, grapheme) in value.grapheme_indices(true) {
-        if index >= offset {
+    for unit in display_units(value, merging) {
+        if unit.start >= offset {
             break;
         }
-        let is_word = is_word_grapheme(grapheme);
+        let is_word = is_word_unit(&value[unit.clone()]);
         if is_word {
             if !seen_word {
                 // The start of the word we are leaving.
-                boundary = index;
+                boundary = unit.start;
             }
             seen_word = true;
         } else {
@@ -725,44 +670,65 @@ fn word_left(value: &str, offset: usize) -> usize {
     if seen_word { boundary } else { offset }
 }
 
-fn word_right(value: &str, offset: usize) -> usize {
+fn word_right(value: &str, offset: usize, merging: EmojiMerging) -> usize {
     let offset = offset.min(value.len());
     let mut seen_word = false;
-    for (index, grapheme) in value[offset..].grapheme_indices(true) {
-        let is_word = is_word_grapheme(grapheme);
+    for unit in display_units(value, merging) {
+        if unit.end <= offset {
+            continue;
+        }
+        let is_word = is_word_unit(&value[unit.clone()]);
         if is_word {
             seen_word = true;
         } else if seen_word {
-            // The end of the word we just crossed.
-            return offset + index;
+            // The start of the first unit after the word we just crossed.
+            return unit.start;
         }
     }
     value.len()
 }
 
-fn is_word_grapheme(grapheme: &str) -> bool {
-    grapheme.chars().any(char::is_alphanumeric)
+fn is_word_unit(unit: &str) -> bool {
+    unit.chars().any(char::is_alphanumeric)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_segmentation::UnicodeSegmentation;
 
     fn uncontrolled(value: &str, multiline: bool) -> EditModel {
-        let mut model = EditModel::default();
-        model.render(None, Some(value), multiline);
-        model
+        uncontrolled_with(value, multiline, EmojiMerging::Merge)
     }
 
     fn controlled(value: &str, multiline: bool) -> EditModel {
+        controlled_with(value, multiline, EmojiMerging::Merge)
+    }
+
+    fn uncontrolled_with(value: &str, multiline: bool, merging: EmojiMerging) -> EditModel {
         let mut model = EditModel::default();
-        model.render(Some(value), None, multiline);
+        model.render(None, Some(value), multiline, merging);
+        model
+    }
+
+    fn controlled_with(value: &str, multiline: bool, merging: EmojiMerging) -> EditModel {
+        let mut model = EditModel::default();
+        model.render(Some(value), None, multiline, merging);
         model
     }
 
     fn policy(multiline: bool) -> EditPolicy {
         EditPolicy {
             multiline,
+            emoji_merging: EmojiMerging::Merge,
+            ..EditPolicy::default()
+        }
+    }
+
+    fn separate_policy(multiline: bool) -> EditPolicy {
+        EditPolicy {
+            multiline,
+            emoji_merging: EmojiMerging::Separate,
             ..EditPolicy::default()
         }
     }
@@ -810,11 +776,46 @@ mod tests {
 
         let outcome = model.reduce(EditAction::Backspace { word: false }, policy(false));
         assert_eq!(model.value(), "a界b");
-        assert_eq!(outcome.clipboard.as_deref(), Some("X"));
+        // Removed text is retained for undo, but Backspace is not a Cut.
+        assert_eq!(outcome.removed_text.as_deref(), Some("X"));
+        assert_eq!(outcome.intent, EditIntent::DeleteBackward);
 
         let outcome = model.reduce(EditAction::Delete { word: false }, policy(false));
         assert_eq!(model.value(), "a界");
-        assert_eq!(outcome.clipboard.as_deref(), Some("b"));
+        assert_eq!(outcome.removed_text.as_deref(), Some("b"));
+        assert_eq!(outcome.intent, EditIntent::DeleteForward);
+    }
+
+    #[test]
+    fn only_cut_reports_cut_intent() {
+        let mut model = uncontrolled("hello", false);
+        model.reduce(EditAction::SelectAll, policy(false));
+        let outcome = model.reduce(EditAction::Cut, policy(false));
+        assert_eq!(model.value(), "");
+        assert_eq!(outcome.removed_text.as_deref(), Some("hello"));
+        assert_eq!(outcome.intent, EditIntent::Cut);
+
+        // A collapsed caret has nothing to cut and stays a no-op.
+        let mut model = uncontrolled("abc", false);
+        model.reduce(
+            EditAction::PlaceCaret {
+                offset: 1,
+                extend: false,
+            },
+            policy(false),
+        );
+        let outcome = model.reduce(EditAction::Cut, policy(false));
+        assert!(!outcome.changed);
+        assert_eq!(outcome.intent, EditIntent::None);
+        assert_eq!(model.value(), "abc");
+    }
+
+    #[test]
+    fn paste_reports_paste_intent() {
+        let mut model = uncontrolled("ab", false);
+        let outcome = model.reduce(EditAction::Paste("c".to_string()), policy(false));
+        assert_eq!(model.value(), "abc");
+        assert_eq!(outcome.intent, EditIntent::Paste);
     }
 
     #[test]
@@ -1031,6 +1032,206 @@ mod tests {
     }
 
     #[test]
+    fn merging_input_extends_the_cluster_under_the_caret() {
+        for (base, inserted, merged) in [
+            ("👩", "\u{200D}💻", "👩\u{200D}💻"),
+            ("👍", "🏽", "👍🏽"),
+            ("🇺", "🇸", "🇺🇸"),
+            ("❤", "\u{FE0F}", "❤\u{FE0F}"),
+            ("1", "\u{FE0F}\u{20E3}", "1\u{FE0F}\u{20E3}"),
+        ] {
+            let mut model = uncontrolled(base, false);
+            assert_eq!(
+                model.caret().cursor,
+                base.len(),
+                "seeded caret is at the end"
+            );
+            let outcome = insert(&mut model, inserted, false);
+            assert_eq!(outcome.value.as_deref(), Some(merged));
+            assert_eq!(model.value(), merged);
+            assert_eq!(
+                model.caret().cursor,
+                merged.len(),
+                "{merged:?}: the caret sits after the merged cluster"
+            );
+            assert_eq!(
+                model.value().graphemes(true).count(),
+                1,
+                "{merged:?} is one cluster"
+            );
+            model.reduce(EditAction::Backspace { word: false }, policy(false));
+            assert_eq!(model.value(), "", "one backspace removes the cluster");
+        }
+    }
+
+    #[test]
+    fn pasted_clusters_keep_their_neighbors_and_one_navigation_step() {
+        let mut model = uncontrolled("ab", false);
+        model.reduce(
+            EditAction::PlaceCaret {
+                offset: 1,
+                extend: false,
+            },
+            policy(false),
+        );
+        let cluster = "👩\u{200D}💻";
+        insert(&mut model, cluster, false);
+        assert_eq!(model.value(), format!("a{cluster}b"));
+        assert_eq!(model.caret().cursor, 1 + cluster.len());
+        model.reduce(
+            EditAction::MoveLeft {
+                extend: false,
+                word: false,
+            },
+            policy(false),
+        );
+        assert_eq!(model.caret().cursor, 1, "left steps over the whole cluster");
+        model.reduce(
+            EditAction::MoveRight {
+                extend: false,
+                word: false,
+            },
+            policy(false),
+        );
+        assert_eq!(
+            model.caret().cursor,
+            1 + cluster.len(),
+            "right steps over the whole cluster"
+        );
+    }
+
+    #[test]
+    fn max_length_accepts_emoji_codepoints_that_merge() {
+        let mut model = uncontrolled("👍", false);
+        model.reduce(
+            EditAction::PlaceCaret {
+                offset: "👍".len(),
+                extend: false,
+            },
+            policy(false),
+        );
+        let outcome = model.reduce(
+            EditAction::Insert("🏽".into()),
+            EditPolicy {
+                max_length: Some(1),
+                ..policy(false)
+            },
+        );
+        assert_eq!(outcome.value.as_deref(), Some("👍🏽"));
+        assert_eq!(model.value().graphemes(true).count(), 1);
+
+        // A whole sequence pasted into an empty field still counts as one.
+        let mut model = uncontrolled("", false);
+        let outcome = model.reduce(
+            EditAction::Insert("👨\u{200D}👩\u{200D}👧\u{200D}👦".into()),
+            EditPolicy {
+                max_length: Some(1),
+                ..policy(false)
+            },
+        );
+        assert_eq!(
+            outcome.value.as_deref(),
+            Some("👨\u{200D}👩\u{200D}👧\u{200D}👦")
+        );
+    }
+
+    #[test]
+    fn separate_mode_places_the_caret_between_parts() {
+        let sequence = "👩\u{200D}💻";
+        let model = uncontrolled_with(sequence, false, EmojiMerging::Separate);
+        // "👩\u{200D}" is 7 bytes, "💻" is 4.
+        assert_eq!(model.boundaries(), vec![0, 7, 11]);
+        assert_eq!(model.clamp(7), 7, "the part boundary is a real position");
+        assert_eq!(model.clamp(3), 0, "inside the first part, nearer its start");
+        assert_eq!(
+            model.clamp(10),
+            11,
+            "inside the second part, nearer its end"
+        );
+        assert_eq!(model.next_boundary(0), 7);
+        assert_eq!(model.next_boundary(7), 11);
+        assert_eq!(model.previous_boundary(11), 7);
+        assert_eq!(model.previous_boundary(7), 0);
+
+        // The merged mode keeps the same value as one cluster.
+        let merged = uncontrolled_with(sequence, false, EmojiMerging::Merge);
+        assert_eq!(merged.boundaries(), vec![0, 11]);
+    }
+
+    #[test]
+    fn separate_mode_backspace_removes_one_part() {
+        let mut model = uncontrolled_with("👩\u{200D}💻", false, EmojiMerging::Separate);
+        assert_eq!(model.caret().cursor, 11, "the caret starts at the end");
+        model.reduce(
+            EditAction::Backspace { word: false },
+            separate_policy(false),
+        );
+        assert_eq!(model.value(), "👩\u{200D}");
+        assert_eq!(model.caret().cursor, 7);
+        model.reduce(
+            EditAction::Backspace { word: false },
+            separate_policy(false),
+        );
+        assert_eq!(model.value(), "");
+    }
+
+    #[test]
+    fn separate_mode_inserts_between_parts() {
+        let mut model = uncontrolled_with("👩\u{200D}💻", false, EmojiMerging::Separate);
+        model.reduce(
+            EditAction::PlaceCaret {
+                offset: 7,
+                extend: false,
+            },
+            separate_policy(false),
+        );
+        let outcome = model.reduce(EditAction::Insert("X".into()), separate_policy(false));
+        assert_eq!(outcome.value.as_deref(), Some("👩\u{200D}X💻"));
+        assert_eq!(model.caret().cursor, 8);
+        // Left and right step one part at a time.
+        model.reduce(
+            EditAction::MoveLeft {
+                extend: false,
+                word: false,
+            },
+            separate_policy(false),
+        );
+        assert_eq!(model.caret().cursor, 7);
+        model.reduce(
+            EditAction::MoveRight {
+                extend: false,
+                word: false,
+            },
+            separate_policy(false),
+        );
+        assert_eq!(model.caret().cursor, 8);
+    }
+
+    #[test]
+    fn separate_mode_max_length_counts_parts() {
+        let mut model = uncontrolled_with("", false, EmojiMerging::Separate);
+        let outcome = model.reduce(
+            EditAction::Insert("👩\u{200D}💻".into()),
+            EditPolicy {
+                max_length: Some(1),
+                ..separate_policy(false)
+            },
+        );
+        assert_eq!(outcome.value.as_deref(), Some("👩\u{200D}"));
+        assert_eq!(model.value(), "👩\u{200D}");
+
+        let mut model = uncontrolled_with("", false, EmojiMerging::Separate);
+        let outcome = model.reduce(
+            EditAction::Insert("👩\u{200D}💻".into()),
+            EditPolicy {
+                max_length: Some(2),
+                ..separate_policy(false)
+            },
+        );
+        assert_eq!(outcome.value.as_deref(), Some("👩\u{200D}💻"));
+    }
+
+    #[test]
     fn read_only_and_disabled_do_not_mutate() {
         let mut model = uncontrolled("abc", false);
         let read_only = EditPolicy {
@@ -1063,7 +1264,7 @@ mod tests {
         let outcome = insert(&mut model, "b", false);
         assert_eq!(outcome.value.as_deref(), Some("ab"));
         // The owner accepts by rendering exactly the emitted value.
-        let outcome = model.render(Some("ab"), None, false);
+        let outcome = model.render(Some("ab"), None, false, EmojiMerging::Merge);
         assert_eq!(outcome, Outcome::Unchanged);
         assert_eq!(model.caret().cursor, 2, "accepted draft keeps its caret");
     }
@@ -1081,7 +1282,7 @@ mod tests {
         insert(&mut model, "xy", false);
         assert_eq!(model.value(), "abcxy");
         // A different value is a rejection/external replacement.
-        model.render(Some("ab"), None, false);
+        model.render(Some("ab"), None, false, EmojiMerging::Merge);
         assert_eq!(model.value(), "ab");
         assert_eq!(model.caret().cursor, 2);
     }
@@ -1100,7 +1301,7 @@ mod tests {
         assert_eq!(model.value(), "abcdxy");
         // The owner republishes a shorter value: the draft is discarded and the
         // selection is clamped into the value the owner supplied.
-        model.render(Some("ab"), None, false);
+        model.render(Some("ab"), None, false, EmojiMerging::Merge);
         assert_eq!(model.value(), "ab");
         assert_eq!(model.caret().cursor, 2);
         // The next keystroke edits the owner's value, never the rejected draft.
@@ -1121,7 +1322,7 @@ mod tests {
                 emitted.push(value);
             }
             // The owner rejects: it republishes its own authoritative value.
-            model.render(Some("a"), None, false);
+            model.render(Some("a"), None, false, EmojiMerging::Merge);
             assert_eq!(model.value(), "a", "rejection must restore the owner value");
         }
         assert_eq!(
@@ -1145,7 +1346,7 @@ mod tests {
         assert_eq!(insert(&mut model, "x", false).value.as_deref(), Some("ax"));
         assert_eq!(model.caret().cursor, 2);
         // The owner accepts by republishing exactly the draft.
-        model.render(Some("ax"), None, false);
+        model.render(Some("ax"), None, false, EmojiMerging::Merge);
         assert_eq!(model.value(), "ax");
         assert_eq!(model.caret().cursor, 2, "acceptance restores the caret");
         // The next keystroke extends the accepted value.
@@ -1159,7 +1360,7 @@ mod tests {
         assert_eq!(model.value(), "ab");
         // The owner publishes an unrelated value. The caret clamps into it at
         // its previous offset (2), and the rejected draft is gone.
-        model.render(Some("zzz"), None, false);
+        model.render(Some("zzz"), None, false, EmojiMerging::Merge);
         assert_eq!(model.value(), "zzz");
         assert_eq!(model.caret().cursor, 2);
         let outcome = insert(&mut model, "!", false);
@@ -1179,14 +1380,14 @@ mod tests {
         }
         assert_eq!(model.value(), "hello");
         // A single acceptance render keeps the whole draft.
-        model.render(Some("hello"), None, false);
+        model.render(Some("hello"), None, false, EmojiMerging::Merge);
         assert_eq!(model.caret().cursor, 5);
     }
 
     #[test]
     fn switching_from_uncontrolled_to_controlled_adopts_the_value() {
         let mut model = uncontrolled("local", false);
-        model.render(Some("owner"), None, false);
+        model.render(Some("owner"), None, false, EmojiMerging::Merge);
         assert_eq!(model.value(), "owner");
         assert_eq!(model.ownership(), ValueOwnership::Controlled);
     }
@@ -1207,7 +1408,7 @@ mod tests {
         insert(&mut model, "b", false);
         assert_eq!(model.value(), "ab");
         // The component stops supplying a value before the owner responded.
-        model.render(None, None, false);
+        model.render(None, None, false, EmojiMerging::Merge);
         assert_eq!(
             model.value(),
             "a",
@@ -1222,7 +1423,7 @@ mod tests {
     #[test]
     fn switching_from_controlled_to_uncontrolled_keeps_the_last_value() {
         let mut model = controlled("owner", false);
-        model.render(None, None, false);
+        model.render(None, None, false, EmojiMerging::Merge);
         assert_eq!(model.value(), "owner");
         assert_eq!(model.ownership(), ValueOwnership::Uncontrolled);
         // Local ownership resumes.
@@ -1247,14 +1448,14 @@ mod tests {
 
         // The owner republishes the emitted value at the NEXT render: accepted,
         // and the selection that produced the draft is restored.
-        let outcome = model.render(Some("ab"), None, false);
+        let outcome = model.render(Some("ab"), None, false, EmojiMerging::Merge);
         assert_eq!(outcome, Outcome::Unchanged);
         assert_eq!(model.caret().cursor, 2);
 
         // The owner then replaces the value entirely: no draft is open, so this
         // is a plain replacement rather than an acceptance, and the selection is
         // clamped into the new value rather than restored from a snapshot.
-        model.render(Some("xyz"), None, false);
+        model.render(Some("xyz"), None, false, EmojiMerging::Merge);
         assert_eq!(model.value(), "xyz");
         assert_eq!(
             model.caret().cursor,
@@ -1267,7 +1468,10 @@ mod tests {
     #[test]
     fn unrelated_rerender_is_stable() {
         let mut model = controlled("same", false);
-        assert_eq!(model.render(Some("same"), None, false), Outcome::Unchanged);
+        assert_eq!(
+            model.render(Some("same"), None, false, EmojiMerging::Merge),
+            Outcome::Unchanged
+        );
     }
 
     #[test]

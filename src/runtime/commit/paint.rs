@@ -257,6 +257,7 @@ impl Commit {
                         id: *id,
                         parent,
                         focusable: props.focusable,
+                        autofocus: props.autofocus,
                         rect: EventRect::new(
                             hit_rect.line,
                             hit_rect.column,

@@ -117,6 +117,9 @@ pub fn alert(cx: &mut ComponentContext, props: &Props<AlertProps>) -> Node {
         AlertVariant::Warning => theme.colors.accent,
         AlertVariant::Error => theme.colors.destructive,
     };
+    // The stripe keeps the solid role; the title falls back to the card
+    // foreground when that role would be unreadable as text on the card.
+    let title_color = theme.on_card(accent);
     let title_text = props.title.clone() | String::new();
     let message_text = props.message.clone() | String::new();
     let mut style = crate::Style::default();
@@ -145,7 +148,7 @@ pub fn alert(cx: &mut ComponentContext, props: &Props<AlertProps>) -> Node {
     });
     ui! {
         <view dom={dom}>
-            {Text::new(title_text).foreground(accent).bold()}
+            {Text::new(title_text).foreground(title_color).bold()}
             {Text::new(message_text).style(theme.typography.body.clone())}
         </view>
     }

@@ -1,34 +1,3 @@
-//! JSX-inspired declarative UI composition.
-//!
-//! The [`ui!`] macro is intentionally a small Rust-native view syntax rather
-//! than an HTML implementation. Tags name imported `Component` values,
-//! ordinary attributes write to the component's `Attr<T>` props, and children
-//! are converted to [`crate::Node`] values.
-
-/// Build a [`crate::Node`] tree using JSX-inspired syntax.
-///
-/// Components are referenced by imported identifiers. A component may be
-/// written as a paired element, a self-closing element, or a fragment:
-///
-/// ```
-/// # use icmd::{button, heading, progress_bar, ui, column};
-/// # fn example(done: u64, total: u64, caption: String) {
-/// #     let submit = || {};
-/// let _node = ui! {
-///     <column>
-///         <heading>"Status"</heading>
-///         <progress_bar value={done} max={total} label="build" />
-///         <button on_click={move |_| submit()}>{caption}</button>
-///     </column>
-/// };
-/// # }
-/// ```
-///
-/// `dom={...}` forwards a complete [`crate::DomProps`] value, while
-/// `style={|style| ...}` and `events={|events| ...}` mutate the DOM props;
-/// `on_click`, `on_scroll`, `on_key_down`, and the other `EventHandlers` fields
-/// install a single listener. `key` is applied to the resulting node. Ordinary
-/// attributes assign to fields on the component's user-defined props.
 #[macro_export]
 macro_rules! ui {
     // A fragment opening frame.
@@ -196,8 +165,10 @@ macro_rules! ui {
     (@set_attr $props:ident $key:ident on_key_down { $value:expr }) => { $props.dom.events.key_down /= $value; };
     (@set_attr $props:ident $key:ident on_key_up { $value:expr }) => { $props.dom.events.key_up /= $value; };
     (@set_attr $props:ident $key:ident on_keyboard_event { $value:expr }) => { $props.dom.events.keyboard_event /= $value; };
+    (@set_attr $props:ident $key:ident on_app_key { $value:expr }) => { $props.dom.events.app_key /= $value; };
     (@set_attr $props:ident $key:ident on_resize_event { $value:expr }) => { $props.dom.events.resize_event /= $value; };
     (@set_attr $props:ident $key:ident on_focus_event { $value:expr }) => { $props.dom.events.focus_event /= $value; };
+    (@set_attr $props:ident $key:ident on_terminal_focus { $value:expr }) => { $props.dom.events.terminal_focus /= $value; };
     (@set_attr $props:ident $key:ident on_paste_event { $value:expr }) => { $props.dom.events.paste_event /= $value; };
 
     (@set_attr $props:ident $key:ident $name:ident { $value:expr }) => {

@@ -28,30 +28,30 @@ pub use basic::{
     PercentBasis, Point, PointerButton, PointerEvent, PointerEventKind, PointerId, PointerType,
     Props, PropsTransform, ProviderProps, Ref, ResizeEvent, ScrollAxes, ScrollDelta, ScrollEvent,
     ScrollOffset, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Span, StateSetter, Style,
-    StylePatch, Text, TextAlign, TextOverflow, TextStyle, TextWrap, Visibility, WheelEvent,
-    create_context, empty, fragment, provider, style, style_patch, text, view,
+    StylePatch, TerminalFocusEvent, Text, TextAlign, TextOverflow, TextStyle, TextWrap, Visibility,
+    WheelEvent, create_context, empty, fragment, provider, style, style_patch, text, view,
 };
 pub use data::{
-    Cell, CellEdit, CellError, Frame, Image, ImageError, ImageId, ImagePosition, MAX_GLYPH_BYTES,
-    MAX_SURFACE_CELLS, Operation, Rect, ScreenPosition, Size,
+    Cell, CellEdit, CellError, EmojiMerging, Frame, Image, ImageError, ImageId, ImagePosition,
+    MAX_GLYPH_BYTES, MAX_SURFACE_CELLS, Operation, Rect, ScreenPosition, Size,
 };
 pub use raster::{
     ImageAlign, ImageFit, ImageLoading, ImageMode, ImageProtocol, ImageRenderOptions, ImageSource,
     ImageUpdatePolicy, RasterImage, RasterImageError, RasterPlacement,
 };
 pub use runtime::{
-    Commit, EventDispatcher, FrameError, Lower, PipelineComponent, Renderer, RendererConfig,
-    Runtime, ViewportSetter,
+    Commit, CommitConfig, EventDispatcher, FrameError, Lower, PipelineComponent, Renderer,
+    RendererConfig, Runtime, ViewportSetter,
 };
 
 pub mod prelude {
     pub use crate::{
-        Attr, Component, ComponentContext, Dimension, DomProps, Edges, ImageLoading, ImageSource,
-        InputProps, Layout, Node, Props, RawInputAppearance, RawInputMode, RawInputProps, Ref,
-        ScrollAreaProps, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph,
-        ScrollbarStyle, ScrollbarVisibility, Style, StylePatch, TextClipboardAction,
-        TextClipboardEvent, TextValueEvent, TextWrap, TextareaProps, ThemeProviderProps, column,
-        heading, input, progress_bar, provider, raw_input, row, scroll_area, style, style_patch,
-        text, textarea, theme_context, theme_provider, ui, view,
+        Attr, Component, ComponentContext, Dimension, DomProps, Edges, EmojiMerging, ImageLoading,
+        ImageSource, InputProps, Layout, Node, Props, RawInputAppearance, RawInputMode,
+        RawInputProps, Ref, ScrollAreaProps, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset,
+        ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Style, StylePatch,
+        TextClipboardAction, TextClipboardEvent, TextValueEvent, TextWrap, TextareaProps,
+        ThemeProviderProps, column, heading, input, progress_bar, provider, raw_input, row,
+        scroll_area, style, style_patch, text, textarea, theme_context, theme_provider, ui, view,
     };
 }

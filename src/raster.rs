@@ -1,9 +1,3 @@
-//! Raster image assets and terminal rendering options.
-//!
-//! `Image` in this crate is a retained grid of terminal cells. `RasterImage`
-//! is deliberately separate: it is immutable decoded RGBA8 pixel data which
-//! can be rendered as Chafa symbols or a native terminal image protocol.
-
 use std::{
     error::Error,
     fmt, fs,
@@ -51,8 +45,6 @@ impl fmt::Display for RasterImageError {
 
 impl Error for RasterImageError {}
 
-/// Decoded immutable RGBA8 pixels. Cloning an asset only clones shared
-/// ownership; it never duplicates its pixel buffer.
 #[derive(Clone)]
 pub struct RasterImage {
     id: u64,
@@ -139,9 +131,6 @@ impl RasterImage {
     }
 }
 
-/// A source for an image element. Loaded values are immediately available;
-/// file values are resolved by the renderer only when they enter its
-/// prefetch window.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ImageSource {
     Loaded(RasterImage),
@@ -244,7 +233,6 @@ fn normalize_path(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Controls when a file-backed source is submitted to the image loader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ImageLoading {
     #[default]
@@ -262,9 +250,6 @@ pub enum ImageProtocol {
     Symbols,
 }
 
-/// How replay-only native protocols react to a burst of destructive scene
-/// updates. `Adaptive` keeps the cell compositor responsive and restores the
-/// native scene once it is stable; `NativeOnly` always replays immediately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ImageUpdatePolicy {
     #[default]
@@ -315,11 +300,6 @@ impl Default for ImageRenderOptions {
     }
 }
 
-/// A retained raster fragment in terminal-cell coordinates.
-///
-/// The source may be an already decoded [`RasterImage`] or a lazy
-/// [`ImageSource::File`] request. File requests are resolved by the renderer
-/// when the fragment enters its prefetch window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RasterPlacement {
     pub source: ImageSource,
@@ -368,9 +348,6 @@ impl RasterPlacement {
     }
 }
 
-/// Rasterize an asset to a regular framework cell image. This is used for
-/// symbol-only policy and by `CanvasContext`, whose immediate drawing API
-/// needs ordinary cells for exact call ordering.
 pub(crate) fn symbols(
     source: &RasterImage,
     width: u16,
@@ -405,9 +382,6 @@ pub(crate) fn symbols_tile(
     )
 }
 
-/// Convert an already prepared full transform to ordinary terminal cells.
-/// The renderer uses this once per transform and crops the resulting cell
-/// surface itself on later geometry changes.
 pub(crate) fn symbols_from_pixels(
     pixels: &RasterPixels,
     width: u16,
@@ -488,8 +462,6 @@ fn symbols_from_rgba(
     }
 }
 
-/// Produce one cell-aligned native-protocol tile. Keeping this conversion
-/// here makes renderer clipping independent from image decoding details.
 #[derive(Debug, Clone)]
 pub(crate) struct RasterPixels {
     pub(crate) width: u32,

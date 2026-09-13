@@ -102,7 +102,6 @@ impl Node {
         })
     }
 
-    /// Construct an explicit host element with forwarded DOM props.
     pub fn element(dom: DomProps, children: impl IntoIterator<Item = Node>) -> Self {
         Self::from_kind(NodeKind::Element {
             dom,
@@ -115,8 +114,6 @@ impl Node {
         self
     }
 
-    /// Construct a host raster node. Most callers should use the declarative
-    /// [`crate::image`] component instead.
     pub fn raster(raster: RasterPlacement) -> Self {
         Self::from_kind(NodeKind::Raster(raster))
     }
@@ -165,8 +162,6 @@ pub fn text(content: impl Into<String>) -> Node {
     Text::new(content).into()
 }
 
-/// The explicit host component. Unlike logical function components, `view`
-/// creates the renderer element that receives forwarded DOM props.
 pub fn view(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
     Node::element(props.dom.clone(), props.children.clone())
 }
@@ -183,7 +178,6 @@ pub fn empty() -> Node {
     fragment(std::iter::empty::<Node>())
 }
 
-/// Implementation hook used by the public `ui!` macro.
 #[doc(hidden)]
 pub fn __ui_apply<P, C>(component: C, build: impl FnOnce(&mut Props<P>) -> Option<Key>) -> Node
 where
@@ -199,7 +193,6 @@ where
     node
 }
 
-/// Implementation hook used by `ui!` to type-infer grouped event closures.
 #[doc(hidden)]
 pub fn __ui_events(apply: impl FnOnce(&mut EventHandlers)) -> EventHandlers {
     let mut events = EventHandlers::default();
@@ -207,7 +200,6 @@ pub fn __ui_events(apply: impl FnOnce(&mut EventHandlers)) -> EventHandlers {
     events
 }
 
-/// Implementation hook used by `ui!` for compile-time closing-tag checks.
 #[doc(hidden)]
 pub const fn __ui_tag_names_equal(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
@@ -225,8 +217,6 @@ pub const fn __ui_tag_names_equal(left: &str, right: &str) -> bool {
     true
 }
 
-/// A logical function component. Implementations reconcile their returned
-/// nodes; only an explicit [`view`] creates a host element.
 pub trait Component<P>: 'static {
     fn prepare(&self, _props: &mut Props<P>) {}
 
@@ -321,7 +311,6 @@ pub trait Component<P>: 'static {
         apply_props(self, move |props| props.children.push(child))
     }
 
-    /// Build a logical component node with default props.
     fn node(self) -> Node
     where
         Self: Sized + Send + Sync + 'static,

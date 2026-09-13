@@ -2,13 +2,12 @@ use crossterm::style::Color;
 
 use crate::basic::editor_surface::{CommittedLayout, EditorSurface};
 use crate::basic::text_layout::{self, ItemKind, TextLayout};
-use crate::{Cell, Image, Text, TextAlign, TextOverflow, TextWrap};
+use crate::{Cell, EmojiMerging, Image, Text, TextAlign, TextOverflow, TextWrap};
 
 use super::geometry::RectI;
 use super::style::slot;
 use super::types::ComputedText;
 
-/// Merge a span's text style over the inherited computed style.
 pub(super) fn merge_text(parent: ComputedText, style: &crate::TextStyle) -> ComputedText {
     ComputedText {
         foreground: slot(&style.foreground).unwrap_or(parent.foreground),
@@ -17,10 +16,14 @@ pub(super) fn merge_text(parent: ComputedText, style: &crate::TextStyle) -> Comp
     }
 }
 
-/// Build the canonical layout of `text` at `width`, resolving span styles over
-/// `inherited`.
-pub(super) fn layout(text: &Text, width: usize, inherited: ComputedText) -> TextLayout {
-    text_layout::layout_text(text, width, inherited, merge_text, |computed| *computed)
+pub(super) fn layout(
+    text: &Text,
+    width: usize,
+    inherited: ComputedText,
+    merging: EmojiMerging,
+) -> TextLayout {
+    let base = merge_text(inherited, &text.style);
+    text_layout::layout_text(text, width, base, merging, merge_text, |computed| *computed)
 }
 
 pub(super) fn text_measure(
@@ -28,35 +31,32 @@ pub(super) fn text_measure(
     offered_width: Option<i32>,
     offered_height: Option<i32>,
     inherited: ComputedText,
+    merging: EmojiMerging,
 ) -> (i32, i32) {
     if let Some(surface) = &text.editor {
-        return editor_measure(surface, offered_width, offered_height, text.wrap);
+        return editor_measure(surface, offered_width, offered_height, text.wrap, merging);
     }
     // The intrinsic width is the widest unwrapped logical line. `NoWrap` at a
     // large width breaks only at explicit newlines, so its widest row is
     // exactly that intrinsic width.
-    let natural = layout(text, usize::MAX / 4, inherited);
+    let natural = layout(text, usize::MAX / 4, inherited, merging);
     let natural_width = natural.max_row_width() as i32;
     let width = offered_width.map_or(natural_width, |value| natural_width.min(value.max(0)));
     let wrapped = layout(
         text,
         offered_width.unwrap_or(natural_width).max(1) as usize,
         inherited,
+        merging,
     );
     (width, wrapped.row_count() as i32)
 }
 
-/// Measure an editor surface.
-///
-/// `NoWrap` reports the intrinsic width of the widest logical line so a scroll
-/// host can pan across it. Wrapped modes report the offered width: their rows
-/// are built at whatever width the parent finally grants, so wrapping is
-/// correct in the same frame with no measurement feedback.
 fn editor_measure(
     surface: &EditorSurface,
     offered_width: Option<i32>,
     offered_height: Option<i32>,
     wrap: TextWrap,
+    merging: EmojiMerging,
 ) -> (i32, i32) {
     // An empty control sizes to its placeholder so the hint is visible and the
     // box does not collapse to zero cells. An empty placeholder still occupies
@@ -70,15 +70,22 @@ fn editor_measure(
         if surface.placeholder.is_empty() {
             return (1, 1);
         }
-        let layout = layout_for(&surface.placeholder, usize::MAX / 4, TextWrap::NoWrap);
+        let layout = layout_for(
+            &surface.placeholder,
+            usize::MAX / 4,
+            TextWrap::NoWrap,
+            merging,
+        );
         return (layout.max_row_width() as i32, layout.row_count() as i32);
     }
-    let natural = surface_layout(surface, usize::MAX / 4, wrap);
+    let natural = surface_layout(surface, usize::MAX / 4, wrap, merging);
     // The document height is whatever the value wraps to. A parent that grants
     // a shorter box clips and scrolls it (that is the scroll host's job); a
     // parent that leaves the height auto gets the whole document, so multiline
     // content is visible without scrolling.
-    let rows = |width: i32| surface_layout(surface, width.max(1) as usize, wrap).row_count() as i32;
+    let rows = |width: i32| {
+        surface_layout(surface, width.max(1) as usize, wrap, merging).row_count() as i32
+    };
     match wrap {
         // An unwrapped editor reports the intrinsic width of its widest logical
         // line so a scroll host can pan across it.
@@ -96,20 +103,24 @@ fn editor_measure(
     }
 }
 
-/// The canonical layout of an arbitrary string at a content width.
-fn layout_for(value: &str, width: usize, wrap: TextWrap) -> TextLayout {
+fn layout_for(value: &str, width: usize, wrap: TextWrap, merging: EmojiMerging) -> TextLayout {
     text_layout::layout_text(
         &Text::new(value).wrap(wrap),
         width.max(1),
         ComputedText::default(),
+        merging,
         |parent, _| parent,
         |style| *style,
     )
 }
 
-/// Build the canonical layout of an editor surface at a content width.
-pub(super) fn surface_layout(surface: &EditorSurface, width: usize, wrap: TextWrap) -> TextLayout {
-    layout_for(&surface.value, width, wrap)
+pub(super) fn surface_layout(
+    surface: &EditorSurface,
+    width: usize,
+    wrap: TextWrap,
+    merging: EmojiMerging,
+) -> TextLayout {
+    layout_for(&surface.value, width, wrap, merging)
 }
 
 pub(super) fn raster_text(
@@ -119,16 +130,17 @@ pub(super) fn raster_text(
     inherited: ComputedText,
     backdrop: Color,
     scroll: (i32, i32),
+    merging: EmojiMerging,
 ) -> Option<Image> {
     if let Some(surface) = &text.editor {
-        return editor_raster(text, surface, rect, visible, backdrop, scroll);
+        return editor_raster(text, surface, rect, visible, backdrop, scroll, merging);
     }
     let visible = rect.intersection(visible)?;
     if rect.width <= 0 || rect.height <= 0 {
         return None;
     }
     let text_style = merge_text(inherited, &text.style);
-    let layout = layout(text, rect.width as usize, inherited);
+    let layout = layout(text, rect.width as usize, inherited, merging);
     let horizontal_overflow = layout.width() > rect.width as usize;
     let blank = |style: ComputedText| {
         Cell::styled(
@@ -230,11 +242,12 @@ fn raster_line(
         if let Some(item) = glyphs_at[column]
             && column.saturating_add(item.width) <= content_end
             && column.saturating_add(item.width) <= visible_end
-            && let Ok(cell) = Cell::styled(
+            && let Ok(cell) = Cell::with_width(
+                cell_symbol(item),
                 item.style.foreground,
                 item.style.background.unwrap_or(backdrop),
                 item.style.attributes,
-                cell_symbol(item),
+                item.width,
             )
         {
             cells.push(cell);
@@ -247,7 +260,6 @@ fn raster_line(
     cells
 }
 
-/// The painted symbol of a laid-out glyph: a tab expands to its cell width.
 fn cell_symbol(item: &text_layout::Item) -> String {
     if item.symbol == "\t" {
         " ".repeat(item.width)
@@ -256,8 +268,6 @@ fn cell_symbol(item: &text_layout::Item) -> String {
     }
 }
 
-/// Rasterize an editor surface from the canonical layout at the committed
-/// content width, and publish that layout into the surface's probe.
 fn editor_raster(
     text: &Text,
     surface: &EditorSurface,
@@ -265,6 +275,7 @@ fn editor_raster(
     visible: RectI,
     backdrop: Color,
     scroll: (i32, i32),
+    merging: EmojiMerging,
 ) -> Option<Image> {
     let wrap = text.wrap;
     // An empty control paints its placeholder through the same canonical
@@ -275,9 +286,10 @@ fn editor_raster(
             &surface.placeholder,
             rect.width.max(1) as usize,
             TextWrap::NoWrap,
+            merging,
         )
     } else {
-        surface_layout(surface, rect.width.max(1) as usize, wrap)
+        surface_layout(surface, rect.width.max(1) as usize, wrap, merging)
     };
     if let Some(probe) = &text.probe {
         // The offset the frame is really painted with: the scroll containers
@@ -294,6 +306,7 @@ fn editor_raster(
             viewport_height: visible.height.max(1) as usize,
             applied_x: scroll.1.max(0) as usize,
             applied_y: scroll.0.max(0) as usize,
+            emoji_merging: merging,
         });
     }
     let visible = rect.intersection(visible)?;
@@ -373,11 +386,12 @@ fn editor_raster(
                 } else {
                     placeholder_style
                 };
-                match Cell::styled(
+                match Cell::with_width(
+                    symbol,
                     style.foreground,
                     style.background.unwrap_or(backdrop),
                     style.attributes,
-                    symbol,
+                    item.width,
                 ) {
                     Ok(cell) => {
                         columns += cell.width();
@@ -489,11 +503,12 @@ fn editor_raster(
                 } else {
                     base
                 };
-                match Cell::styled(
+                match Cell::with_width(
+                    symbol,
                     style.foreground,
                     style.background.unwrap_or(backdrop),
                     style.attributes,
-                    symbol,
+                    item.width,
                 ) {
                     Ok(cell) => {
                         columns += cell.width();
@@ -658,9 +673,13 @@ mod tests {
         }
     }
 
-    /// Painted row strings of `text`, with separators omitted.
     fn strings(value: &str, wrap: crate::TextWrap, width: usize) -> Vec<String> {
-        let layout = layout(&Text::new(value).wrap(wrap), width, inherited());
+        let layout = layout(
+            &Text::new(value).wrap(wrap),
+            width,
+            inherited(),
+            EmojiMerging::Merge,
+        );
         (0..layout.row_count())
             .map(|index| {
                 layout
@@ -734,17 +753,30 @@ mod tests {
 
     #[test]
     fn measure_uses_the_widest_unwrapped_line() {
-        let (width, height) = text_measure(&Text::new("ab\ncdef"), None, None, inherited());
+        let (width, height) = text_measure(
+            &Text::new("ab\ncdef"),
+            None,
+            None,
+            inherited(),
+            EmojiMerging::Merge,
+        );
         assert_eq!((width, height), (4, 2));
         // Without a wrap policy the text stays one row and is clipped to the
         // offered width; with soft wrapping it grows to two rows.
-        let (width, height) = text_measure(&Text::new("abcdef"), Some(3), None, inherited());
+        let (width, height) = text_measure(
+            &Text::new("abcdef"),
+            Some(3),
+            None,
+            inherited(),
+            EmojiMerging::Merge,
+        );
         assert_eq!((width, height), (3, 1));
         let (width, height) = text_measure(
             &Text::new("abcdef").wrap(crate::TextWrap::Soft),
             Some(3),
             None,
             inherited(),
+            EmojiMerging::Merge,
         );
         assert_eq!((width, height), (3, 2));
     }
@@ -753,8 +785,41 @@ mod tests {
     fn measure_counts_graphemes_not_bytes() {
         let value = "e\u{301}x";
         assert_eq!(value.graphemes(true).count(), 2);
-        let (width, height) = text_measure(&Text::new(value), None, None, inherited());
+        let (width, height) = text_measure(
+            &Text::new(value),
+            None,
+            None,
+            inherited(),
+            EmojiMerging::Merge,
+        );
         assert_eq!((width, height), (2, 1));
+    }
+
+    #[test]
+    fn emoji_merging_mode_changes_a_sequence_measurement() {
+        for (value, merged, separate) in [
+            ("👩\u{200D}💻", 2, 4),
+            ("👍🏽", 2, 4),
+            ("🇺🇸", 2, 2),
+            ("❤\u{FE0F}", 2, 1),
+        ] {
+            let (width, height) = text_measure(
+                &Text::new(value),
+                None,
+                None,
+                inherited(),
+                EmojiMerging::Merge,
+            );
+            assert_eq!((width, height), (merged, 1), "{value:?} merged");
+            let (width, height) = text_measure(
+                &Text::new(value),
+                None,
+                None,
+                inherited(),
+                EmojiMerging::Separate,
+            );
+            assert_eq!((width, height), (separate, 1), "{value:?} separate");
+        }
     }
 
     fn editor_surface(value: &str, placeholder: &str, wrap: TextWrap) -> EditorSurface {
@@ -774,14 +839,19 @@ mod tests {
         }
     }
 
-    /// Painted row strings of an editor surface inside a `width` x `height` box.
-    /// A wide glyph contributes its symbol and one space for each continuation
-    /// column, so the string has exactly one character per cell column.
     fn editor_rows(surface: &EditorSurface, width: usize, height: usize) -> Vec<String> {
         let text = Text::new("").wrap(surface.wrap);
         let rect = RectI::new(0, 0, width as i32, height as i32);
-        let image =
-            editor_raster(&text, surface, rect, rect, Color::Reset, (0, 0)).expect("raster");
+        let image = editor_raster(
+            &text,
+            surface,
+            rect,
+            rect,
+            Color::Reset,
+            (0, 0),
+            EmojiMerging::Merge,
+        )
+        .expect("raster");
         (0..image.height())
             .map(|row| {
                 (0..image.width())
@@ -814,10 +884,6 @@ mod tests {
         assert_eq!(editor_rows(&surface, 3, 1), ["ab "]);
     }
 
-    /// The row a canonical layout says must be painted in a `width`-cell box,
-    /// derived from `item.cell` alone. An item that does not fit leaves its
-    /// cells blank, and a separator occupies cells without being drawn. Each
-    /// grapheme is one entry - a wide one keeps its trailing columns blank.
     fn clipped_row(layout: &TextLayout, row: usize, width: usize) -> String {
         let mut slots = vec![" ".to_string(); width];
         for item in layout.row_items(row) {
@@ -849,10 +915,6 @@ mod tests {
         slots.concat()
     }
 
-    /// Painted row strings of an editor surface whose own box is `document`
-    /// cells wide, windowed to `viewport` cells starting at `start`. This is the
-    /// scrolled case: the raster lays the document out and the grid shows one
-    /// window of it.
     fn editor_window_rows(
         surface: &EditorSurface,
         document: usize,
@@ -870,6 +932,7 @@ mod tests {
             visible,
             Color::Reset,
             (0, start as i32),
+            EmojiMerging::Merge,
         )
         .expect("raster");
         (0..image.height())
@@ -884,9 +947,6 @@ mod tests {
             .collect()
     }
 
-    /// The window of a canonical row that the editor must paint: a glyph
-    /// appears only when its whole span is inside the window, so a grapheme
-    /// clipped at either edge contributes blanks.
     fn clipped_window(
         layout: &TextLayout,
         row: usize,
@@ -945,7 +1005,7 @@ mod tests {
             for value in values {
                 for width in 1..8usize {
                     let surface = editor_surface(value, "", wrap);
-                    let layout = surface_layout(&surface, width, wrap);
+                    let layout = surface_layout(&surface, width, wrap, EmojiMerging::Merge);
                     for (index, painted) in editor_rows(&surface, width, layout.row_count())
                         .iter()
                         .enumerate()
@@ -964,7 +1024,7 @@ mod tests {
         for placeholder in ["a\tb", "a界a", "界界", "ab"] {
             for width in 1..8usize {
                 let surface = editor_surface("", placeholder, TextWrap::Soft);
-                let layout = layout_for(placeholder, width, TextWrap::NoWrap);
+                let layout = layout_for(placeholder, width, TextWrap::NoWrap, EmojiMerging::Merge);
                 for (index, painted) in editor_rows(&surface, width, layout.row_count())
                     .iter()
                     .enumerate()
@@ -993,7 +1053,12 @@ mod tests {
                     for viewport in 1..=max_viewport {
                         let mut surface = editor_surface(value, "", TextWrap::NoWrap);
                         surface.scroll_x = start;
-                        let layout = surface_layout(&surface, document, TextWrap::NoWrap);
+                        let layout = surface_layout(
+                            &surface,
+                            document,
+                            TextWrap::NoWrap,
+                            EmojiMerging::Merge,
+                        );
                         for (index, painted) in editor_window_rows(
                             &surface,
                             document,
@@ -1017,14 +1082,19 @@ mod tests {
         }
     }
 
-    /// Every `(row, column)` covered by caret styling. A wide grapheme's caret
-    /// covers its continuation column too, so this is the set of columns the
-    /// layout's caret span occupies.
     fn caret_cells(surface: &EditorSurface, width: usize, height: usize) -> Vec<(usize, usize)> {
         let text = Text::new("").wrap(surface.wrap);
         let rect = RectI::new(0, 0, width as i32, height as i32);
-        let image =
-            editor_raster(&text, surface, rect, rect, Color::Reset, (0, 0)).expect("raster");
+        let image = editor_raster(
+            &text,
+            surface,
+            rect,
+            rect,
+            Color::Reset,
+            (0, 0),
+            EmojiMerging::Merge,
+        )
+        .expect("raster");
         let mut found = Vec::new();
         for row in 0..image.height() {
             for column in 0..image.width() {
@@ -1062,7 +1132,7 @@ mod tests {
         ];
         for (value, wrap, width, offset, row) in cases {
             let surface = focused_surface(value, "", wrap, offset);
-            let layout = surface_layout(&surface, width, wrap);
+            let layout = surface_layout(&surface, width, wrap, EmojiMerging::Merge);
             let (caret_row, caret_cell, _) = layout.caret(offset);
             assert_eq!(caret_row, row, "value={value:?} offset={offset}");
             assert!(
@@ -1109,7 +1179,12 @@ mod tests {
         for wrap in [TextWrap::NoWrap, TextWrap::Soft, TextWrap::Hard] {
             for value in values {
                 for width in 1..7usize {
-                    let layout = surface_layout(&editor_surface(value, "", wrap), width, wrap);
+                    let layout = surface_layout(
+                        &editor_surface(value, "", wrap),
+                        width,
+                        wrap,
+                        EmojiMerging::Merge,
+                    );
                     for offset in 0..=value.len() {
                         if !value.is_char_boundary(offset) {
                             continue;
@@ -1138,9 +1213,6 @@ mod tests {
         }
     }
 
-    /// Every `(row, window column)` covered by caret styling when the editor's
-    /// own box is `document` cells wide and the window shows `viewport` cells
-    /// starting at `start`.
     fn window_caret_cells(
         surface: &EditorSurface,
         document: usize,
@@ -1158,6 +1230,7 @@ mod tests {
             visible,
             Color::Reset,
             (0, start as i32),
+            EmojiMerging::Merge,
         )
         .expect("raster");
         let mut found = Vec::new();
@@ -1180,7 +1253,12 @@ mod tests {
         for value in ["a界b", "界界", "x界y界z"] {
             for wrap in [TextWrap::NoWrap, TextWrap::Soft, TextWrap::Hard] {
                 for document in 2..8usize {
-                    let layout = surface_layout(&editor_surface(value, "", wrap), document, wrap);
+                    let layout = surface_layout(
+                        &editor_surface(value, "", wrap),
+                        document,
+                        wrap,
+                        EmojiMerging::Merge,
+                    );
                     for offset in 0..=value.len() {
                         if !value.is_char_boundary(offset) {
                             continue;

@@ -8,7 +8,7 @@ use crate::{
     basic::{
         EventHandlers, EventListener, FocusEvent, KeyboardEvent, PasteEvent, PointerButton,
         PointerEvent, PointerEventKind, ResizeEvent, ScrollDelta, ScrollEvent, ScrollOffset,
-        WheelEvent, common::Attr, events::mouse_details,
+        TerminalFocusEvent, WheelEvent, common::Attr, events::mouse_details,
     },
 };
 
@@ -48,14 +48,8 @@ pub(crate) struct EventRegion {
     pub(crate) id: DomId,
     pub(crate) parent: Option<DomId>,
     pub(crate) focusable: bool,
+    pub(crate) autofocus: bool,
     pub(crate) rect: EventRect,
-    /// Screen position that this region's local coordinates start from.
-    ///
-    /// Handlers want a position they can compare with the content they drew,
-    /// not with their border box, so a padded node reports coordinates relative
-    /// to its content box and a scroll container reports them relative to the
-    /// visible viewport - offset by the scroll position, exactly like the
-    /// rectangles it painted its children in.
     pub(crate) origin: ScreenPosition,
     pub(crate) level: i32,
     pub(crate) order: u64,
@@ -180,6 +174,11 @@ struct EventState {
     buttons: u16,
     last_position: ScreenPosition,
     drag: Option<ScrollDrag>,
+    // Focus requested before the target existed. A caller can only name a
+    // target once the runtime has published it, so a request is held here and
+    // granted at the next publication. Taken once so it cannot re-focus a
+    // target the user has since moved away from.
+    pending_focus: Option<DomId>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -229,7 +228,7 @@ impl EventDispatcher {
     ) {
         regions.sort_by_key(|region| region.order);
         let mut capture_deliveries = Vec::new();
-        let lost_focus = {
+        let (lost_focus, gained_focus) = {
             let mut state = self.state.write().expect("event registry poisoned");
             let lost_focus = if state
                 .focused
@@ -290,7 +289,26 @@ impl EventDispatcher {
                 state.hovered = None;
             }
             state.regions = regions;
-            lost_focus
+            // A pending focus request is granted now that the published region
+            // set is known, but only while nothing else owns focus.
+            let gained_focus = match state.pending_focus.take() {
+                Some(pending)
+                    if state.focused.is_none()
+                        && state
+                            .regions
+                            .iter()
+                            .any(|region| region.id == pending && region.focusable) =>
+                {
+                    state.focused = Some(pending);
+                    state
+                        .regions
+                        .iter()
+                        .find(|region| region.id == pending)
+                        .and_then(|region| listener(&region.handlers.focus_event))
+                }
+                _ => None,
+            };
+            (lost_focus, gained_focus)
         };
         let state = self.state.read().expect("event registry poisoned");
         let mut offsets = self.scroll_offsets.lock().expect("scroll mutex poisoned");
@@ -317,6 +335,9 @@ impl EventDispatcher {
         if let Some(listener) = lost_focus {
             listener.call(FocusEvent::Lost);
         }
+        if let Some(listener) = gained_focus {
+            listener.call(FocusEvent::Gained);
+        }
     }
 
     pub fn dispatch(&self, event: Event) -> usize {
@@ -334,6 +355,14 @@ impl EventDispatcher {
 
     pub fn focus(&self, id: DomId) -> bool {
         self.change_focus(id).0
+    }
+
+    // Request focus for a target that may not be published yet. The request is
+    // granted on the next publication that contains the target, which is the
+    // only moment a focus transition can be observed by the target itself.
+    pub(crate) fn request_focus(&self, id: DomId) {
+        let mut state = self.state.write().expect("event registry poisoned");
+        state.pending_focus = Some(id);
     }
 
     fn change_focus(&self, id: DomId) -> (bool, usize) {
@@ -832,12 +861,20 @@ impl EventDispatcher {
     fn dispatch_key(&self, event: KeyboardEvent) -> usize {
         let mut scroll_changed = false;
         let mut scroll_deliveries = Vec::new();
-        let (target, keyboard_callbacks, key_callbacks) = {
+        // Targeted delivery requires an actual focused target. Falling back to
+        // the root let an unfocused root input edit as though it held focus, so
+        // a widget editing key was indistinguishable from an application
+        // shortcut. Global shortcuts use `app_key` instead.
+        let (target, keyboard_callbacks, key_callbacks, app_callbacks) = {
             let state = self.state.read().expect("event registry poisoned");
-            let target = state.focused.or_else(|| state.root());
-            target.map_or_else(
-                || (None, Vec::new(), Vec::new()),
-                |target| {
+            let app_callbacks = state
+                .regions
+                .iter()
+                .filter_map(|region| listener(&region.handlers.app_key))
+                .collect::<Vec<_>>();
+            let (target, keyboard_callbacks, key_callbacks) = match state.focused {
+                None => (None, Vec::new(), Vec::new()),
+                Some(target) => {
                     let keyboard_callbacks =
                         state.route(target, |handlers| listener(&handlers.keyboard_event));
                     let key_callbacks = match event.key.kind {
@@ -850,8 +887,9 @@ impl EventDispatcher {
                         }
                     };
                     (Some(target), keyboard_callbacks, key_callbacks)
-                },
-            )
+                }
+            };
+            (target, keyboard_callbacks, key_callbacks, app_callbacks)
         };
 
         KeyboardEvent::begin_dispatch();
@@ -867,6 +905,17 @@ impl EventDispatcher {
         }
         if !KeyboardEvent::propagation_stopped() {
             for listener in keyboard_callbacks {
+                listener.call(event);
+                count += 1;
+                if KeyboardEvent::propagation_stopped() {
+                    break;
+                }
+            }
+        }
+        // Application-global shortcuts run last, and only when no focused
+        // widget consumed the key.
+        if !KeyboardEvent::propagation_stopped() {
+            for listener in app_callbacks {
                 listener.call(event);
                 count += 1;
                 if KeyboardEvent::propagation_stopped() {
@@ -1169,10 +1218,12 @@ impl EventDispatcher {
     }
 
     fn dispatch_paste(&self, value: PasteEvent) -> usize {
+        // Paste is a targeted edit command: an unfocused input must not accept
+        // it, and there is no application-global paste route.
         let callbacks = {
             let state = self.state.read().expect("event registry poisoned");
-            let target = state.focused.or_else(|| state.root());
-            target
+            state
+                .focused
                 .map(|target| state.route(target, |handlers| listener(&handlers.paste_event)))
                 .unwrap_or_default()
         };
@@ -1237,8 +1288,12 @@ impl EventDispatcher {
             state
                 .regions
                 .iter()
-                .filter_map(|region| listener(&region.handlers.focus_event))
-                .collect::<Vec<EventListener<FocusEvent>>>()
+                .filter_map(|region| listener(&region.handlers.terminal_focus))
+                .collect::<Vec<EventListener<TerminalFocusEvent>>>()
+        };
+        let event = match event {
+            FocusEvent::Gained => TerminalFocusEvent::Gained,
+            FocusEvent::Lost => TerminalFocusEvent::Lost,
         };
         let count = pointer_deliveries.len() + callbacks.len();
         for (listener, pointer) in pointer_deliveries {
@@ -1441,17 +1496,6 @@ impl EventState {
         self.route(target, |handlers| listener(&handlers.scroll))
     }
 
-    /// Whether a pointer press on `target` should move keyboard focus to it.
-    ///
-    /// Focus is opt-in via [`crate::DomProps::focusable`]; scroll areas remain
-    /// focusable so their keyboard scrolling keeps working.
-    /// Whether a pointer press on `target` should move keyboard focus to it.
-    ///
-    /// Focus is opt-in via [`crate::DomProps::focusable`]. Scroll containers
-    /// remain focusable by default so their keyboard scrolling keeps working,
-    /// but an explicitly focusable ancestor is preferred: a control that hosts
-    /// a scroll area inside itself is the control's focus target, not the
-    /// scroll area's.
     fn focus_target_for(&self, target: DomId) -> Option<DomId> {
         let mut current = Some(target);
         let mut visited = HashSet::new();
@@ -1536,13 +1580,6 @@ impl EventState {
             current = region.parent;
         }
         None
-    }
-
-    fn root(&self) -> Option<DomId> {
-        self.regions
-            .iter()
-            .find(|region| region.parent.is_none())
-            .map(|region| region.id)
     }
 
     fn route<T>(

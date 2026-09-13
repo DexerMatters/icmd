@@ -4,8 +4,8 @@ use super::image::{
 };
 use super::pipeline::PipelineComponent;
 use crate::data::{
-    Cell, CellSlot, Frame, Image, ImageError, ImageId, MAX_SURFACE_CELLS, Operation, Rect,
-    ScreenPosition, Size,
+    Cell, CellSlot, EmojiMerging, Frame, Image, ImageError, ImageId, MAX_SURFACE_CELLS, Operation,
+    Rect, ScreenPosition, Size,
 };
 use crate::{
     ImageMode, ImageProtocol, ImageSource, ImageUpdatePolicy, RasterImage, RasterPlacement,
@@ -91,9 +91,8 @@ pub struct RendererConfig {
     pub image_protocol: ImageProtocol,
     pub image_cache_bytes: usize,
     pub image_update_policy: ImageUpdatePolicy,
-    /// Pixel dimensions of one terminal cell for deterministic renderers.
-    /// `None` refreshes live terminal metrics and falls back to 8x16.
     pub cell_pixel_size: Option<Size>,
+    pub emoji_merging: EmojiMerging,
 }
 
 impl Default for RendererConfig {
@@ -103,6 +102,7 @@ impl Default for RendererConfig {
             image_cache_bytes: 64 * 1024 * 1024,
             image_update_policy: ImageUpdatePolicy::Adaptive,
             cell_pixel_size: None,
+            emoji_merging: EmojiMerging::default(),
         }
     }
 }
@@ -203,10 +203,10 @@ pub struct Renderer {
     pub(super) raster_scene_dirty: bool,
     native_tiles: HashSet<TileKey>,
     kitty: KittyBackend,
+    emoji_merging: EmojiMerging,
 }
 
 impl Renderer {
-    /// Construct a renderer without mutating state when allocation fails.
     pub fn new(viewport: Size) -> Result<Self, FrameError> {
         Self::with_config(viewport, RendererConfig::default())
     }
@@ -253,6 +253,7 @@ impl Renderer {
             raster_scene_dirty: true,
             native_tiles: HashSet::new(),
             kitty: KittyBackend::new(),
+            emoji_merging: config.emoji_merging,
         })
     }
 
@@ -992,7 +993,6 @@ impl Renderer {
         }
     }
 
-    /// Render the pending damage without committing it when allocation fails.
     pub fn render_diff(&mut self) -> Result<Option<String>, FrameError> {
         let load_changed = self.drain_load_results();
         let replay_due = self.native_replay_at.is_some_and(|at| at <= Instant::now());
@@ -1053,6 +1053,7 @@ impl Renderer {
             self.viewport,
             &self.dirty,
             full_redraw,
+            self.emoji_merging,
             &mut self.changed,
         ) {
             Ok(ansi) => ansi,
@@ -1622,12 +1623,21 @@ fn mark_footprint(changed: &mut [bool], index: usize, cell: &CellSlot) {
     }
 }
 
+fn unreliable_advancement(cell: &Cell, merging: EmojiMerging) -> bool {
+    merging.merges()
+        && cell
+            .symbol()
+            .chars()
+            .any(crate::data::is_emoji_sequence_mark)
+}
+
 fn encode_diff(
     old: &[CellSlot],
     desired: &[CellSlot],
     viewport: Size,
     dirty: &[bool],
     full: bool,
+    merging: EmojiMerging,
     changed: &mut Vec<bool>,
 ) -> Result<Option<String>, FrameError> {
     let width = viewport.width as usize;
@@ -1680,16 +1690,15 @@ fn encode_diff(
         let mut column = 0;
         let row_start = line * width;
         let row_end = row_start.saturating_add(width).min(desired.len());
-        let row_has_zwj = desired[row_start..row_end].iter().any(|slot| {
-            let cell = slot.cell();
-            cell.width() == 2 && cell.symbol().contains('\u{200d}')
-        });
-        let isolate_row = row_has_zwj || isolate_next_row;
+        let row_has_unreliable = desired[row_start..row_end].iter().any(
+            |slot| matches!(slot, CellSlot::Lead(cell) if unreliable_advancement(cell, merging)),
+        );
+        let isolate_row = row_has_unreliable || isolate_next_row;
         // Isolate every write on rows containing (or immediately following)
-        // a ZWJ grapheme. This is a deliberately narrow compatibility path:
-        // terminals disagree on cursor advancement for these graphemes,
-        // while ordinary rows retain the allocation-free contiguous-run
-        // encoder.
+        // an emoji sequence. This is a deliberately narrow compatibility path:
+        // terminals disagree on cursor advancement for these graphemes, while
+        // ordinary rows retain the allocation-free contiguous-run encoder.
+        // Plain CJK wide cells and single-codepoint emoji stay batched.
         while column < width {
             let index = line * width + column;
             let can_write = changed[index] && (!full || !desired[index].is_default());
@@ -1713,10 +1722,10 @@ fn encode_diff(
                 }
                 let cell = desired[index].cell();
                 let cell_width = cell.width().max(1);
-                let is_zwj = cell_width == 2 && cell.symbol().contains('\u{200d}');
-                // Some terminals apply a ZWJ grapheme's width while consuming
-                // the preceding write, so rows around one are addressed one
-                // cell at a time below.
+                let cell_unreliable = unreliable_advancement(cell, merging);
+                // Some terminals apply an emoji sequence's width while
+                // consuming the preceding write, so rows around one are
+                // addressed one cell at a time below.
                 if isolate_row && column > run_start {
                     break;
                 }
@@ -1747,18 +1756,18 @@ fn encode_diff(
                 }
                 write!(output, "{}", cell.symbol).unwrap();
                 column += cell_width;
-                // ZWJ emoji are the one class of grapheme for which terminal
-                // cursor advancement still differs across emulators. End
-                // the run after one so the following cell is addressed with
-                // an explicit cursor position instead of inheriting a
+                // Emoji sequences are the class of grapheme for which
+                // terminal cursor advancement still differs across emulators.
+                // End the run after one so the following cell is addressed
+                // with an explicit cursor position instead of inheriting a
                 // potentially drifted cursor. Ordinary CJK wide cells stay
                 // batched, keeping ANSI size and throughput unchanged.
-                if isolate_row || is_zwj {
+                if isolate_row || cell_unreliable {
                     break;
                 }
             }
         }
-        isolate_next_row = row_has_zwj;
+        isolate_next_row = row_has_unreliable;
     }
     write!(
         output,
@@ -1873,6 +1882,7 @@ mod tests {
             Size::new(4, 1),
             &[true, true, true, false],
             false,
+            EmojiMerging::Merge,
             &mut changed,
         )
         .unwrap()
@@ -1880,6 +1890,108 @@ mod tests {
         assert!(output.contains("[1;1Habc"));
         assert!(!output.contains("[1;2H"));
         assert!(!output.contains("[1;3H"));
+    }
+
+    #[test]
+    fn emoji_sequences_resynchronize_the_next_ansi_run() {
+        use unicode_width::UnicodeWidthStr;
+        for (name, symbol) in [
+            ("zwj", "👩\u{200D}💻"),
+            ("family", "👨\u{200D}👩\u{200D}👧\u{200D}👦"),
+            ("skin", "👍🏽"),
+            ("flag", "🇺🇸"),
+            ("keycap", "1\u{FE0F}\u{20E3}"),
+            ("vs16", "❤\u{FE0F}"),
+        ] {
+            let mut desired = vec![CellSlot::Lead(Cell::blank()); 6];
+            desired[0] = slot(symbol);
+            if symbol.width() == 2 {
+                desired[1] = CellSlot::Continuation(Cell::blank());
+            }
+            desired[2] = slot("x");
+            let old = vec![CellSlot::Lead(Cell::blank()); 6];
+            let mut changed = Vec::new();
+            let output = encode_diff(
+                &old,
+                &desired,
+                Size::new(6, 1),
+                &[true; 6],
+                false,
+                EmojiMerging::Merge,
+                &mut changed,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                output.contains("[1;3Hx"),
+                "{name} must address the following cell explicitly: {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_wide_glyphs_stay_batched() {
+        for symbol in ["👍", "界"] {
+            let mut desired = vec![CellSlot::Lead(Cell::blank()); 6];
+            desired[0] = slot(symbol);
+            desired[1] = CellSlot::Continuation(Cell::blank());
+            desired[2] = slot("x");
+            desired[3] = slot("y");
+            let old = vec![CellSlot::Lead(Cell::blank()); 6];
+            let mut changed = Vec::new();
+            let output = encode_diff(
+                &old,
+                &desired,
+                Size::new(6, 1),
+                &[true; 6],
+                false,
+                EmojiMerging::Merge,
+                &mut changed,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                output.contains(&format!("{symbol}xy")),
+                "{symbol} must stay in one run: {output:?}"
+            );
+            assert!(
+                !output.contains("[1;3H"),
+                "{symbol} must not resynchronize mid-row: {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn separate_merging_trusts_the_measured_width() {
+        let old = vec![CellSlot::Lead(Cell::blank()); 6];
+        let mut desired = vec![CellSlot::Lead(Cell::blank()); 6];
+        // The shape the commit pass produces under `Separate`: the base keeps
+        // the trailing joiner, then the second emoji, then ordinary text.
+        desired[0] = slot("👩\u{200D}");
+        desired[1] = CellSlot::Continuation(Cell::blank());
+        desired[2] = slot("💻");
+        desired[3] = CellSlot::Continuation(Cell::blank());
+        desired[4] = slot("x");
+        let mut changed = Vec::new();
+        let output = encode_diff(
+            &old,
+            &desired,
+            Size::new(6, 1),
+            &[true; 6],
+            false,
+            EmojiMerging::Separate,
+            &mut changed,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            output.contains("👩\u{200D}💻x"),
+            "Separate must keep the measured cells in one run: {output:?}"
+        );
+        assert!(
+            !output.contains("[1;3H"),
+            "Separate must not resynchronize a sequence: {output:?}"
+        );
     }
 
     #[test]
@@ -1898,6 +2010,7 @@ mod tests {
             Size::new(4, 1),
             &[true, true, true, true],
             false,
+            EmojiMerging::Merge,
             &mut changed,
         )
         .unwrap()

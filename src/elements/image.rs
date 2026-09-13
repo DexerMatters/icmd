@@ -4,13 +4,11 @@ use crate::{
     basic::ComponentContext,
 };
 
-/// Props for the declarative `<image>` component.
 #[derive(Debug, Clone, Default)]
 pub struct ImageProps {
     pub src: Attr<crate::ImageSource>,
     pub width: Attr<u16>,
     pub height: Attr<u16>,
-    /// File sources are prefetched near the viewport by default.
     pub loading: Attr<ImageLoading>,
     pub fit: Attr<ImageFit>,
     pub horizontal_align: Attr<ImageAlign>,

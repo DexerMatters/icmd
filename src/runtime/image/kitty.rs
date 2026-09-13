@@ -1,9 +1,3 @@
-//! Stateful Kitty graphics backend.
-//!
-//! The renderer decides which raster tiles should exist. This backend owns
-//! the terminal-side image and placement identities and emits only the Kitty
-//! protocol commands needed to reconcile that retained set.
-
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::Write as _;

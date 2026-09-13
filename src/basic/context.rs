@@ -63,7 +63,6 @@ impl<T> Default for ProviderProps<T> {
     }
 }
 
-/// A logical context provider component; it contributes no host element.
 pub fn provider<T>(_cx: &mut ComponentContext, props: &Props<ProviderProps<T>>) -> Node
 where
     T: Clone + Send + Sync + 'static,

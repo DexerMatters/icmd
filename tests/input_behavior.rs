@@ -1,5 +1,8 @@
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -7,9 +10,10 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use icmd::{
-    Attr, Commit, Component, ComponentContext, Dimension, EventDispatcher, EventListener,
-    FocusEvent, InputProps, Lower, Node, Props, Renderer, Runtime, Size, TextValueEvent, TextWrap,
-    TextareaProps, input, textarea, view,
+    Attr, Commit, CommitConfig, Component, ComponentContext, Dimension, EmojiMerging,
+    EventDispatcher, EventListener, FocusEvent, InputProps, Lower, Node, Props, Renderer,
+    RendererConfig, Runtime, Size, TerminalFocusEvent, TextValueEvent, TextWrap, TextareaProps,
+    column, input, textarea, ui, view,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -542,6 +546,286 @@ fn cut_notifies_the_clipboard_before_the_value_changes() {
     dispatcher.dispatch(key(KeyCode::Char('X'), KeyModifiers::CONTROL));
 
     assert_eq!(&*calls.lock().unwrap(), &["cut", "change"]);
+}
+
+#[test]
+fn uncontrolled_input_repaints_a_paste_without_a_change_listener() {
+    // SAF-02: redraw must come from the committed edit result. An uncontrolled
+    // input that installs no `on_change` observer must still repaint the pasted
+    // value on the very next frame.
+    let node = input
+        .props(InputProps {
+            default_value: Attr::Set("ab".into()),
+            ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(10);
+            style.height /= Dimension::Cells(2);
+        })
+        .node();
+    let (sender, output, dispatcher) = pipeline(Size::new(12, 3));
+    sender.send(node).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    let _ = output.recv_timeout(Duration::from_secs(1));
+
+    dispatcher.dispatch(Event::Paste("Z".into()));
+    let frame = output
+        .recv_timeout(Duration::from_secs(1))
+        .expect("paste must request a redraw even without on_change")
+        .unwrap();
+    assert!(
+        painted(&frame).contains('Z'),
+        "pasted text must be painted, frame was {frame:?}"
+    );
+}
+
+#[test]
+fn backspace_and_delete_never_report_a_clipboard_action() {
+    // SAF-03: only an explicit Cut may surface `TextClipboardAction::Cut`.
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let node = input
+        .props(InputProps {
+            default_value: Attr::Set("abc".into()),
+            on_clipboard: Attr::Set(EventListener::new({
+                let actions = actions.clone();
+                move |event: icmd::TextClipboardEvent| actions.lock().unwrap().push(event.action)
+            })),
+            ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(10);
+            style.height /= Dimension::Cells(2);
+        })
+        .node();
+    let (sender, output, dispatcher) = pipeline(Size::new(12, 3));
+    sender.send(node).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 3,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    let _ = output.recv_timeout(Duration::from_secs(1));
+
+    // Backspace with a collapsed caret, Delete with a collapsed caret, and
+    // Backspace over a selection: none of these is a Cut.
+    dispatcher.dispatch(key(KeyCode::Backspace, KeyModifiers::empty()));
+    dispatcher.dispatch(key(KeyCode::Delete, KeyModifiers::empty()));
+    dispatcher.dispatch(key(KeyCode::Char('A'), KeyModifiers::CONTROL));
+    dispatcher.dispatch(key(KeyCode::Backspace, KeyModifiers::empty()));
+    assert!(
+        actions.lock().unwrap().is_empty(),
+        "deletion must not emit a clipboard action, saw {:?}",
+        actions.lock().unwrap()
+    );
+
+    // Refill the field, then Ctrl-X with a live selection is the only path that
+    // reports Cut.
+    dispatcher.dispatch(key(KeyCode::Char('a'), KeyModifiers::empty()));
+    dispatcher.dispatch(key(KeyCode::Char('b'), KeyModifiers::empty()));
+    assert!(actions.lock().unwrap().is_empty());
+    dispatcher.dispatch(key(KeyCode::Char('A'), KeyModifiers::CONTROL));
+    dispatcher.dispatch(key(KeyCode::Char('X'), KeyModifiers::CONTROL));
+    assert_eq!(&*actions.lock().unwrap(), &[icmd::TextClipboardAction::Cut]);
+}
+
+#[test]
+fn unfocused_root_input_ignores_typing_and_paste() {
+    // SAF-04: targeted key/paste delivery requires an actual focused DOM
+    // target. A root input with nothing focused must not edit.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = input
+        .props(InputProps {
+            default_value: Attr::Set("ab".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..InputProps::default()
+        })
+        .node();
+    let (sender, output, dispatcher) = pipeline(Size::new(12, 3));
+    sender.send(node).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(dispatcher.focused(), None);
+
+    dispatcher.dispatch(key(KeyCode::Char('x'), KeyModifiers::empty()));
+    dispatcher.dispatch(Event::Paste("yz".into()));
+    assert!(
+        values.lock().unwrap().is_empty(),
+        "an unfocused root input must not accept key or paste edits"
+    );
+}
+
+#[test]
+fn autofocus_focuses_a_root_input_for_editing() {
+    // The explicit post-publication focus request is what replaces inferred
+    // focus: autofocus grants focus, and only then do edits reach the widget.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = input
+        .props(InputProps {
+            default_value: Attr::Set("ab".into()),
+            autofocus: Attr::Set(true),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..InputProps::default()
+        })
+        .node();
+    let (sender, output, dispatcher) = pipeline(Size::new(12, 3));
+    sender.send(node).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert!(
+        dispatcher.focused().is_some(),
+        "autofocus must publish a focus request that the runtime grants"
+    );
+
+    dispatcher.dispatch(key(KeyCode::Char('x'), KeyModifiers::empty()));
+    assert_eq!(&*values.lock().unwrap(), &["abx"]);
+}
+
+#[test]
+fn application_shortcut_fires_without_focus_and_does_not_reach_the_input() {
+    // A global shortcut and a widget edit are different routes: with no focus
+    // the shortcut fires and the input stays untouched.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let shortcuts = Arc::new(AtomicUsize::new(0));
+    let shortcuts_for_listener = shortcuts.clone();
+    let values_for_listener = values.clone();
+    let node = ui! {
+        <column
+            on_app_key={EventListener::new(move |_event| {
+                shortcuts_for_listener.fetch_add(1, Ordering::SeqCst);
+            })}
+        >
+            <input
+                default_value="ab"
+                on_change={EventListener::new(move |event: TextValueEvent| {
+                    values_for_listener.lock().unwrap().push(event.value)
+                })}
+            />
+        </column>
+    };
+    let (sender, output, dispatcher) = pipeline(Size::new(30, 6));
+    sender.send(node).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(dispatcher.focused(), None);
+
+    dispatcher.dispatch(key(KeyCode::Char('q'), KeyModifiers::empty()));
+    assert_eq!(shortcuts.load(Ordering::SeqCst), 1);
+    assert!(
+        values.lock().unwrap().is_empty(),
+        "a global shortcut must not be delivered as a widget edit"
+    );
+}
+
+#[test]
+fn terminal_activation_does_not_masquerade_as_widget_focus() {
+    // SAF-01: terminal focus is application scope, never widget focus. Only the
+    // clicked input owns DOM focus, and terminal lost/gained leaves that
+    // ownership untouched.
+    let a_gained = Arc::new(AtomicUsize::new(0));
+    let a_lost = Arc::new(AtomicUsize::new(0));
+    let b_gained = Arc::new(AtomicUsize::new(0));
+    let b_lost = Arc::new(AtomicUsize::new(0));
+    let terminal = Arc::new(AtomicUsize::new(0));
+    let terminal_for_listener = terminal.clone();
+
+    let a_gained_for_listener = a_gained.clone();
+    let a_lost_for_listener = a_lost.clone();
+    let b_gained_for_listener = b_gained.clone();
+    let b_lost_for_listener = b_lost.clone();
+    let node = ui! {
+        <column
+            on_terminal_focus={EventListener::new(move |_event: TerminalFocusEvent| {
+                terminal_for_listener.fetch_add(1, Ordering::SeqCst);
+            })}
+        >
+            <input key="a" events={move |events: &mut icmd::EventHandlers| {
+                events.focus_event /= EventListener::new(move |event: FocusEvent| match event {
+                    FocusEvent::Gained => {
+                        a_gained_for_listener.fetch_add(1, Ordering::SeqCst);
+                    }
+                    FocusEvent::Lost => {
+                        a_lost_for_listener.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }} />
+            <input key="b" events={move |events: &mut icmd::EventHandlers| {
+                events.focus_event /= EventListener::new(move |event: FocusEvent| match event {
+                    FocusEvent::Gained => {
+                        b_gained_for_listener.fetch_add(1, Ordering::SeqCst);
+                    }
+                    FocusEvent::Lost => {
+                        b_lost_for_listener.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }} />
+        </column>
+    };
+    let (sender, output, dispatcher) = pipeline(Size::new(30, 6));
+    sender.send(node).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+
+    // Focus the first input.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(dispatcher.focused().is_some());
+    assert_eq!(a_gained.load(Ordering::SeqCst), 1);
+    assert_eq!(b_gained.load(Ordering::SeqCst), 0);
+
+    // Terminal loss and gain are application events; they must not fabricate a
+    // widget blur/focus cycle for every input.
+    dispatcher.dispatch(Event::FocusLost);
+    dispatcher.dispatch(Event::FocusGained);
+    assert_eq!(terminal.load(Ordering::SeqCst), 2);
+    assert_eq!(a_lost.load(Ordering::SeqCst), 0);
+    assert_eq!(a_gained.load(Ordering::SeqCst), 1);
+    assert_eq!(b_lost.load(Ordering::SeqCst), 0);
+    assert_eq!(b_gained.load(Ordering::SeqCst), 0);
+
+    // Moving focus to the second input reports exactly one lost/gained pair.
+    // The second input paints at row 3 (first content row, underline, blank,
+    // second content row), which the probe below confirms.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 3,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(dispatcher.focused().is_some());
+    assert_eq!(a_lost.load(Ordering::SeqCst), 1);
+    assert_eq!(b_gained.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -1413,5 +1697,273 @@ fn narrow_textarea_click_still_maps_to_the_cell() {
         values.lock().unwrap().last().map(String::as_str),
         Some("012345678#9abcdefghijklmnopqrstuvwxyz"),
         "a click must land on the cell under the pointer even when the box is narrower than requested"
+    );
+}
+
+/// Emoji codepoints that merge with the base under the caret must land as one
+/// grapheme: the emitted value carries the merged cluster, the screen paints it
+/// as one glyph, and one backspace removes all of it.
+#[test]
+fn emoji_sequences_merge_into_one_cluster_while_typing() {
+    for (base, inserted, merged) in [
+        ("👩", "\u{200D}💻", "👩\u{200D}💻"),
+        ("👍", "🏽", "👍🏽"),
+        ("🇺", "🇸", "🇺🇸"),
+        ("❤", "\u{FE0F}", "❤\u{FE0F}"),
+        ("1", "\u{FE0F}\u{20E3}", "1\u{FE0F}\u{20E3}"),
+    ] {
+        let values = Arc::new(Mutex::new(Vec::new()));
+        let node = input
+            .props(InputProps {
+                default_value: Attr::Set(base.into()),
+                on_change: Attr::Set(EventListener::new({
+                    let values = values.clone();
+                    move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+                })),
+                ..InputProps::default()
+            })
+            .style(|style| {
+                style.width /= Dimension::Cells(16);
+                style.height /= Dimension::Cells(2);
+            })
+            .node();
+        let viewport = Size::new(18, 3);
+        let (sender, output, dispatcher) = pipeline(viewport);
+        sender.send(node).unwrap();
+        let mut screen = Screen::new(viewport);
+        drain(&mut screen, &output);
+        // Focus the field. Click past the content so the caret clamps to the
+        // end of the base value, where the merge must happen.
+        dispatcher.dispatch(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        }));
+        drain(&mut screen, &output);
+        for ch in inserted.chars() {
+            dispatcher.dispatch(key(KeyCode::Char(ch), KeyModifiers::empty()));
+            drain(&mut screen, &output);
+        }
+        assert_eq!(
+            values.lock().unwrap().last().map(String::as_str),
+            Some(merged),
+            "{merged:?}: the merge must be emitted as one value"
+        );
+        assert!(
+            screen.text().contains(merged),
+            "{merged:?} must be painted as one grapheme: {:?}",
+            screen.lines()
+        );
+        dispatcher.dispatch(key(KeyCode::Backspace, KeyModifiers::empty()));
+        drain(&mut screen, &output);
+        assert_eq!(
+            values.lock().unwrap().last().map(String::as_str),
+            Some(""),
+            "one backspace removes the whole merged cluster"
+        );
+    }
+}
+
+/// `max_length` counts the merged result: a paste that joins a modifier to its
+/// base is one grapheme even though it carries several codepoints.
+#[test]
+fn emoji_sequence_paste_counts_as_one_grapheme_for_max_length() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = input
+        .props(InputProps {
+            max_length: Attr::Set(1),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(16);
+            style.height /= Dimension::Cells(2);
+        })
+        .node();
+    let viewport = Size::new(18, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    let mut screen = Screen::new(viewport);
+    drain(&mut screen, &output);
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatch_paste(&output, &dispatcher, "👨\u{200D}👩\u{200D}👧\u{200D}👦");
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("👨\u{200D}👩\u{200D}👧\u{200D}👦"),
+        "a whole sequence is one grapheme for max_length"
+    );
+}
+
+/// Dispatch a paste and settle, so the emitted value is observable.
+fn dispatch_paste(
+    output: &crossbeam_channel::Receiver<Result<String, icmd::FrameError>>,
+    dispatcher: &EventDispatcher,
+    text: &str,
+) {
+    dispatcher.dispatch(Event::Paste(text.into()));
+    while output.recv_timeout(Duration::from_millis(200)).is_ok() {}
+}
+
+/// A terminal that does not merge emoji clusters is told so through the runtime
+/// configuration: the commit pass then measures `👩‍💻` as four cells, and the
+/// renderer batches those cells instead of resynchronizing after a cluster.
+#[test]
+fn separate_merging_paints_a_sequence_codepoint_by_codepoint() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = input
+        .props(InputProps {
+            default_value: Attr::Set("👩\u{200D}💻y".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(16);
+            style.height /= Dimension::Cells(2);
+        })
+        .node();
+    let viewport = Size::new(18, 3);
+    let (commit, _, dispatcher) = Commit::with_config_and_events(
+        viewport,
+        CommitConfig {
+            emoji_merging: EmojiMerging::Separate,
+        },
+    );
+    let renderer = Renderer::with_config(
+        viewport,
+        RendererConfig {
+            emoji_merging: EmojiMerging::Separate,
+            ..RendererConfig::default()
+        },
+    )
+    .unwrap();
+    let (sender, output) = Runtime::new(Lower::default())
+        .then(commit)
+        .then(renderer)
+        .start();
+    sender.send(node).unwrap();
+    let mut screen = Screen::new(viewport);
+    drain(&mut screen, &output);
+    // The two codepoint parts paint in adjacent cells, followed by the text.
+    assert!(
+        screen.lines()[0].contains("👩\u{200D}💻y"),
+        "the sequence must paint codepoint by codepoint: {:?}",
+        screen.lines()
+    );
+    // The sequence occupies content cells 0..=3, with `y` at cell 4. The input
+    // host has one padding cell, so cell 3 is screen column 4. Its right half
+    // resolves to the whole grapheme's trailing boundary, which only exists at
+    // four cells of width.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 4,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    drain(&mut screen, &output);
+    dispatcher.dispatch(key(KeyCode::Char('X'), KeyModifiers::empty()));
+    drain(&mut screen, &output);
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("👩\u{200D}💻Xy"),
+        "a click on the sequence's last cell must land after the whole grapheme"
+    );
+}
+
+/// The point of `Separate`: because the terminal paints two glyphs, the editor
+/// must let the caret sit between them and edit there.
+#[test]
+fn separate_merging_edits_between_the_parts() {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = input
+        .props(InputProps {
+            default_value: Attr::Set("a👩\u{200D}💻b".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..InputProps::default()
+        })
+        .style(|style| {
+            style.width /= Dimension::Cells(16);
+            style.height /= Dimension::Cells(2);
+        })
+        .node();
+    let viewport = Size::new(18, 3);
+    let (commit, _, dispatcher) = Commit::with_config_and_events(
+        viewport,
+        CommitConfig {
+            emoji_merging: EmojiMerging::Separate,
+        },
+    );
+    let renderer = Renderer::with_config(
+        viewport,
+        RendererConfig {
+            emoji_merging: EmojiMerging::Separate,
+            ..RendererConfig::default()
+        },
+    )
+    .unwrap();
+    let (sender, output) = Runtime::new(Lower::default())
+        .then(commit)
+        .then(renderer)
+        .start();
+    sender.send(node).unwrap();
+    let mut screen = Screen::new(viewport);
+    drain(&mut screen, &output);
+
+    // Content: a=cell0, the two parts=1..=4, b=cell5. The host has one padding
+    // cell, so content cell 2 (the first part's right half) is screen column 3:
+    // it resolves to the boundary between the parts.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 3,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    drain(&mut screen, &output);
+    dispatcher.dispatch(key(KeyCode::Char('X'), KeyModifiers::empty()));
+    drain(&mut screen, &output);
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("a👩\u{200D}X💻b"),
+        "the caret must be placeable between the painted parts"
+    );
+
+    // The caret now follows `X`, so one backspace removes just that unit.
+    dispatcher.dispatch(key(KeyCode::Backspace, KeyModifiers::empty()));
+    drain(&mut screen, &output);
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("a👩\u{200D}💻b"),
+        "backspace removes the unit before the caret"
+    );
+
+    // Click between the parts again and backspace: only the left part goes,
+    // never the whole sequence.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 3,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    drain(&mut screen, &output);
+    dispatcher.dispatch(key(KeyCode::Backspace, KeyModifiers::empty()));
+    drain(&mut screen, &output);
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("a💻b"),
+        "backspace removes one painted part, not the whole sequence"
     );
 }

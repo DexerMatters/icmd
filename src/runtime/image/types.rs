@@ -1,17 +1,9 @@
-//! Protocol-neutral retained raster geometry.
-//!
-//! These keys are the contract between scene composition, pixel preparation,
-//! and terminal backends. Keeping them here prevents each backend from
-//! inventing its own identity or clipping representation.
-
 use crate::raster::RasterPixels;
 use crate::{Image, ImageId, ImageRenderOptions, Size};
 
 #[derive(Debug)]
 pub(in crate::runtime) struct PreparedRaster {
     pub(in crate::runtime) pixels: RasterPixels,
-    /// One entry per destination cell. A value means at least one pixel in
-    /// that cell is non-transparent.
     pub(in crate::runtime) alpha_cells: Vec<bool>,
     pub(in crate::runtime) symbols: Option<Image>,
     pub(in crate::runtime) bytes: usize,

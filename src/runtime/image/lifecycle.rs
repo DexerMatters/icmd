@@ -1,10 +1,3 @@
-//! Scene-facing image lifecycle orchestration.
-//!
-//! This layer connects retained scene nodes to [`ImageManager`]. It decides
-//! when a source is relevant, applies loading/error placeholders, and turns
-//! completed loads into repaint damage; decoding and cache ownership remain in
-//! the manager itself.
-
 use std::collections::HashSet;
 
 use crate::runtime::renderer::{ImageNode, Renderer, Surface};

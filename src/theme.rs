@@ -14,8 +14,6 @@ pub enum ThemeMode {
     Dark,
 }
 
-/// Built-in palettes used by the demo and available to applications as
-/// convenient starting points for customization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThemePreset {
     Ansi,
@@ -58,6 +56,11 @@ impl ThemePreset {
             return Theme::ansi(mode);
         }
 
+        // Every preset replaces *all* nineteen colours. Starting from the ANSI
+        // palette and overriding a subset would leave the rest as terminal
+        // names such as `Color::White`, which look correct only in a light
+        // scheme and turn into unreadable leftovers in a dark one (a white
+        // badge foreground on a dark accent, for example).
         let mut colors = ThemeColors::ansi(mode);
         match (self, mode) {
             // A deliberately neon terminal palette: deep green surfaces,
@@ -75,7 +78,7 @@ impl ThemePreset {
                 colors.secondary_foreground = rgb(0xf2fff4);
                 colors.muted = rgb(0xc5e6cb);
                 colors.muted_foreground = rgb(0x286c3b);
-                colors.accent = rgb(0x4f9f00);
+                colors.accent = rgb(0x3f8a00);
                 colors.accent_foreground = rgb(0xf2fff4);
                 colors.destructive = rgb(0xb42318);
                 colors.destructive_foreground = rgb(0xfff5f4);
@@ -105,58 +108,107 @@ impl ThemePreset {
                 colors.ring = rgb(0x39ff14);
             }
             (Self::Mono, ThemeMode::Light) => {
+                colors.background = rgb(0xffffff);
                 colors.foreground = rgb(0x111111);
                 colors.card = rgb(0xf2f2f2);
+                colors.card_foreground = rgb(0x111111);
+                colors.popover = rgb(0xffffff);
+                colors.popover_foreground = rgb(0x111111);
                 colors.primary = rgb(0x222222);
-                colors.secondary = rgb(0xd9d9d9);
+                colors.primary_foreground = rgb(0xffffff);
+                colors.secondary = rgb(0x4d4d4d);
+                colors.secondary_foreground = rgb(0xffffff);
                 colors.muted = rgb(0xeaeaea);
-                colors.muted_foreground = rgb(0x666666);
+                colors.muted_foreground = rgb(0x5c5c5c);
+                colors.accent = rgb(0x3d3d3d);
+                colors.accent_foreground = rgb(0xffffff);
+                colors.destructive = rgb(0x8c1d18);
+                colors.destructive_foreground = rgb(0xffffff);
                 colors.border = rgb(0x999999);
+                colors.input = rgb(0xffffff);
+                colors.ring = rgb(0x222222);
             }
             (Self::Mono, ThemeMode::Dark) => {
                 colors.background = rgb(0x0f0f0f);
                 colors.foreground = rgb(0xf5f5f5);
                 colors.card = rgb(0x1b1b1b);
+                colors.card_foreground = rgb(0xf5f5f5);
+                colors.popover = rgb(0x161616);
+                colors.popover_foreground = rgb(0xf5f5f5);
                 colors.primary = rgb(0xf5f5f5);
-                colors.secondary = rgb(0x333333);
+                colors.primary_foreground = rgb(0x0f0f0f);
+                colors.secondary = rgb(0xbbbbbb);
+                colors.secondary_foreground = rgb(0x0f0f0f);
                 colors.muted = rgb(0x262626);
                 colors.muted_foreground = rgb(0xa3a3a3);
+                colors.accent = rgb(0xdedede);
+                colors.accent_foreground = rgb(0x0f0f0f);
+                colors.destructive = rgb(0xff8a80);
+                colors.destructive_foreground = rgb(0x1a0503);
                 colors.border = rgb(0x606060);
+                colors.input = rgb(0x161616);
+                colors.ring = rgb(0xf5f5f5);
             }
             (Self::Latte, ThemeMode::Light) => {
                 colors.background = rgb(0xeff1f5);
                 colors.foreground = rgb(0x4c4f69);
                 colors.card = rgb(0xccd0da);
+                colors.card_foreground = rgb(0x4c4f69);
+                colors.popover = rgb(0xe6e9ef);
+                colors.popover_foreground = rgb(0x4c4f69);
                 colors.primary = rgb(0x1e66f5);
-                colors.secondary = rgb(0x179299);
+                colors.primary_foreground = rgb(0xffffff);
+                colors.secondary = rgb(0x0f766e);
+                colors.secondary_foreground = rgb(0xffffff);
                 colors.muted = rgb(0xe6e9ef);
                 colors.muted_foreground = rgb(0x6c6f85);
-                colors.border = rgb(0x9ca0b0);
+                colors.accent = rgb(0x9a5b00);
+                colors.accent_foreground = rgb(0xffffff);
+                colors.destructive = rgb(0xd20f39);
+                colors.destructive_foreground = rgb(0xffffff);
+                colors.border = rgb(0x7f849c);
+                colors.input = rgb(0xffffff);
+                colors.ring = rgb(0x1e66f5);
             }
             (Self::Latte, ThemeMode::Dark) => {
                 colors.background = rgb(0x1e1e2e);
                 colors.foreground = rgb(0xcdd6f4);
                 colors.card = rgb(0x313244);
+                colors.card_foreground = rgb(0xcdd6f4);
+                colors.popover = rgb(0x181825);
+                colors.popover_foreground = rgb(0xcdd6f4);
                 colors.primary = rgb(0x89b4fa);
+                colors.primary_foreground = rgb(0x11111b);
                 colors.secondary = rgb(0x94e2d5);
+                colors.secondary_foreground = rgb(0x11111b);
                 colors.muted = rgb(0x313244);
                 colors.muted_foreground = rgb(0xa6adc8);
-                colors.border = rgb(0x585b70);
+                colors.accent = rgb(0xf9e2af);
+                colors.accent_foreground = rgb(0x11111b);
+                colors.destructive = rgb(0xf38ba8);
+                colors.destructive_foreground = rgb(0x11111b);
+                colors.border = rgb(0x6c7086);
+                colors.input = rgb(0x181825);
+                colors.ring = rgb(0x89b4fa);
             }
             (Self::Nord, ThemeMode::Light) => {
                 colors.background = rgb(0xeceff4);
                 colors.foreground = rgb(0x2e3440);
                 colors.card = rgb(0xe5e9f0);
                 colors.card_foreground = rgb(0x2e3440);
+                colors.popover = rgb(0xf8f9fb);
+                colors.popover_foreground = rgb(0x2e3440);
                 colors.primary = rgb(0x5e81ac);
                 colors.primary_foreground = rgb(0xf8f9fb);
-                colors.secondary = rgb(0x8fbcbb);
+                colors.secondary = rgb(0x4f8f8c);
                 colors.secondary_foreground = rgb(0x2e3440);
                 colors.muted = rgb(0xd8dee9);
                 colors.muted_foreground = rgb(0x4c566a);
-                colors.accent = rgb(0xd08770);
-                colors.accent_foreground = rgb(0x2e3440);
-                colors.border = rgb(0xb8c0ce);
+                colors.accent = rgb(0xa85f42);
+                colors.accent_foreground = rgb(0xf8f9fb);
+                colors.destructive = rgb(0xbf616a);
+                colors.destructive_foreground = rgb(0xf8f9fb);
+                colors.border = rgb(0x8490a3);
                 colors.input = rgb(0xf8f9fb);
                 colors.ring = rgb(0x5e81ac);
             }
@@ -165,6 +217,8 @@ impl ThemePreset {
                 colors.foreground = rgb(0xd8dee9);
                 colors.card = rgb(0x3b4252);
                 colors.card_foreground = rgb(0xe5e9f0);
+                colors.popover = rgb(0x3b4252);
+                colors.popover_foreground = rgb(0xe5e9f0);
                 colors.primary = rgb(0x88c0d0);
                 colors.primary_foreground = rgb(0x2e3440);
                 colors.secondary = rgb(0x81a1c1);
@@ -173,7 +227,9 @@ impl ThemePreset {
                 colors.muted_foreground = rgb(0x9aa6ba);
                 colors.accent = rgb(0xebcb8b);
                 colors.accent_foreground = rgb(0x2e3440);
-                colors.border = rgb(0x616b7f);
+                colors.destructive = rgb(0xcf7a82);
+                colors.destructive_foreground = rgb(0x2e3440);
+                colors.border = rgb(0x78839c);
                 colors.input = rgb(0x3b4252);
                 colors.ring = rgb(0x88c0d0);
             }
@@ -182,15 +238,19 @@ impl ThemePreset {
                 colors.foreground = rgb(0x282a36);
                 colors.card = rgb(0xe9e9e2);
                 colors.card_foreground = rgb(0x282a36);
+                colors.popover = rgb(0xffffff);
+                colors.popover_foreground = rgb(0x282a36);
                 colors.primary = rgb(0x6441a5);
                 colors.primary_foreground = rgb(0xffffff);
-                colors.secondary = rgb(0x168b72);
+                colors.secondary = rgb(0x0f766e);
                 colors.secondary_foreground = rgb(0xffffff);
                 colors.muted = rgb(0xe1e1d8);
                 colors.muted_foreground = rgb(0x6272a4);
-                colors.accent = rgb(0xb05a00);
+                colors.accent = rgb(0x9a5b00);
                 colors.accent_foreground = rgb(0xffffff);
-                colors.border = rgb(0xb7b7ae);
+                colors.destructive = rgb(0xb3122a);
+                colors.destructive_foreground = rgb(0xffffff);
+                colors.border = rgb(0x9a9a90);
                 colors.input = rgb(0xffffff);
                 colors.ring = rgb(0x6441a5);
             }
@@ -199,6 +259,8 @@ impl ThemePreset {
                 colors.foreground = rgb(0xf8f8f2);
                 colors.card = rgb(0x343746);
                 colors.card_foreground = rgb(0xf8f8f2);
+                colors.popover = rgb(0x343746);
+                colors.popover_foreground = rgb(0xf8f8f2);
                 colors.primary = rgb(0xbd93f9);
                 colors.primary_foreground = rgb(0x282a36);
                 colors.secondary = rgb(0x50fa7b);
@@ -207,6 +269,8 @@ impl ThemePreset {
                 colors.muted_foreground = rgb(0xb8b8b0);
                 colors.accent = rgb(0xffb86c);
                 colors.accent_foreground = rgb(0x282a36);
+                colors.destructive = rgb(0xff5555);
+                colors.destructive_foreground = rgb(0x282a36);
                 colors.border = rgb(0x6272a4);
                 colors.input = rgb(0x21222c);
                 colors.ring = rgb(0xbd93f9);
@@ -216,48 +280,60 @@ impl ThemePreset {
                 colors.foreground = rgb(0x657b83);
                 colors.card = rgb(0xeee8d5);
                 colors.card_foreground = rgb(0x586e75);
-                colors.primary = rgb(0x268bd2);
+                colors.popover = rgb(0xfdf6e3);
+                colors.popover_foreground = rgb(0x586e75);
+                colors.primary = rgb(0x1c6fb0);
                 colors.primary_foreground = rgb(0xfdf6e3);
-                colors.secondary = rgb(0x2aa198);
+                colors.secondary = rgb(0x1f7a72);
                 colors.secondary_foreground = rgb(0xfdf6e3);
                 colors.muted = rgb(0xeee8d5);
-                colors.muted_foreground = rgb(0x839496);
-                colors.accent = rgb(0xb58900);
-                colors.accent_foreground = rgb(0x073642);
+                colors.muted_foreground = rgb(0x657b83);
+                colors.accent = rgb(0x8a6800);
+                colors.accent_foreground = rgb(0xfdf6e3);
+                colors.destructive = rgb(0xcf3f2c);
+                colors.destructive_foreground = rgb(0xfdf6e3);
                 colors.border = rgb(0x93a1a1);
                 colors.input = rgb(0xffffff);
-                colors.ring = rgb(0x268bd2);
+                colors.ring = rgb(0x1c6fb0);
             }
             (Self::Solarized, ThemeMode::Dark) => {
                 colors.background = rgb(0x002b36);
-                colors.foreground = rgb(0x839496);
+                colors.foreground = rgb(0x93a1a1);
                 colors.card = rgb(0x073642);
                 colors.card_foreground = rgb(0x93a1a1);
-                colors.primary = rgb(0x268bd2);
-                colors.primary_foreground = rgb(0xfdf6e3);
+                colors.popover = rgb(0x073642);
+                colors.popover_foreground = rgb(0x93a1a1);
+                colors.primary = rgb(0x4aa3e0);
+                colors.primary_foreground = rgb(0x002b36);
                 colors.secondary = rgb(0x2aa198);
                 colors.secondary_foreground = rgb(0x002b36);
                 colors.muted = rgb(0x073642);
-                colors.muted_foreground = rgb(0x657b83);
-                colors.accent = rgb(0xb58900);
+                colors.muted_foreground = rgb(0x839496);
+                colors.accent = rgb(0xc99b00);
                 colors.accent_foreground = rgb(0x002b36);
+                colors.destructive = rgb(0xe06c5a);
+                colors.destructive_foreground = rgb(0x002b36);
                 colors.border = rgb(0x586e75);
                 colors.input = rgb(0x073642);
-                colors.ring = rgb(0x268bd2);
+                colors.ring = rgb(0x4aa3e0);
             }
             (Self::Ocean, ThemeMode::Light) => {
                 colors.background = rgb(0xeaf6ff);
                 colors.foreground = rgb(0x12324a);
                 colors.card = rgb(0xd6ecfa);
                 colors.card_foreground = rgb(0x12324a);
+                colors.popover = rgb(0xf4fbff);
+                colors.popover_foreground = rgb(0x12324a);
                 colors.primary = rgb(0x1261a0);
                 colors.primary_foreground = rgb(0xf4fbff);
-                colors.secondary = rgb(0x168aad);
+                colors.secondary = rgb(0x0f6f7a);
                 colors.secondary_foreground = rgb(0xf4fbff);
                 colors.muted = rgb(0xc2e1f2);
                 colors.muted_foreground = rgb(0x42677d);
-                colors.accent = rgb(0xf28f3b);
-                colors.accent_foreground = rgb(0x301600);
+                colors.accent = rgb(0xa8531a);
+                colors.accent_foreground = rgb(0xf4fbff);
+                colors.destructive = rgb(0xb3261e);
+                colors.destructive_foreground = rgb(0xf4fbff);
                 colors.border = rgb(0x70a9c9);
                 colors.input = rgb(0xf4fbff);
                 colors.ring = rgb(0x1261a0);
@@ -267,6 +343,8 @@ impl ThemePreset {
                 colors.foreground = rgb(0xc8e7f5);
                 colors.card = rgb(0x0d2b43);
                 colors.card_foreground = rgb(0xd9f1fb);
+                colors.popover = rgb(0x0d2b43);
+                colors.popover_foreground = rgb(0xd9f1fb);
                 colors.primary = rgb(0x4db8ff);
                 colors.primary_foreground = rgb(0x041321);
                 colors.secondary = rgb(0x2dd4bf);
@@ -275,6 +353,8 @@ impl ThemePreset {
                 colors.muted_foreground = rgb(0x82b8d2);
                 colors.accent = rgb(0xffb86b);
                 colors.accent_foreground = rgb(0x291400);
+                colors.destructive = rgb(0xff6b6b);
+                colors.destructive_foreground = rgb(0x2b0505);
                 colors.border = rgb(0x276184);
                 colors.input = rgb(0x0a2237);
                 colors.ring = rgb(0x4db8ff);
@@ -344,11 +424,11 @@ impl ThemeColors {
             popover_foreground: Color::Black,
             primary: Color::Blue,
             primary_foreground: Color::White,
-            secondary: Color::Cyan,
+            secondary: Color::DarkCyan,
             secondary_foreground: Color::Black,
             muted: Color::Grey,
             muted_foreground: Color::DarkGrey,
-            accent: Color::Yellow,
+            accent: Color::DarkYellow,
             accent_foreground: Color::Black,
             destructive: Color::Red,
             destructive_foreground: Color::White,
@@ -368,8 +448,8 @@ impl ThemeColors {
             popover_foreground: Color::White,
             primary: Color::Blue,
             primary_foreground: Color::White,
-            secondary: Color::DarkCyan,
-            secondary_foreground: Color::White,
+            secondary: Color::Cyan,
+            secondary_foreground: Color::Black,
             muted: Color::DarkGrey,
             muted_foreground: Color::Grey,
             accent: Color::Yellow,
@@ -472,15 +552,11 @@ pub struct Theme {
     pub scrollbar: ScrollbarStyle,
 }
 
-/// Props for the built-in theme provider. The global theme context key is
-/// supplied automatically, so callers only provide the theme value.
 #[derive(Clone, Default)]
 pub struct ThemeProviderProps {
     pub value: Attr<Theme>,
 }
 
-/// Provide a theme through the global [`theme_context`] without creating a
-/// host element.
 pub fn theme_provider(_cx: &mut ComponentContext, props: &Props<ThemeProviderProps>) -> Node {
     let value = props.value.as_ref().cloned().expect("missing theme value");
     theme_context().provider(value, props.children.clone())
@@ -573,6 +649,56 @@ impl Theme {
     pub fn destructive_style(&self) -> Style {
         foreground_style(self.colors.destructive, self.colors.destructive_foreground)
     }
+
+    pub fn on_card(&self, color: Color) -> Color {
+        if contrast_ratio(color, self.colors.card) >= MIN_TEXT_CONTRAST {
+            color
+        } else {
+            self.colors.card_foreground
+        }
+    }
+}
+
+pub const MIN_TEXT_CONTRAST: f64 = 3.0;
+
+pub fn contrast_ratio(a: Color, b: Color) -> f64 {
+    let (Some(a), Some(b)) = (relative_luminance(a), relative_luminance(b)) else {
+        return f64::INFINITY;
+    };
+    let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+fn relative_luminance(color: Color) -> Option<f64> {
+    let (r, g, b) = match color {
+        Color::Rgb { r, g, b } => (r, g, b),
+        Color::Black => (0, 0, 0),
+        Color::DarkGrey => (128, 128, 128),
+        Color::Red => (255, 0, 0),
+        Color::DarkRed => (128, 0, 0),
+        Color::Green => (0, 255, 0),
+        Color::DarkGreen => (0, 128, 0),
+        Color::Yellow => (255, 255, 0),
+        Color::DarkYellow => (128, 128, 0),
+        Color::Blue => (0, 0, 255),
+        Color::DarkBlue => (0, 0, 128),
+        Color::Magenta => (255, 0, 255),
+        Color::DarkMagenta => (128, 0, 128),
+        Color::Cyan => (0, 255, 255),
+        Color::DarkCyan => (0, 128, 128),
+        Color::White => (255, 255, 255),
+        Color::Grey => (192, 192, 192),
+        _ => return None,
+    };
+    let channel = |value: u8| {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
 }
 
 pub fn theme(apply: impl FnOnce(&mut Theme)) -> Theme {

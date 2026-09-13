@@ -6,21 +6,13 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScrollAreaProps {
-    /// Axes that may be scrolled. Defaults to vertical scrolling.
     pub axes: Attr<ScrollAxes>,
-    /// Whether bars are automatic, reserved even without overflow, or hidden.
     pub scrollbar_visibility: Attr<ScrollbarVisibility>,
-    /// When set, the caller owns the scroll position and should feed updates from `on_scroll` back.
     pub offset: Attr<ScrollOffset>,
-    /// Enable pointer interactions with bars and the scroll area.
     pub enable_mouse: Attr<bool>,
-    /// Enable wheel input independently of pointer interactions.
     pub enable_wheel: Attr<bool>,
-    /// Enable arrows, Home/End, and page-key scrolling independently.
     pub enable_keyboard: Attr<bool>,
-    /// Number of logical cells moved by one wheel tick.
     pub wheel_step: Attr<u16>,
-    /// Optional per-instance override for the theme's scrollbar appearance.
     pub scrollbar_style: Attr<ScrollbarStyle>,
 }
 

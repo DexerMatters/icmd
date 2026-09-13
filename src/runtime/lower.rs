@@ -70,11 +70,6 @@ impl Fiber {
     }
 }
 
-/// Reconciles logical fibers and emits a host-only DOM tree.
-///
-/// Function components, providers, and fragments are logical fibers and are
-/// flattened during lowering. Empty and multi-host roots receive an internal
-/// wrapper element so the commit stage always receives one host root.
 pub struct Lower {
     fibers: FiberArena,
     root: FiberId,

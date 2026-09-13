@@ -11,13 +11,15 @@ use std::{
 };
 
 use crossterm::{event::KeyCode, style::Color};
-use icmd::theme::{Theme, ThemeMode, ThemePreset};
 use icmd::{
     AlertVariant, Align, Attr, BadgeVariant, Component, ComponentContext, Dimension, Edges,
     EventListener, Justify, KeyboardEvent, Layout, Node, Percent, Props, RawInputMode,
     RawInputProps, RuntimeConfig, ScrollAxes, ScrollEvent, ScrollOffset, StateSetter, Text,
-    TextClipboardEvent, TextOverflow, TextValueEvent, TextWrap, raw_input, render, theme_provider,
-    ui, view,
+    TextOverflow, TextValueEvent, TextWrap, raw_input, render, theme_provider, ui, view,
+};
+use icmd::{
+    EmojiMerging,
+    theme::{Theme, ThemeMode, ThemePreset},
 };
 use icmd::{
     alert, badge, blockquote, button, canvas, card, center, checkbox, code, column, divider,
@@ -246,7 +248,6 @@ fn components_page(
                             style.height /= Dimension::Cells(8);
                         }}
                         default_value={"Long Unicode text: 这是一个很长的示例文本，含有 emoji 👩‍💻 and an unbreakable-token-for-hard-wrap."}
-                        on_clipboard={move |event: TextClipboardEvent| eprintln!("host clipboard {:?}: {:?}", event.action, event.text)}
                     />
                     <row>
                         <button on_click={move |_| wrap_setter.set(next_wrap)}>
@@ -643,6 +644,12 @@ fn app(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    render(app.apply(()), RuntimeConfig::default())?;
+    render(
+        app.apply(()),
+        RuntimeConfig {
+            emoji_merging: EmojiMerging::Auto,
+            ..Default::default()
+        },
+    )?;
     Ok(())
 }
