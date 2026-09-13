@@ -39,6 +39,10 @@ pub struct RuntimeConfig {
     // Hard resource ceilings for the whole runtime. Invalid combinations are
     // rejected by `validate` before any thread or terminal mode exists.
     pub limits: ResourceLimits,
+    // Maximum terminal events processed before the loop returns to rendering.
+    // This is the fairness budget that keeps a continuous input stream from
+    // starving presentation.
+    pub events_per_tick: usize,
 }
 
 impl Default for RuntimeConfig {
@@ -55,6 +59,7 @@ impl Default for RuntimeConfig {
             image_update_policy: ImageUpdatePolicy::Adaptive,
             emoji_merging: EmojiMerging::default(),
             limits: ResourceLimits::default(),
+            events_per_tick: 64,
         }
     }
 }
@@ -182,6 +187,30 @@ fn root(_cx: &mut ComponentContext, props: &Props<Node>) -> Node {
     props.user_defined.clone()
 }
 
+// Upper bound on how long the loop blocks waiting for a frame. Input latency
+// therefore does not grow with a large configured poll interval.
+const MAX_RENDER_WAIT: Duration = Duration::from_millis(16);
+
+// Buffer a replaceable event and report whether it was coalesced. Return, move,
+// and resize events are safe to collapse because only the newest position or
+// size is observable; every other event keeps its place in the stream.
+fn coalesce_event(pending: &mut Option<Event>, event: Event) -> bool {
+    match &event {
+        Event::Mouse(mouse) if matches!(mouse.kind, crossterm::event::MouseEventKind::Moved) => {
+            *pending = Some(event);
+            true
+        }
+        Event::Resize(_, _) => {
+            *pending = Some(event);
+            true
+        }
+        _ => {
+            *pending = Some(event);
+            false
+        }
+    }
+}
+
 fn is_exit_key(event: KeyEvent, expected: KeyEvent) -> bool {
     event.kind == KeyEventKind::Press
         && event.code == expected.code
@@ -212,6 +241,9 @@ impl RuntimeConfig {
             return Err(ConfigError::InvalidPollInterval {
                 millis: poll.as_millis(),
             });
+        }
+        if self.events_per_tick == 0 {
+            return Err(ConfigError::InvalidEventsPerTick);
         }
         Ok(())
     }
@@ -259,8 +291,18 @@ pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), Render
         .send(root.apply(node.into()))
         .map_err(|_| RenderError::RuntimeClosed)?;
 
+    // The wait for renderer output is the only blocking point. Capping it keeps
+    // input latency bounded regardless of the configured poll interval, and the
+    // loop revisits events after every frame, so continuous input cannot starve
+    // rendering.
+    let render_wait = config
+        .poll_interval
+        .min(MAX_RENDER_WAIT)
+        .max(Duration::from_millis(1));
+
     let outcome = 'render: loop {
-        if let Some(frame) = receive_frame(&output, config.poll_interval)? {
+        // 1. Always give ready renderer output a chance first.
+        if let Some(frame) = receive_frame(&output, render_wait)? {
             terminal.write(&frame)?;
         }
         // A typed stage failure is terminal and must not look like a normal
@@ -268,14 +310,30 @@ pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), Render
         if let Ok(error) = errors.try_recv() {
             break 'render Err(RenderError::Stage(error));
         }
-        while event::poll(Duration::ZERO)? {
+        // 2. Drain a bounded batch of terminal events. Mouse moves and resizes
+        //    are coalesced; key, paste, focus, and shutdown events never are.
+        let mut pending: Option<Event> = None;
+        let mut processed = 0usize;
+        while processed < config.events_per_tick && event::poll(Duration::ZERO)? {
             let event = event::read()?;
+            if coalesce_event(&mut pending, event) {
+                continue;
+            }
+            let event = pending.take().expect("a non-coalesced event is queued");
             if matches!(&event, Event::Key(key) if is_exit_key(*key, config.exit_key)) {
                 break 'render Ok(());
             }
             dispatcher.dispatch(event);
-            // A panicking or reentrant listener is a controlled stop, not a
-            // silent no-op; leaving the loop runs terminal RAII cleanup.
+            if let Some(detail) = dispatcher.take_callback_fault() {
+                break 'render Err(RenderError::ApplicationCallback(detail));
+            }
+            processed += 1;
+        }
+        if let Some(event) = pending.take() {
+            if matches!(&event, Event::Key(key) if is_exit_key(*key, config.exit_key)) {
+                break 'render Ok(());
+            }
+            dispatcher.dispatch(event);
             if let Some(detail) = dispatcher.take_callback_fault() {
                 break 'render Err(RenderError::ApplicationCallback(detail));
             }

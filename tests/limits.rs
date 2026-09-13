@@ -437,6 +437,27 @@ fn an_over_budget_frame_writes_nothing_and_keeps_presented_state() {
     assert!(frame.contains('A'));
 }
 
+// SAF-15: loop fairness and latency settings are validated rather than
+// silently clamped or allowed to spin.
+#[test]
+fn loop_fairness_settings_are_validated() {
+    let zero_events = icmd::RuntimeConfig {
+        events_per_tick: 0,
+        ..icmd::RuntimeConfig::default()
+    };
+    let error = zero_events.validate().unwrap_err();
+    assert!(error.to_string().contains("events_per_tick"), "{error}");
+
+    let huge_poll = icmd::RuntimeConfig {
+        poll_interval: Duration::from_secs(120),
+        ..icmd::RuntimeConfig::default()
+    };
+    assert!(huge_poll.validate().is_err());
+
+    // The default configuration is valid.
+    icmd::RuntimeConfig::default().validate().unwrap();
+}
+
 #[test]
 fn invalid_poll_interval_is_rejected_before_side_effects() {
     // Configuration is validated before any thread or terminal mode exists.

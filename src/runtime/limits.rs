@@ -237,6 +237,7 @@ pub enum ConfigError {
     InvalidLimit { field: &'static str },
     Inconsistent { detail: &'static str },
     InvalidPollInterval { millis: u128 },
+    InvalidEventsPerTick,
     Renderer(RendererConfigError),
 }
 
@@ -258,6 +259,9 @@ impl fmt::Display for ConfigError {
                 f,
                 "poll interval must be nonzero and at most 60s, got {millis}ms"
             ),
+            Self::InvalidEventsPerTick => {
+                write!(f, "events_per_tick must be greater than zero")
+            }
             Self::Renderer(error) => write!(f, "{error}"),
         }
     }
