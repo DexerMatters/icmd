@@ -86,10 +86,11 @@ pub(crate) struct Row {
 #[derive(Debug, Clone)]
 pub(crate) struct ShapedGlyph<S> {
     pub source: Range<usize>,
-    pub text_start: usize,
-    pub text_end: usize,
+    // Byte range into the shared normalized text built during shaping. Glyphs
+    // refer to ranges instead of owning a `String`, so shaping performs one
+    // backing allocation rather than one per glyph.
+    pub text: Range<usize>,
     pub width: usize,
-    pub symbol: String,
     pub kind: ItemKind,
     pub style: S,
 }
@@ -122,7 +123,20 @@ where
     S: Clone,
 {
     let shaped = shape_text(text, inherited, merging, merge);
-    TextLayout::layout(shaped, text.wrap, width, into_computed)
+    TextLayout::layout(
+        shaped.normalized,
+        shaped.glyphs,
+        text.wrap,
+        width,
+        into_computed,
+    )
+}
+
+// Shaping output: one shared normalized buffer plus glyph records that index
+// into it.
+struct ShapedText<S> {
+    normalized: String,
+    glyphs: Vec<ShapedGlyph<S>>,
 }
 
 fn shape_text<S>(
@@ -130,12 +144,12 @@ fn shape_text<S>(
     inherited: ComputedText,
     merging: EmojiMerging,
     merge: impl Fn(ComputedText, &TextStyle) -> S,
-) -> Vec<ShapedGlyph<S>>
+) -> ShapedText<S>
 where
     S: Clone,
 {
+    let mut normalized = String::new();
     let mut shaped = Vec::new();
-    let mut text_offset = 0usize;
     // Source offsets are global to the whole `Text`, so a multi-span value has
     // non-overlapping ranges just like a single-span one. Each span contributes
     // its normalized length to the running origin.
@@ -152,38 +166,36 @@ where
                 // non-merging terminal paints - and pointer hits are monotonic
                 // across them.
                 for (range, width) in parts {
-                    let symbol = grapheme[range.clone()].to_string();
-                    let text_end = text_offset + symbol.len();
+                    let start = normalized.len();
+                    normalized.push_str(&grapheme[range.clone()]);
                     shaped.push(ShapedGlyph {
                         source: source_origin + source_index + range.start
                             ..source_origin + source_index + range.end,
-                        text_start: text_offset,
-                        text_end,
+                        text: start..normalized.len(),
                         width,
-                        symbol,
                         kind: ItemKind::Glyph,
                         style: style.clone(),
                     });
-                    text_offset = text_end;
                 }
                 continue;
             }
             let (symbol, width, kind) = display_glyph(grapheme);
-            let text_end = text_offset + symbol.len();
+            let start = normalized.len();
+            normalized.push_str(&symbol);
             shaped.push(ShapedGlyph {
                 source: source_origin + source_index..source_origin + source_index + grapheme.len(),
-                text_start: text_offset,
-                text_end,
+                text: start..normalized.len(),
                 width,
-                symbol,
                 kind,
                 style: style.clone(),
             });
-            text_offset = text_end;
         }
         source_origin += content.len();
     }
-    shaped
+    ShapedText {
+        normalized,
+        glyphs: shaped,
+    }
 }
 
 fn display_glyph(grapheme: &str) -> (String, usize, ItemKind) {
@@ -208,6 +220,7 @@ fn display_glyph(grapheme: &str) -> (String, usize, ItemKind) {
 
 impl TextLayout {
     pub(crate) fn layout<S>(
+        text: String,
         shaped: Vec<ShapedGlyph<S>>,
         wrap: TextWrap,
         width: usize,
@@ -217,10 +230,6 @@ impl TextLayout {
         S: Clone,
     {
         let width = width.max(1);
-        let mut text = String::new();
-        for glyph in &shaped {
-            text.push_str(&glyph.symbol);
-        }
         let source_len = shaped.last().map_or(0, |glyph| glyph.source.end);
 
         // A tab advances to the next tab stop from the *logical* line column,
@@ -233,7 +242,7 @@ impl TextLayout {
                 column = 0;
                 continue;
             }
-            let width = if glyph.symbol == "\t" {
+            let width = if &text[glyph.text.clone()] == "\t" {
                 TAB_WIDTH - column % TAB_WIDTH
             } else {
                 glyph.width
@@ -289,6 +298,7 @@ impl TextLayout {
                 continue;
             }
             let pieces = line_pieces(
+                &text,
                 &shaped,
                 &widths,
                 logical.start,
@@ -334,7 +344,7 @@ impl TextLayout {
                 };
                 items.push(Item {
                     source: glyph.source.clone(),
-                    text: glyph.text_start..glyph.text_end,
+                    text: glyph.text.clone(),
                     cell,
                     width: item_width,
                     kind,
@@ -638,6 +648,7 @@ impl TextLayout {
 }
 
 fn line_pieces<S>(
+    normalized: &str,
     shaped: &[ShapedGlyph<S>],
     widths: &[usize],
     first: usize,
@@ -663,7 +674,7 @@ fn line_pieces<S>(
     if matches!(wrap, TextWrap::Hard) {
         return hard_pieces(widths, first, last);
     }
-    let mut pieces = soft_pieces(shaped, widths, first, content_last, width);
+    let mut pieces = soft_pieces(normalized, shaped, widths, first, content_last, width);
     // The explicit newline that terminated the line always belongs to the final
     // row and is never dropped as a separator.
     if content_last < last {
@@ -747,6 +758,7 @@ impl Fragment for Piece {
 }
 
 fn soft_pieces<S>(
+    normalized: &str,
     shaped: &[ShapedGlyph<S>],
     widths: &[usize],
     first: usize,
@@ -757,7 +769,7 @@ fn soft_pieces<S>(
     let mut offsets = Vec::with_capacity(content_last - first + 1);
     offsets.push(0usize);
     for glyph in &shaped[first..content_last] {
-        source.push_str(&glyph.symbol);
+        source.push_str(&normalized[glyph.text.clone()]);
         offsets.push(source.len());
     }
 
@@ -809,11 +821,8 @@ fn soft_pieces<S>(
     }
 
     // Trailing whitespace on the logical line is content, not a separator.
-    let preserve_trailing = shaped[content_last - 1]
-        .symbol
-        .chars()
-        .all(char::is_whitespace)
-        && !shaped[content_last - 1].symbol.is_empty();
+    let last_symbol = &normalized[shaped[content_last - 1].text.clone()];
+    let preserve_trailing = last_symbol.chars().all(char::is_whitespace) && !last_symbol.is_empty();
     if preserve_trailing && let Some(last) = pieces.last_mut() {
         last.content_end = last.end;
         last.content_width = last.width;

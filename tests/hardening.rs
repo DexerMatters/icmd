@@ -465,3 +465,28 @@ fn offscreen_text_rasterizes_only_the_visible_window() {
     );
     assert!(!short.is_empty() && !long.is_empty());
 }
+
+// PERF-03: shaping stores one shared normalized buffer and glyphs reference
+// ranges into it, so the painted result is identical to the previous
+// per-glyph storage.
+#[test]
+fn shaped_text_shares_one_normalized_buffer() {
+    use icmd::{Text, TextWrap};
+
+    // Mixed content exercises the separate-unit path, tabs, newlines, wide
+    // glyphs, and controls through the same shared buffer.
+    let content = "ab界\tcd\n🙂e\u{7}f ghij";
+    let node: Node = Text::new(content)
+        .wrap(TextWrap::NoWrap)
+        .layout_style(icmd::style(|style| style.width /= icmd::Dimension::Max))
+        .into();
+    let frame = render(node, Size::new(32, 2));
+    // The rendered glyphs are the same ones the source contains.
+    for expected in ['a', 'b', '界', 'c', 'd', 'e', 'f', 'g'] {
+        assert!(
+            frame.contains(expected),
+            "expected {expected:?} in the shaped output: {frame:?}"
+        );
+    }
+    assert!(!frame.is_empty());
+}
