@@ -16,7 +16,22 @@ use icmd::style::{
 };
 use icmd::theme::{Theme, ThemeColors, ThemeMode, ThemePreset};
 use icmd::widgets::{column, input, raster_image, scroll_area, text, view};
-use icmd::{Component, ComponentContext, Node, Props, RuntimeConfig, run};
+use icmd::{
+    Component, ComponentContext, Node, Props, Renderer, RendererConfig, ResourceLimits, Runtime,
+    RuntimeConfig, Size, run,
+};
+use std::time::Duration;
+
+// Helper: build the standard three-stage pipeline and return its handle.
+fn build_test_pipeline(
+    viewport: Size,
+) -> icmd::RuntimeHandle<icmd::Node, Result<String, icmd::FrameError>> {
+    let (commit, _) = icmd::Commit::new(viewport);
+    Runtime::new(icmd::Lower::default())
+        .then(commit)
+        .then(Renderer::new(viewport).unwrap())
+        .start_handle()
+}
 
 // A high-level application fixture: it uses only the curated tiers, plus the
 // `ui!` macro, and never names an `advanced` item.
@@ -100,5 +115,59 @@ fn focus_override_can_clear_a_default_true() {
     assert_eq!(
         off_default.with_overrides(&on_override).focusable,
         Attr::Set(true)
+    );
+}
+
+// API-07/API-12: runtime ownership is a named handle with typed errors and an
+// acknowledged shutdown, and invalid configuration is rejected before any
+// thread or terminal resource exists.
+#[test]
+fn runtime_handle_owns_channels_and_acknowledges_shutdown() {
+    let viewport = Size::new(8, 2);
+    let handle = build_test_pipeline(viewport);
+    let input = handle.input();
+    let output = handle.output();
+    input.send(icmd::text("x")).unwrap();
+    let _ = output.recv_timeout(std::time::Duration::from_secs(2));
+    drop(input);
+    handle
+        .shutdown(icmd::ShutdownPolicy::default())
+        .expect("shutdown must join every worker");
+}
+
+#[test]
+fn configuration_is_validated_before_side_effects() {
+    let limits = ResourceLimits {
+        max_nodes: 0,
+        ..ResourceLimits::default()
+    };
+    assert!(
+        limits.validate().is_err(),
+        "a zero node budget must be rejected"
+    );
+
+    let config = icmd::RuntimeConfig {
+        limits: ResourceLimits::default(),
+        ..icmd::RuntimeConfig::default()
+    };
+    config
+        .validate()
+        .expect("the default configuration is valid");
+}
+
+#[test]
+fn renderer_config_rejects_impossible_geometry() {
+    let error = Renderer::with_config(
+        Size::new(8, 2),
+        RendererConfig {
+            cell_pixel_size: Some(Size::new(0, 1)),
+            ..RendererConfig::default()
+        },
+    )
+    .err()
+    .expect("a zero cell pixel width must be rejected");
+    assert!(
+        matches!(error, icmd::FrameError::Config { .. }),
+        "{error:?}"
     );
 }
