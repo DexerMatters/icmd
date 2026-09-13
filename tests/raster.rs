@@ -7,7 +7,7 @@ use std::{sync::Arc, thread, time::Duration};
 use icmd::{
     Attr, Cell, Commit, Component, Dimension, DomProps, Frame, Image, ImageMode, ImageProtocol,
     ImageSource, ImageUpdatePolicy, Layout, Lower, Node, Operation, RasterImage, RasterImageError,
-    RasterPlacement, Renderer, RendererConfig, Runtime, Size, Style, canvas, image, ui,
+    RasterPlacement, Renderer, RendererConfig, Runtime, Size, Style, canvas, raster_image, ui,
 };
 
 fn render(node: Node) -> String {
@@ -86,7 +86,7 @@ fn raster_assets_validate_and_clone_without_copying_pixels() {
 #[test]
 fn image_component_has_a_symbol_fallback() {
     let source = asset();
-    let node = ui! { <image src={source} width=4 height=2 mode={ImageMode::Symbols} /> };
+    let node = ui! { <raster_image src={source} width=4 height=2 mode={ImageMode::Symbols} /> };
     assert!(!render(node).is_empty());
 }
 
@@ -484,7 +484,7 @@ fn commit_retains_lazy_rasters_in_the_prefetch_margin_without_painting_them() {
 #[test]
 fn lazy_image_without_dimensions_renders_an_error_placeholder() {
     let path = asset_path();
-    let node = ui! { <image src={ImageSource::file(path)} width=2 /> };
+    let node = ui! { <raster_image src={ImageSource::file(path)} width=2 /> };
     let frame = render(node);
     assert!(frame.contains("×"), "{frame:?}");
 }

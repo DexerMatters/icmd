@@ -11,7 +11,9 @@ use icmd::{
     Align, Component, ComponentContext, Dimension, Edges, ImageFit, ImageSource, Layout, Node,
     Percent, Props, RuntimeConfig, ScrollAxes, ScrollbarVisibility, Text, render, ui,
 };
-use icmd::{badge, card, column, container, heading, image, label, muted, row, scroll_area, view};
+use icmd::{
+    badge, card, column, container, heading, label, muted, raster_image, row, scroll_area, view,
+};
 
 struct Pin {
     image: ImageSource,
@@ -59,7 +61,7 @@ fn pin_card(pin: &Pin) -> Node {
             s.width /= Dimension::Cells(25);
             s.gap /= 0;
         }}>
-            <image src={source} width={21} height={pin.height} fit={ImageFit::Cover} />
+            <raster_image src={source} width={21} height={pin.height} fit={ImageFit::Cover} />
             <label>{pin.title}</label>
             <muted>{format!("{}  ·  save", pin.author)}</muted>
         </card>
