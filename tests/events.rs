@@ -88,6 +88,92 @@ fn mouse_listener_is_hit_tested_and_keyboard_focus_is_routed() {
 }
 
 #[test]
+fn panicking_listener_is_recorded_and_propagation_state_restores() {
+    // SAF-14: a panicking listener must not poison the dispatcher, must not
+    // leave keyboard propagation state behind, and must be reported.
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(Size::new(20, 5));
+    let (input, output) = Runtime::new(Lower::default()).then(commit).start();
+
+    let later_hits = Arc::new(AtomicUsize::new(0));
+    let later_hits_for_listener = later_hits.clone();
+    let node = root
+        .style(|style| {
+            style.width /= Dimension::Max;
+            style.height /= Dimension::Max;
+        })
+        .events(move |events| {
+            events.app_key /= EventListener::new(move |_event| {
+                later_hits_for_listener.fetch_add(1, Ordering::SeqCst);
+                panic!("listener exploded");
+            });
+        })
+        .apply(());
+    input.send(node).unwrap();
+    output.recv().unwrap();
+
+    let key = || {
+        KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            KeyModifiers::empty(),
+            KeyEventKind::Press,
+        )
+    };
+    dispatcher.dispatch(Event::Key(key()));
+    assert_eq!(later_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        dispatcher.take_callback_fault(),
+        Some("an event listener panicked")
+    );
+
+    // The next independent dispatch still runs: propagation state was restored
+    // and the listener lock was not left poisoned in a way that blocks delivery.
+    dispatcher.dispatch(Event::Key(key()));
+    assert_eq!(later_hits.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn reentrant_listener_delivery_terminates_without_deadlock() {
+    // SAF-14: a listener that re-dispatches into itself must be rejected rather
+    // than deadlocking on a non-reentrant lock.
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(Size::new(20, 5));
+    let (input, output) = Runtime::new(Lower::default()).then(commit).start();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_listener = calls.clone();
+    let dispatcher_for_listener = dispatcher.clone();
+    let node = root
+        .style(|style| {
+            style.width /= Dimension::Max;
+            style.height /= Dimension::Max;
+        })
+        .events(move |events| {
+            events.app_key /= EventListener::new(move |_event| {
+                calls_for_listener.fetch_add(1, Ordering::SeqCst);
+                dispatcher_for_listener.dispatch(Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Char('q'),
+                    KeyModifiers::empty(),
+                    KeyEventKind::Press,
+                )));
+            });
+        })
+        .apply(());
+    input.send(node).unwrap();
+    output.recv().unwrap();
+
+    dispatcher.dispatch(Event::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('q'),
+        KeyModifiers::empty(),
+        KeyEventKind::Press,
+    )));
+    // The outer callback ran once; the nested delivery was rejected, not run.
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        dispatcher.take_callback_fault(),
+        Some("an event listener dispatched an event into itself")
+    );
+}
+
+#[test]
 fn application_global_key_listener_fires_without_focus() {
     let (commit, _viewport, dispatcher) = Commit::new_with_events(Size::new(20, 5));
     let (input, output) = Runtime::new(Lower::default()).then(commit).start();

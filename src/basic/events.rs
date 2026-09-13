@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
-    sync::{Arc, Mutex},
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -13,6 +14,45 @@ use super::{
 };
 
 type ListenerCallback<E> = Box<dyn FnMut(E) + Send + 'static>;
+
+// A callback that panics must not lose its failure and must not leave the
+// runtime running in an unknown partially-mutated state. The first fault is
+// recorded here and surfaced through the runtime error channel; later faults
+// are ignored so the original cause is preserved.
+static CALLBACK_FAULT: OnceLock<Mutex<Option<CallbackFault>>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallbackFault {
+    // A listener re-entered itself, which would deadlock a non-reentrant lock.
+    // Delivery is rejected instead.
+    Reentrant,
+    Panicked,
+}
+
+impl CallbackFault {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Reentrant => "an event listener dispatched an event into itself",
+            Self::Panicked => "an event listener panicked",
+        }
+    }
+}
+
+pub(crate) fn record_callback_fault(fault: CallbackFault) {
+    let slot = CALLBACK_FAULT.get_or_init(|| Mutex::new(None));
+    let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if slot.is_none() {
+        *slot = Some(fault);
+    }
+}
+
+pub(crate) fn take_callback_fault() -> Option<CallbackFault> {
+    CALLBACK_FAULT.get().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    })
+}
 
 #[derive(fmt_derive::Debug)]
 pub struct EventListener<E> {
@@ -27,8 +67,26 @@ impl<E> EventListener<E> {
     }
 
     pub(crate) fn call(&self, event: E) {
-        let mut callback = self.callback.lock().expect("event listener poisoned");
-        callback(event);
+        // `try_lock` (not `lock`) because a listener may dispatch an event that
+        // routes back to itself. Blocking there would deadlock; rejecting the
+        // nested delivery is deterministic and preserves the outer callback.
+        let mut callback = match self.callback.try_lock() {
+            Ok(callback) => callback,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                record_callback_fault(CallbackFault::Reentrant);
+                return;
+            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                // A previous panic poisoned the lock. Recover the callback so
+                // subsequent independent events still work, and record the
+                // panic once.
+                record_callback_fault(CallbackFault::Panicked);
+                poisoned.into_inner()
+            }
+        };
+        if catch_unwind(AssertUnwindSafe(|| callback(event))).is_err() {
+            record_callback_fault(CallbackFault::Panicked);
+        }
     }
 }
 
@@ -215,15 +273,25 @@ impl KeyboardEvent {
         });
     }
 
-    pub(crate) fn begin_dispatch() {
-        KEYBOARD_PROPAGATION.with(|stack| stack.borrow_mut().push(false));
-    }
-
     pub(crate) fn propagation_stopped() -> bool {
         KEYBOARD_PROPAGATION.with(|stack| stack.borrow().last().copied().unwrap_or(false))
     }
 
-    pub(crate) fn end_dispatch() {
+    // The guard owns the thread-local propagation frame. Because restoration is
+    // tied to `Drop`, an unwinding listener cannot leave stale "stopped" state
+    // behind for the next, unrelated dispatch.
+    pub(crate) fn begin_dispatch() -> PropagationGuard {
+        KEYBOARD_PROPAGATION.with(|stack| stack.borrow_mut().push(false));
+        PropagationGuard { _private: () }
+    }
+}
+
+pub(crate) struct PropagationGuard {
+    _private: (),
+}
+
+impl Drop for PropagationGuard {
+    fn drop(&mut self) {
         KEYBOARD_PROPAGATION.with(|stack| {
             stack.borrow_mut().pop();
         });

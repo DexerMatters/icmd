@@ -68,6 +68,9 @@ pub enum RenderError {
     Io(io::Error),
     Frame(FrameError),
     RuntimeClosed,
+    /// An application event listener panicked or re-entered itself. The runtime
+    /// stops instead of continuing in an unknown partially-mutated state.
+    ApplicationCallback(&'static str),
 }
 
 impl fmt::Display for RenderError {
@@ -76,6 +79,7 @@ impl fmt::Display for RenderError {
             Self::Io(error) => write!(f, "terminal I/O failed: {error}"),
             Self::Frame(error) => write!(f, "rendering frame failed: {error}"),
             Self::RuntimeClosed => write!(f, "rendering runtime stopped unexpectedly"),
+            Self::ApplicationCallback(detail) => write!(f, "application callback failed: {detail}"),
         }
     }
 }
@@ -85,7 +89,7 @@ impl Error for RenderError {
         match self {
             Self::Io(error) => Some(error),
             Self::Frame(error) => Some(error),
-            Self::RuntimeClosed => None,
+            Self::RuntimeClosed | Self::ApplicationCallback(_) => None,
         }
     }
 }
@@ -224,6 +228,11 @@ pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), Render
                 break 'render;
             }
             dispatcher.dispatch(event);
+            // A panicking or reentrant listener is a controlled stop, not a
+            // silent no-op; leaving the loop runs terminal RAII cleanup.
+            if let Some(detail) = dispatcher.take_callback_fault() {
+                return Err(RenderError::ApplicationCallback(detail));
+            }
         }
     }
 

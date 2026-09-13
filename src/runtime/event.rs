@@ -416,6 +416,14 @@ impl EventDispatcher {
         self.state.read().expect("event registry poisoned").focused
     }
 
+    // Surface (and clear) the first callback fault recorded during dispatch.
+    // A panic or a rejected reentrant delivery stops being invisible here; the
+    // runtime loop turns it into a typed error and performs cleanup.
+    #[doc(hidden)]
+    pub fn take_callback_fault(&self) -> Option<&'static str> {
+        crate::basic::events::take_callback_fault().map(|fault| fault.message())
+    }
+
     pub fn set_pointer_capture(&self, id: DomId) -> bool {
         let mut deliveries = Vec::new();
         let accepted = {
@@ -892,7 +900,9 @@ impl EventDispatcher {
             (target, keyboard_callbacks, key_callbacks, app_callbacks)
         };
 
-        KeyboardEvent::begin_dispatch();
+        // The guard restores thread-local propagation state on every exit path,
+        // including a listener that unwinds.
+        let dispatch = KeyboardEvent::begin_dispatch();
         let mut count = 0;
         // Target-specific handlers run first, allowing an editor to consume a
         // key before application-level keyboard listeners see it.
@@ -924,7 +934,7 @@ impl EventDispatcher {
             }
         }
         let consumed = KeyboardEvent::propagation_stopped();
-        KeyboardEvent::end_dispatch();
+        drop(dispatch);
 
         if !consumed
             && let Some(target) = target
