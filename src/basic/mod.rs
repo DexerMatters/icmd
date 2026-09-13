@@ -28,3 +28,5 @@ pub use props::{
     StylePatch, TextStyle, Visibility, style, style_patch,
 };
 pub use text::{Span, Text, TextAlign, TextOverflow, TextWrap};
+#[doc(hidden)]
+pub use text_layout::{TextLayoutForTest, indexed_layout_for_test};

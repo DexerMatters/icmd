@@ -44,6 +44,7 @@ pub use feedback::{
 pub use image::{ImageProps, image};
 pub use input::{
     InputProps, RawInputAppearance, RawInputMode, RawInputProps, TextClipboardAction,
-    TextClipboardEvent, TextValueEvent, TextareaProps, input, raw_input, textarea,
+    TextClipboardEvent, TextValueEvent, TextareaProps, input, normalize_for_test, raw_input,
+    textarea,
 };
 pub use scroll::{ScrollAreaProps, scroll_area};

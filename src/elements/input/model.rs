@@ -107,23 +107,43 @@ pub(crate) struct EditPolicy {
     pub(crate) emoji_merging: EmojiMerging,
 }
 
+// One pass that canonicalizes line endings (`\r\n` and `\r` to `\n`) and
+// applies the control policy. The previous form allocated an intermediate
+// string per `replace` before filtering, so a pasted document was copied three
+// times.
 pub(crate) fn normalize(value: &str, multiline: bool) -> String {
-    let canonical = value.replace("\r\n", "\n").replace('\r', "\n");
-    if multiline {
-        canonical
-            .chars()
-            .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
-            .collect()
-    } else {
-        canonical
-            .chars()
-            .map(|ch| match ch {
-                '\n' | '\t' => ' ',
-                other => other,
-            })
-            .filter(|ch| !ch.is_control())
-            .collect()
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                // Fold `\r\n` into a single newline.
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                if multiline {
+                    out.push('\n');
+                } else {
+                    out.push(' ');
+                }
+            }
+            '\n' => out.push(if multiline { '\n' } else { ' ' }),
+            '\t' => out.push(if multiline { '\t' } else { ' ' }),
+            other => {
+                if !other.is_control() {
+                    out.push(other);
+                }
+            }
+        }
     }
+    out
+}
+
+// Test-only access to the editor's normalization policy so integration tests
+// can compare the optimized pass against a reference model.
+#[doc(hidden)]
+pub fn normalize_for_test(value: &str, multiline: bool) -> String {
+    normalize(value, multiline)
 }
 
 #[derive(Debug, Clone, Default)]

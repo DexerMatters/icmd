@@ -10,6 +10,10 @@ pub mod theme;
 mod ui;
 
 pub use app::{RenderError, RuntimeConfig, render};
+#[doc(hidden)]
+pub use basic::{TextLayoutForTest, indexed_layout_for_test};
+#[doc(hidden)]
+pub use elements::normalize_for_test;
 pub use theme::{ThemeBuilder, ThemeProviderProps, theme_context, theme_provider};
 
 pub use elements::{

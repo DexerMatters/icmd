@@ -6,6 +6,8 @@ use crate::{
     Props, Style, TextWrap, basic::ComponentContext, theme::Theme,
 };
 
+#[doc(hidden)]
+pub use model::normalize_for_test;
 pub use view::{RawInputAppearance, RawInputMode, RawInputProps, raw_input};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

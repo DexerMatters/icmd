@@ -309,3 +309,95 @@ fn arbitrary_utf8_strings_never_panic_glyph_validation() {
         let _ = icmd::ScrollbarGlyph::new(candidate.as_str());
     }
 }
+
+// PERF-08: optimized layout indexes and input normalization must agree with a
+// simple full-recomputation reference model.
+mod text_indexes {
+    use super::rng;
+
+    // Reference implementation of the editor's normalization policy.
+    fn reference_normalize(value: &str, multiline: bool) -> String {
+        let canonical = value.replace("\r\n", "\n").replace('\r', "\n");
+        if multiline {
+            canonical
+                .chars()
+                .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+                .collect()
+        } else {
+            canonical
+                .chars()
+                .map(|ch| match ch {
+                    '\n' | '\t' => ' ',
+                    other => other,
+                })
+                .filter(|ch| !ch.is_control())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn editor_normalization_matches_the_reference_model() {
+        let alphabet = ['a', 'b', ' ', '\n', '\r', '\t', '\u{7}', '界', '🙂'];
+        let mut rng = rng(0xfeed);
+        for _ in 0..3_000 {
+            let len = (rng() % 12) as usize;
+            let input: String = (0..len)
+                .map(|_| alphabet[(rng() as usize) % alphabet.len()])
+                .collect();
+            for multiline in [false, true] {
+                let expected = reference_normalize(&input, multiline);
+                let actual = icmd::normalize_for_test(&input, multiline);
+                assert_eq!(
+                    actual, expected,
+                    "normalization disagreed for {input:?} (multiline={multiline})"
+                );
+            }
+        }
+    }
+
+    // The layout's row lookup is a binary search; it must agree with a linear
+    // scan over every source offset, including the row boundaries themselves.
+    #[test]
+    fn row_lookup_matches_a_linear_reference_scan() {
+        let mut rng = rng(0x1234);
+        for _ in 0..300 {
+            let words = 1 + rng() % 12;
+            let mut text = String::new();
+            for _ in 0..words {
+                let len = 1 + rng() % 6;
+                for _ in 0..len {
+                    text.push((b'a' + (rng() % 26) as u8) as char);
+                }
+                text.push(' ');
+            }
+            let width = 1 + (rng() % 10) as usize;
+            let layout = icmd::indexed_layout_for_test(&text, width);
+            for source in 0..=text.len() {
+                let expected = reference_row_of_source(&layout, source, text.len());
+                let actual = layout.row_of_source(source);
+                assert_eq!(
+                    actual, expected,
+                    "row lookup disagreed at offset {source} of {text:?} (width {width})"
+                );
+            }
+        }
+    }
+
+    fn reference_row_of_source(
+        layout: &icmd::TextLayoutForTest,
+        source: usize,
+        source_len: usize,
+    ) -> usize {
+        let rows = layout.row_count();
+        if rows == 0 {
+            return 0;
+        }
+        let source = source.min(source_len);
+        for index in 0..rows {
+            if source < layout.row_source_end(index) {
+                return index;
+            }
+        }
+        rows - 1
+    }
+}

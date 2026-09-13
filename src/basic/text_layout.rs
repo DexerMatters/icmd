@@ -82,6 +82,11 @@ pub(crate) struct TextLayout {
     items: Vec<Item>,
     rows: Vec<Row>,
     boundaries: Vec<usize>,
+    // Row source ranges are non-decreasing, so a row lookup is a binary search
+    // rather than a scan. Cached with each row's painted and maximum width.
+    row_source_ends: Vec<usize>,
+    row_widths: Vec<usize>,
+    max_row_width: usize,
     width: usize,
     source_len: usize,
 }
@@ -355,11 +360,29 @@ impl TextLayout {
         boundaries.sort_unstable();
         boundaries.dedup();
 
+        // One traversal builds both row indexes, and the row widths are
+        // computed once here instead of being rescanned per query.
+        let mut row_source_ends = Vec::with_capacity(rows.len());
+        let mut row_widths = Vec::with_capacity(rows.len());
+        let mut max_row_width = 0usize;
+        for row in &rows {
+            row_source_ends.push(row.source_end);
+            let painted = items[row.first_item..row.first_item + row.len]
+                .iter()
+                .filter(|item| item.kind != ItemKind::Separator)
+                .fold(0usize, |sum, item| sum.saturating_add(item.width));
+            max_row_width = max_row_width.max(painted);
+            row_widths.push(painted);
+        }
+
         Self {
             text,
             items,
             rows,
             boundaries,
+            row_source_ends,
+            row_widths,
+            max_row_width,
             width: layer_width,
             source_len,
         }
@@ -416,20 +439,14 @@ impl TextLayout {
             .map_or(self.source_len, |row| row.source_end)
     }
 
+    // A separator is deliberately not painted, so it contributes no cells even
+    // though it owns source bytes. The width is cached at construction.
     pub(crate) fn row_width(&self, index: usize) -> usize {
-        // A separator is deliberately not painted, so it contributes no cells
-        // even though it owns source bytes.
-        self.row_items(index)
-            .iter()
-            .filter(|item| item.kind != ItemKind::Separator)
-            .fold(0usize, |sum, item| sum.saturating_add(item.width))
+        self.row_widths.get(index).copied().unwrap_or(0)
     }
 
     pub(crate) fn max_row_width(&self) -> usize {
-        (0..self.rows.len())
-            .map(|index| self.row_width(index))
-            .max()
-            .unwrap_or(0)
+        self.max_row_width
     }
 
     pub(crate) fn row_of_source(&self, source: usize) -> usize {
@@ -437,12 +454,12 @@ impl TextLayout {
             return 0;
         }
         let source = source.min(self.source_len);
-        for (index, row) in self.rows.iter().enumerate() {
-            if source < row.source_end {
-                return index;
-            }
+        // `partition_point` finds the first row whose source range ends after
+        // the offset: O(log rows) instead of a linear scan per query.
+        match self.row_source_ends.partition_point(|end| *end <= source) {
+            index if index < self.rows.len() => index,
+            _ => self.rows.len() - 1,
         }
-        self.rows.len() - 1
     }
 
     pub(crate) fn clamp(&self, source: usize) -> usize {
@@ -852,6 +869,46 @@ pub(crate) fn layout_for_test_with(
         |parent, _| parent,
         |style| *style,
     )
+}
+
+// Test-only surface for the layout's index queries. The layout itself is
+// crate-private, so integration tests need a narrow, documented view.
+#[doc(hidden)]
+pub struct TextLayoutForTest(pub(crate) TextLayout);
+
+impl TextLayoutForTest {
+    pub fn row_count(&self) -> usize {
+        self.0.rows.len()
+    }
+
+    pub fn row_of_source(&self, source: usize) -> usize {
+        self.0.row_of_source(source)
+    }
+
+    pub fn row_source_end(&self, index: usize) -> usize {
+        self.0.row_source_end(index)
+    }
+
+    pub fn row_width(&self, index: usize) -> usize {
+        self.0.row_width(index)
+    }
+
+    pub fn max_row_width(&self) -> usize {
+        self.0.max_row_width()
+    }
+}
+
+#[doc(hidden)]
+pub fn indexed_layout_for_test(text: &str, width: usize) -> TextLayoutForTest {
+    let node = crate::Text::new(text);
+    TextLayoutForTest(layout_text(
+        &node,
+        width,
+        ComputedText::default(),
+        crate::EmojiMerging::Merge,
+        |parent, _| parent,
+        |style| *style,
+    ))
 }
 
 #[cfg(test)]
