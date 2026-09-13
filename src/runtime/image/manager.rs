@@ -9,6 +9,15 @@ use crate::{Cell, Image, ImageSource, RasterImage, RasterImageError, RasterPlace
 
 pub(crate) type LoadResult = (ImageSource, Result<RasterImage, RasterImageError>);
 
+// Why a scheduling attempt did not (or did) enqueue work. A full worker queue is
+// backpressure, never a decode failure: the request stays pending and retryable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScheduleResult {
+    Queued,
+    Backpressured,
+    Closed,
+}
+
 #[derive(Debug)]
 struct ImageLoader {
     jobs: Sender<ImageSource>,
@@ -17,13 +26,26 @@ struct ImageLoader {
 
 impl ImageLoader {
     fn new() -> Self {
+        Self::with_workers(2, None)
+    }
+
+    fn with_workers(workers: usize, gate: Option<Receiver<()>>) -> Self {
         let (jobs, job_rx) = crossbeam_channel::bounded::<ImageSource>(32);
-        let (result_tx, results) = crossbeam_channel::unbounded();
-        for _ in 0..2 {
+        // Bounded results: decoded pixels cannot accumulate without limit while
+        // the renderer is busy. Workers block once the queue is full, which is
+        // exactly the backpressure the render loop drains.
+        let (result_tx, results) = crossbeam_channel::bounded(64);
+        for _ in 0..workers {
             let job_rx = job_rx.clone();
             let result_tx = result_tx.clone();
+            let gate = gate.clone();
             thread::spawn(move || {
                 while let Ok(source) = job_rx.recv() {
+                    if let Some(gate) = &gate {
+                        // Test-only stall point: a disconnected gate releases
+                        // every present and future job.
+                        let _ = gate.recv();
+                    }
                     let result = source.load();
                     if result_tx.send((source, result)).is_err() {
                         break;
@@ -34,8 +56,12 @@ impl ImageLoader {
         Self { jobs, results }
     }
 
-    fn schedule(&self, source: ImageSource) -> bool {
-        self.jobs.try_send(source).is_ok()
+    fn schedule(&self, source: ImageSource) -> ScheduleResult {
+        match self.jobs.try_send(source) {
+            Ok(()) => ScheduleResult::Queued,
+            Err(crossbeam_channel::TrySendError::Full(_)) => ScheduleResult::Backpressured,
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => ScheduleResult::Closed,
+        }
     }
 }
 
@@ -57,7 +83,12 @@ enum SourceState {
 pub(crate) enum SourceRequest {
     AlreadyAvailable,
     Queued,
-    Failed,
+    // The worker queue is momentarily full. The request is retained and retried;
+    // it is not an error and never poisons the cache.
+    Backpressured,
+    // The worker queue is gone. This is a terminal runtime condition, not an
+    // image-decode failure.
+    Closed,
 }
 
 #[derive(Debug)]
@@ -66,17 +97,24 @@ pub(crate) struct ImageManager {
     source_cache: HashMap<ImageSource, SourceCacheEntry>,
     source_cache_bytes: usize,
     loading: HashSet<ImageSource>,
+    // Deduplicated queue of sources that could not be handed to a worker yet.
+    pending: VecDeque<ImageSource>,
     pending_loads: VecDeque<LoadResult>,
     cache_tick: u64,
 }
 
 impl ImageManager {
     pub(crate) fn new() -> Self {
+        Self::with_loader(ImageLoader::new())
+    }
+
+    fn with_loader(loader: ImageLoader) -> Self {
         Self {
-            loader: ImageLoader::new(),
+            loader,
             source_cache: HashMap::new(),
             source_cache_bytes: 0,
             loading: HashSet::new(),
+            pending: VecDeque::new(),
             pending_loads: VecDeque::new(),
             cache_tick: 0,
         }
@@ -99,6 +137,9 @@ impl ImageManager {
         {
             results.push(result);
         }
+        // Draining results frees worker capacity, so retry anything deferred by
+        // earlier backpressure before the caller renders again.
+        self.pump();
         results
     }
 
@@ -144,34 +185,53 @@ impl ImageManager {
             return SourceRequest::AlreadyAvailable;
         }
         if !self.loading.insert(source.clone()) {
+            // Already in flight or waiting for a worker: still not an error.
             return SourceRequest::AlreadyAvailable;
         }
         self.cache_tick = self.cache_tick.saturating_add(1);
-        if self.loader.schedule(source.clone()) {
-            self.source_cache.insert(
-                source.clone(),
-                SourceCacheEntry {
-                    state: SourceState::Loading,
-                    bytes: 0,
-                    used: self.cache_tick,
-                },
-            );
-            SourceRequest::Queued
-        } else {
-            self.loading.remove(source);
-            self.source_cache.insert(
-                source.clone(),
-                SourceCacheEntry {
-                    state: SourceState::Failed,
-                    bytes: 0,
-                    used: self.cache_tick,
-                },
-            );
-            SourceRequest::Failed
+        self.pending.push_back(source.clone());
+        match self.pump() {
+            ScheduleResult::Closed => SourceRequest::Closed,
+            _ if self.pending.iter().any(|pending| pending == source) => {
+                SourceRequest::Backpressured
+            }
+            _ => SourceRequest::Queued,
         }
     }
 
+    // Move as many deferred sources into the worker queue as capacity allows.
+    fn pump(&mut self) -> ScheduleResult {
+        while let Some(source) = self.pending.front().cloned() {
+            match self.loader.schedule(source.clone()) {
+                ScheduleResult::Queued => {
+                    self.pending.pop_front();
+                    self.cache_tick = self.cache_tick.saturating_add(1);
+                    self.source_cache.insert(
+                        source,
+                        SourceCacheEntry {
+                            state: SourceState::Loading,
+                            bytes: 0,
+                            used: self.cache_tick,
+                        },
+                    );
+                }
+                ScheduleResult::Backpressured => return ScheduleResult::Backpressured,
+                ScheduleResult::Closed => {
+                    // Do not convert a closed queue into a per-source decode
+                    // failure: the cache stays untouched so the runtime can
+                    // surface a terminal error instead.
+                    self.pending.clear();
+                    self.loading.clear();
+                    return ScheduleResult::Closed;
+                }
+            }
+        }
+        ScheduleResult::Queued
+    }
+
     pub(crate) fn remove_cached(&mut self, source: &ImageSource) {
+        self.loading.remove(source);
+        self.pending.retain(|pending| pending != source);
         if let Some(previous) = self.source_cache.remove(source) {
             self.source_cache_bytes = self.source_cache_bytes.saturating_sub(previous.bytes);
         }
@@ -183,6 +243,7 @@ impl ImageManager {
         result: Result<RasterImage, RasterImageError>,
     ) -> bool {
         self.loading.remove(&source);
+        self.pending.retain(|pending| pending != &source);
         let bytes = result
             .as_ref()
             .map(|image| image.rgba8().len())
@@ -206,6 +267,11 @@ impl ImageManager {
 
     pub(crate) fn source_cache_bytes(&self) -> usize {
         self.source_cache_bytes
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn pending_count(&self) -> usize {
+        self.pending.len()
     }
 
     pub(crate) fn oldest_inactive_source(
@@ -234,4 +300,71 @@ pub(crate) fn placeholder(width: u16, height: u16, symbol: &str) -> Option<Image
         .patch_cells(&[crate::CellEdit { position, cell }])
         .ok()?;
     Some(image)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(name: &str) -> ImageSource {
+        ImageSource::file(format!("/nonexistent/icmd-test/{name}.png"))
+    }
+
+    #[test]
+    fn a_full_queue_is_backpressure_not_failure() {
+        // Two workers, both stalled; the 32-slot job queue then fills up.
+        let (gate_tx, gate_rx) = crossbeam_channel::bounded(0);
+        let mut manager = ImageManager::with_loader(ImageLoader::with_workers(2, Some(gate_rx)));
+        let mut backpressured = None;
+        for index in 0..64 {
+            let outcome = manager.request(&source(&index.to_string()));
+            if outcome == SourceRequest::Backpressured {
+                backpressured = Some(index);
+                break;
+            }
+        }
+        let index = backpressured.expect("filling the worker queue must backpressure");
+        assert!(index > 30, "backpressure started too early at {index}");
+        assert!(manager.pending_count() >= 1);
+
+        // The deferred source is still retryable: it must not be cached as a
+        // permanent failure, so no caller sees the "×" fallback for it.
+        let deferred = source(&index.to_string());
+        assert!(manager.source_image(&deferred).is_none());
+        assert!(
+            !manager
+                .source_cache
+                .get(&deferred)
+                .is_some_and(|entry| matches!(entry.state, SourceState::Failed)),
+            "backpressure must not poison the cache with a failure"
+        );
+
+        // Releasing the workers lets every referenced source settle: each file
+        // does not exist, so each ends in a real (decode/io) failure, not a
+        // synthetic one caused by the full queue.
+        drop(gate_tx);
+        for _ in 0..200 {
+            let results = manager.take_results();
+            for (source, result) in results {
+                manager.store_result(source, result);
+            }
+            if manager.pending_count() == 0 && manager.loading.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(manager.pending_count(), 0, "deferred work must drain");
+        assert!(manager.loading.is_empty(), "every request must settle");
+    }
+
+    #[test]
+    fn a_disconnected_queue_reports_closed() {
+        // Zero workers drop the job receiver immediately, so scheduling has no
+        // destination at all.
+        let mut manager = ImageManager::with_loader(ImageLoader::with_workers(0, None));
+        assert_eq!(manager.request(&source("closed")), SourceRequest::Closed);
+        // A closed queue is not a decode failure and must not be cached as one.
+        assert!(manager.source_image(&source("closed")).is_none());
+        assert!(manager.source_cache.is_empty());
+    }
 }
