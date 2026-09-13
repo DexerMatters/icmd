@@ -161,15 +161,6 @@ impl Text {
         self
     }
 
-    #[deprecated(note = "use text_style")]
-    pub fn style(self, style: TextStyle) -> Self {
-        self.text_style(style)
-    }
-
-    #[deprecated(note = "use layout_style")]
-    pub fn with_style(self, style: Style) -> Self {
-        self.layout_style(style)
-    }
     text_color_builders!(foreground, background);
 
     text_style_builders!(

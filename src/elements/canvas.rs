@@ -113,21 +113,6 @@ impl CanvasContext {
         self.attributes
     }
 
-    #[deprecated(note = "use set_foreground")]
-    pub fn foreground(&mut self, color: Color) {
-        self.set_foreground(color);
-    }
-
-    #[deprecated(note = "use set_background")]
-    pub fn background(&mut self, color: Color) {
-        self.set_background(color);
-    }
-
-    #[deprecated(note = "use set_attributes")]
-    pub fn attributes(&mut self, attributes: Attributes) {
-        self.set_attributes(attributes);
-    }
-
     pub fn set(&mut self, x: i32, y: i32, symbol: impl Into<String>) -> Result<(), CanvasError> {
         let cell = Cell::new(symbol, self.foreground, self.background, self.attributes)?;
         self.write_validated(x, y, cell)

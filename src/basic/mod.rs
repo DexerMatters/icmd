@@ -12,8 +12,8 @@ pub use common::{
     PropsTransform, empty, fragment, text, view,
 };
 pub use context::{
-    ComponentContext, ContextKey, EffectResult, ProviderProps, Ref, StateError, StateRef,
-    StateSetter, create_context, provider,
+    ComponentContext, ContextKey, EffectResult, Ref, StateError, StateRef, StateSetter,
+    create_context,
 };
 pub use dom::{DomId, DomNode};
 pub use events::{

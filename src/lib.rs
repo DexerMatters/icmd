@@ -32,16 +32,15 @@ pub use elements::{
 pub use elements::image::image as raster_image;
 
 pub use basic::{
-    __ui_apply, __ui_events, __ui_tag_names_equal, Align, Attr, Attributes, AxisPosition,
-    BorderKind, BorderStyle, Component, ComponentContext, ContextKey, Dimension, DomId, DomNode,
-    DomProps, Edges, EffectResult, EventHandlers, EventListener, Fill, FillError, FocusEvent,
-    Forward, Justify, Key, KeyboardEvent, Layout, Node, Overflow, PasteEvent, Percent,
-    PercentBasis, Point, PointerButton, PointerEvent, PointerEventKind, PointerId, PointerType,
-    Props, PropsTransform, ProviderProps, Ref, ResizeEvent, ScrollAxes, ScrollDelta, ScrollEvent,
-    ScrollOffset, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Span, StateError, StateRef,
-    StateSetter, Style, StylePatch, TerminalFocusEvent, Text, TextAlign, TextOverflow, TextStyle,
-    TextWrap, Visibility, WheelEvent, create_context, empty, fragment, provider, style,
-    style_patch, text, view,
+    Align, Attr, Attributes, AxisPosition, BorderKind, BorderStyle, Component, ComponentContext,
+    ContextKey, Dimension, DomId, DomNode, DomProps, Edges, EffectResult, EventHandlers,
+    EventListener, Fill, FillError, FocusEvent, Forward, Justify, Key, KeyboardEvent, Layout, Node,
+    Overflow, PasteEvent, Percent, PercentBasis, Point, PointerButton, PointerEvent,
+    PointerEventKind, PointerId, PointerType, Props, PropsTransform, Ref, ResizeEvent, ScrollAxes,
+    ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility,
+    Span, StateError, StateRef, StateSetter, Style, StylePatch, TerminalFocusEvent, Text,
+    TextAlign, TextOverflow, TextStyle, TextWrap, Visibility, WheelEvent, create_context, empty,
+    fragment, style, style_patch, text, view,
 };
 pub use data::{
     Cell, CellEdit, CellError, EmojiMerging, Frame, Image, ImageError, ImageId, ImagePosition,
@@ -69,8 +68,8 @@ pub mod prelude {
         RawInputProps, Ref, ScrollAreaProps, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset,
         ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Style, StylePatch,
         TextClipboardAction, TextClipboardEvent, TextValueEvent, TextWrap, TextareaProps,
-        ThemeProviderProps, column, heading, input, progress_bar, provider, raw_input, row,
-        scroll_area, style, style_patch, text, textarea, theme_context, theme_provider, ui, view,
+        ThemeProviderProps, column, heading, input, progress_bar, raw_input, row, scroll_area,
+        style, style_patch, text, textarea, theme_context, theme_provider, ui, view,
     };
 }
 
@@ -138,7 +137,9 @@ pub mod advanced {
 // nothing here is a stable interface.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::{__ui_apply, __ui_events, __ui_tag_names_equal};
+    // Macro expansion helpers. Reachable only through this hidden module so
+    // they never pollute the crate root.
+    pub use crate::basic::{__ui_apply, __ui_events, __ui_tag_names_equal};
 }
 
 // High-level alias for the common entry point.

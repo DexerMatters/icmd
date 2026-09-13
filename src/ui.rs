@@ -96,7 +96,7 @@ macro_rules! ui {
     // Match closing identifiers in a const context so a mismatch gets a
     // stable, focused diagnostic while remaining entirely declarative.
     (@check_close $expected:ident $actual:ident { $($continuation:tt)* }) => {{
-        const _: () = if !$crate::__ui_tag_names_equal(
+        const _: () = if !$crate::__private::__ui_tag_names_equal(
             stringify!($expected),
             stringify!($actual),
         ) {
@@ -114,7 +114,7 @@ macro_rules! ui {
     // Build one component after the parser has collected its attributes and
     // children. The component and props types are inferred by `apply`.
     (@build $component:ident [$($attrs:tt)*] [$($children:tt)*]) => {{
-        $crate::__ui_apply($component, move |__icmd_ui_props| {
+        $crate::__private::__ui_apply($component, move |__icmd_ui_props| {
             let mut __icmd_ui_key: Option<$crate::Key> = None;
             $crate::ui!(@attrs __icmd_ui_props __icmd_ui_key; $($attrs)*);
             __icmd_ui_props.children = vec![$($children)*];
@@ -146,7 +146,7 @@ macro_rules! ui {
         $props.dom.style = $crate::style($value);
     };
     (@set_attr $props:ident $key:ident events { $value:expr }) => {
-        $props.dom.events = $crate::__ui_events($value);
+        $props.dom.events = $crate::__private::__ui_events($value);
     };
 
     (@set_attr $props:ident $key:ident on_pointer_down { $value:expr }) => { $props.dom.events.pointer_down /= $value; };

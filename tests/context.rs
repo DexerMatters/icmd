@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use icmd::{
     Commit, Component, ComponentContext, Lower, Node, Props, Renderer, Runtime, Size, StateSetter,
-    create_context, provider,
+    create_context,
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -107,21 +107,31 @@ fn provider_value_changes_are_visible_to_consumers() {
     assert!(contains_text(&second, "dark"));
 }
 
-// SAF-11: a default-constructible provider whose required values are omitted
-// must not panic a render worker. Omission renders the children with the
-// inherited context instead.
+// SAF-11 / DUP-03: the generic provider component is gone. `ContextKey::provider`
+// is the canonical path and requires the key and value at the call site, so a
+// missing required value cannot be expressed, let alone panic a worker.
 #[test]
-fn provider_omitting_required_fields_renders_children_without_panicking() {
-    // Construct the legacy component with explicitly omitted required props.
-    // `provider::<Theme>` with default props: both required fields are unset,
-    // which used to reach `expect` during rendering.
-    let node: Node = provider::<Theme>.child("child text");
+fn context_provider_requires_key_and_value_at_construction() {
+    let context = create_context(Theme("default"));
+    let node = context.provider(Theme("inner"), [icmd::text("child")]);
     let (frame, teardown) = frame_for(node);
-    assert!(
-        contains_text(&frame, "child"),
-        "an incomplete provider must still render its children"
-    );
+    assert!(contains_text(&frame, "child"));
     teardown();
+
+    // A provider value can be changed by the owner and observed by consumers,
+    // which is the behavior the removed component used to wrap.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_for_consumer = seen.clone();
+    let consumer_context = context.clone();
+    let consumer = move |cx: &mut ComponentContext, _props: &Props<()>| {
+        let theme = cx.use_context(|| &consumer_context);
+        seen_for_consumer.lock().unwrap().push(theme.0);
+        icmd::text("x")
+    };
+    let node = context.provider(Theme("outer"), [consumer.apply(())]);
+    let (_, teardown) = frame_for(node);
+    teardown();
+    assert_eq!(&*seen.lock().unwrap(), &["outer"]);
 }
 
 // SAF-12: dynamic fill assignment is fallible and never panics on ordinary
