@@ -396,3 +396,92 @@ fn on_card_falls_back_when_a_role_is_invisible() {
         "a readable role is kept unchanged"
     );
 }
+
+// DUP-04: presets are complete data. Every preset must resolve every palette
+// token to a concrete value for both modes, with no ANSI leftovers.
+#[test]
+fn every_preset_defines_a_complete_palette_for_both_modes() {
+    use icmd::theme::{ThemeColors, ThemeMode, ThemePreset};
+
+    fn angle(left: crossterm::style::Color, right: crossterm::style::Color) -> bool {
+        format!("{left:?}") == format!("{right:?}")
+    }
+
+    for preset in ThemePreset::ALL {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let theme = preset.theme(mode);
+            let colors = theme.colors;
+            let ansi = ThemeColors::ansi(mode);
+
+            // The preset may legitimately equal the ANSI palette for `Ansi`,
+            // but no other preset may silently inherit a token it forgot.
+            if preset != ThemePreset::Ansi {
+                let inherited = [
+                    ("background", colors.background, ansi.background),
+                    ("foreground", colors.foreground, ansi.foreground),
+                    ("card", colors.card, ansi.card),
+                    (
+                        "card_foreground",
+                        colors.card_foreground,
+                        ansi.card_foreground,
+                    ),
+                    ("popover", colors.popover, ansi.popover),
+                    (
+                        "popover_foreground",
+                        colors.popover_foreground,
+                        ansi.popover_foreground,
+                    ),
+                    ("primary", colors.primary, ansi.primary),
+                    (
+                        "primary_foreground",
+                        colors.primary_foreground,
+                        ansi.primary_foreground,
+                    ),
+                    ("secondary", colors.secondary, ansi.secondary),
+                    (
+                        "secondary_foreground",
+                        colors.secondary_foreground,
+                        ansi.secondary_foreground,
+                    ),
+                    ("muted", colors.muted, ansi.muted),
+                    (
+                        "muted_foreground",
+                        colors.muted_foreground,
+                        ansi.muted_foreground,
+                    ),
+                    ("accent", colors.accent, ansi.accent),
+                    (
+                        "accent_foreground",
+                        colors.accent_foreground,
+                        ansi.accent_foreground,
+                    ),
+                    ("destructive", colors.destructive, ansi.destructive),
+                    (
+                        "destructive_foreground",
+                        colors.destructive_foreground,
+                        ansi.destructive_foreground,
+                    ),
+                    ("border", colors.border, ansi.border),
+                    ("input", colors.input, ansi.input),
+                    ("ring", colors.ring, ansi.ring),
+                ];
+                let leftovers: Vec<_> = inherited
+                    .into_iter()
+                    .filter(|(_, value, ansi_value)| angle(*value, *ansi_value))
+                    .map(|(name, _, _)| name)
+                    .collect();
+                assert!(
+                    leftovers.is_empty(),
+                    "{preset:?}/{mode:?} silently inherited ANSI tokens: {leftovers:?}"
+                );
+            }
+
+            // Derived tokens are coherent with the palette for every preset.
+            assert_eq!(
+                theme.typography.body.foreground,
+                icmd::Attr::Set(colors.foreground),
+                "{preset:?}/{mode:?} body text must use the palette foreground"
+            );
+        }
+    }
+}

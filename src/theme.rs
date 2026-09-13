@@ -61,306 +61,306 @@ impl ThemePreset {
         // names such as `Color::White`, which look correct only in a light
         // scheme and turn into unreadable leftovers in a dark one (a white
         // badge foreground on a dark accent, for example).
-        let mut colors = ThemeColors::ansi(mode);
-        match (self, mode) {
-            // A deliberately neon terminal palette: deep green surfaces,
-            // phosphor text, and electric lime accents.
-            (Self::Geek, ThemeMode::Light) => {
-                colors.background = rgb(0xeaf8ed);
-                colors.foreground = rgb(0x073b18);
-                colors.card = rgb(0xd5f0da);
-                colors.card_foreground = rgb(0x073b18);
-                colors.popover = rgb(0xf4fff5);
-                colors.popover_foreground = rgb(0x073b18);
-                colors.primary = rgb(0x087f23);
-                colors.primary_foreground = rgb(0xf2fff4);
-                colors.secondary = rgb(0x149447);
-                colors.secondary_foreground = rgb(0xf2fff4);
-                colors.muted = rgb(0xc5e6cb);
-                colors.muted_foreground = rgb(0x286c3b);
-                colors.accent = rgb(0x3f8a00);
-                colors.accent_foreground = rgb(0xf2fff4);
-                colors.destructive = rgb(0xb42318);
-                colors.destructive_foreground = rgb(0xfff5f4);
-                colors.border = rgb(0x3c9b57);
-                colors.input = rgb(0xf4fff5);
-                colors.ring = rgb(0x087f23);
-            }
-            (Self::Geek, ThemeMode::Dark) => {
-                colors.background = rgb(0x010b04);
-                colors.foreground = rgb(0x9cffaa);
-                colors.card = rgb(0x032b12);
-                colors.card_foreground = rgb(0x9cffaa);
-                colors.popover = rgb(0x021c0b);
-                colors.popover_foreground = rgb(0xb7ffc0);
-                colors.primary = rgb(0x39ff14);
-                colors.primary_foreground = rgb(0x001b07);
-                colors.secondary = rgb(0x00c853);
-                colors.secondary_foreground = rgb(0x001b07);
-                colors.muted = rgb(0x063b1a);
-                colors.muted_foreground = rgb(0x61c875);
-                colors.accent = rgb(0xb6ff00);
-                colors.accent_foreground = rgb(0x001b07);
-                colors.destructive = rgb(0xff5370);
-                colors.destructive_foreground = rgb(0x220006);
-                colors.border = rgb(0x0b7d3e);
-                colors.input = rgb(0x02200c);
-                colors.ring = rgb(0x39ff14);
-            }
-            (Self::Mono, ThemeMode::Light) => {
-                colors.background = rgb(0xffffff);
-                colors.foreground = rgb(0x111111);
-                colors.card = rgb(0xf2f2f2);
-                colors.card_foreground = rgb(0x111111);
-                colors.popover = rgb(0xffffff);
-                colors.popover_foreground = rgb(0x111111);
-                colors.primary = rgb(0x222222);
-                colors.primary_foreground = rgb(0xffffff);
-                colors.secondary = rgb(0x4d4d4d);
-                colors.secondary_foreground = rgb(0xffffff);
-                colors.muted = rgb(0xeaeaea);
-                colors.muted_foreground = rgb(0x5c5c5c);
-                colors.accent = rgb(0x3d3d3d);
-                colors.accent_foreground = rgb(0xffffff);
-                colors.destructive = rgb(0x8c1d18);
-                colors.destructive_foreground = rgb(0xffffff);
-                colors.border = rgb(0x999999);
-                colors.input = rgb(0xffffff);
-                colors.ring = rgb(0x222222);
-            }
-            (Self::Mono, ThemeMode::Dark) => {
-                colors.background = rgb(0x0f0f0f);
-                colors.foreground = rgb(0xf5f5f5);
-                colors.card = rgb(0x1b1b1b);
-                colors.card_foreground = rgb(0xf5f5f5);
-                colors.popover = rgb(0x161616);
-                colors.popover_foreground = rgb(0xf5f5f5);
-                colors.primary = rgb(0xf5f5f5);
-                colors.primary_foreground = rgb(0x0f0f0f);
-                colors.secondary = rgb(0xbbbbbb);
-                colors.secondary_foreground = rgb(0x0f0f0f);
-                colors.muted = rgb(0x262626);
-                colors.muted_foreground = rgb(0xa3a3a3);
-                colors.accent = rgb(0xdedede);
-                colors.accent_foreground = rgb(0x0f0f0f);
-                colors.destructive = rgb(0xff8a80);
-                colors.destructive_foreground = rgb(0x1a0503);
-                colors.border = rgb(0x606060);
-                colors.input = rgb(0x161616);
-                colors.ring = rgb(0xf5f5f5);
-            }
-            (Self::Latte, ThemeMode::Light) => {
-                colors.background = rgb(0xeff1f5);
-                colors.foreground = rgb(0x4c4f69);
-                colors.card = rgb(0xccd0da);
-                colors.card_foreground = rgb(0x4c4f69);
-                colors.popover = rgb(0xe6e9ef);
-                colors.popover_foreground = rgb(0x4c4f69);
-                colors.primary = rgb(0x1e66f5);
-                colors.primary_foreground = rgb(0xffffff);
-                colors.secondary = rgb(0x0f766e);
-                colors.secondary_foreground = rgb(0xffffff);
-                colors.muted = rgb(0xe6e9ef);
-                colors.muted_foreground = rgb(0x6c6f85);
-                colors.accent = rgb(0x9a5b00);
-                colors.accent_foreground = rgb(0xffffff);
-                colors.destructive = rgb(0xd20f39);
-                colors.destructive_foreground = rgb(0xffffff);
-                colors.border = rgb(0x7f849c);
-                colors.input = rgb(0xffffff);
-                colors.ring = rgb(0x1e66f5);
-            }
-            (Self::Latte, ThemeMode::Dark) => {
-                colors.background = rgb(0x1e1e2e);
-                colors.foreground = rgb(0xcdd6f4);
-                colors.card = rgb(0x313244);
-                colors.card_foreground = rgb(0xcdd6f4);
-                colors.popover = rgb(0x181825);
-                colors.popover_foreground = rgb(0xcdd6f4);
-                colors.primary = rgb(0x89b4fa);
-                colors.primary_foreground = rgb(0x11111b);
-                colors.secondary = rgb(0x94e2d5);
-                colors.secondary_foreground = rgb(0x11111b);
-                colors.muted = rgb(0x313244);
-                colors.muted_foreground = rgb(0xa6adc8);
-                colors.accent = rgb(0xf9e2af);
-                colors.accent_foreground = rgb(0x11111b);
-                colors.destructive = rgb(0xf38ba8);
-                colors.destructive_foreground = rgb(0x11111b);
-                colors.border = rgb(0x6c7086);
-                colors.input = rgb(0x181825);
-                colors.ring = rgb(0x89b4fa);
-            }
-            (Self::Nord, ThemeMode::Light) => {
-                colors.background = rgb(0xeceff4);
-                colors.foreground = rgb(0x2e3440);
-                colors.card = rgb(0xe5e9f0);
-                colors.card_foreground = rgb(0x2e3440);
-                colors.popover = rgb(0xf8f9fb);
-                colors.popover_foreground = rgb(0x2e3440);
-                colors.primary = rgb(0x5e81ac);
-                colors.primary_foreground = rgb(0xf8f9fb);
-                colors.secondary = rgb(0x4f8f8c);
-                colors.secondary_foreground = rgb(0x2e3440);
-                colors.muted = rgb(0xd8dee9);
-                colors.muted_foreground = rgb(0x4c566a);
-                colors.accent = rgb(0xa85f42);
-                colors.accent_foreground = rgb(0xf8f9fb);
-                colors.destructive = rgb(0xbf616a);
-                colors.destructive_foreground = rgb(0xf8f9fb);
-                colors.border = rgb(0x8490a3);
-                colors.input = rgb(0xf8f9fb);
-                colors.ring = rgb(0x5e81ac);
-            }
-            (Self::Nord, ThemeMode::Dark) => {
-                colors.background = rgb(0x2e3440);
-                colors.foreground = rgb(0xd8dee9);
-                colors.card = rgb(0x3b4252);
-                colors.card_foreground = rgb(0xe5e9f0);
-                colors.popover = rgb(0x3b4252);
-                colors.popover_foreground = rgb(0xe5e9f0);
-                colors.primary = rgb(0x88c0d0);
-                colors.primary_foreground = rgb(0x2e3440);
-                colors.secondary = rgb(0x81a1c1);
-                colors.secondary_foreground = rgb(0x2e3440);
-                colors.muted = rgb(0x434c5e);
-                colors.muted_foreground = rgb(0x9aa6ba);
-                colors.accent = rgb(0xebcb8b);
-                colors.accent_foreground = rgb(0x2e3440);
-                colors.destructive = rgb(0xcf7a82);
-                colors.destructive_foreground = rgb(0x2e3440);
-                colors.border = rgb(0x78839c);
-                colors.input = rgb(0x3b4252);
-                colors.ring = rgb(0x88c0d0);
-            }
-            (Self::Dracula, ThemeMode::Light) => {
-                colors.background = rgb(0xf8f8f2);
-                colors.foreground = rgb(0x282a36);
-                colors.card = rgb(0xe9e9e2);
-                colors.card_foreground = rgb(0x282a36);
-                colors.popover = rgb(0xffffff);
-                colors.popover_foreground = rgb(0x282a36);
-                colors.primary = rgb(0x6441a5);
-                colors.primary_foreground = rgb(0xffffff);
-                colors.secondary = rgb(0x0f766e);
-                colors.secondary_foreground = rgb(0xffffff);
-                colors.muted = rgb(0xe1e1d8);
-                colors.muted_foreground = rgb(0x6272a4);
-                colors.accent = rgb(0x9a5b00);
-                colors.accent_foreground = rgb(0xffffff);
-                colors.destructive = rgb(0xb3122a);
-                colors.destructive_foreground = rgb(0xffffff);
-                colors.border = rgb(0x9a9a90);
-                colors.input = rgb(0xffffff);
-                colors.ring = rgb(0x6441a5);
-            }
-            (Self::Dracula, ThemeMode::Dark) => {
-                colors.background = rgb(0x282a36);
-                colors.foreground = rgb(0xf8f8f2);
-                colors.card = rgb(0x343746);
-                colors.card_foreground = rgb(0xf8f8f2);
-                colors.popover = rgb(0x343746);
-                colors.popover_foreground = rgb(0xf8f8f2);
-                colors.primary = rgb(0xbd93f9);
-                colors.primary_foreground = rgb(0x282a36);
-                colors.secondary = rgb(0x50fa7b);
-                colors.secondary_foreground = rgb(0x282a36);
-                colors.muted = rgb(0x44475a);
-                colors.muted_foreground = rgb(0xb8b8b0);
-                colors.accent = rgb(0xffb86c);
-                colors.accent_foreground = rgb(0x282a36);
-                colors.destructive = rgb(0xff5555);
-                colors.destructive_foreground = rgb(0x282a36);
-                colors.border = rgb(0x6272a4);
-                colors.input = rgb(0x21222c);
-                colors.ring = rgb(0xbd93f9);
-            }
-            (Self::Solarized, ThemeMode::Light) => {
-                colors.background = rgb(0xfdf6e3);
-                colors.foreground = rgb(0x657b83);
-                colors.card = rgb(0xeee8d5);
-                colors.card_foreground = rgb(0x586e75);
-                colors.popover = rgb(0xfdf6e3);
-                colors.popover_foreground = rgb(0x586e75);
-                colors.primary = rgb(0x1c6fb0);
-                colors.primary_foreground = rgb(0xfdf6e3);
-                colors.secondary = rgb(0x1f7a72);
-                colors.secondary_foreground = rgb(0xfdf6e3);
-                colors.muted = rgb(0xeee8d5);
-                colors.muted_foreground = rgb(0x657b83);
-                colors.accent = rgb(0x8a6800);
-                colors.accent_foreground = rgb(0xfdf6e3);
-                colors.destructive = rgb(0xcf3f2c);
-                colors.destructive_foreground = rgb(0xfdf6e3);
-                colors.border = rgb(0x93a1a1);
-                colors.input = rgb(0xffffff);
-                colors.ring = rgb(0x1c6fb0);
-            }
-            (Self::Solarized, ThemeMode::Dark) => {
-                colors.background = rgb(0x002b36);
-                colors.foreground = rgb(0x93a1a1);
-                colors.card = rgb(0x073642);
-                colors.card_foreground = rgb(0x93a1a1);
-                colors.popover = rgb(0x073642);
-                colors.popover_foreground = rgb(0x93a1a1);
-                colors.primary = rgb(0x4aa3e0);
-                colors.primary_foreground = rgb(0x002b36);
-                colors.secondary = rgb(0x2aa198);
-                colors.secondary_foreground = rgb(0x002b36);
-                colors.muted = rgb(0x073642);
-                colors.muted_foreground = rgb(0x839496);
-                colors.accent = rgb(0xc99b00);
-                colors.accent_foreground = rgb(0x002b36);
-                colors.destructive = rgb(0xe06c5a);
-                colors.destructive_foreground = rgb(0x002b36);
-                colors.border = rgb(0x586e75);
-                colors.input = rgb(0x073642);
-                colors.ring = rgb(0x4aa3e0);
-            }
-            (Self::Ocean, ThemeMode::Light) => {
-                colors.background = rgb(0xeaf6ff);
-                colors.foreground = rgb(0x12324a);
-                colors.card = rgb(0xd6ecfa);
-                colors.card_foreground = rgb(0x12324a);
-                colors.popover = rgb(0xf4fbff);
-                colors.popover_foreground = rgb(0x12324a);
-                colors.primary = rgb(0x1261a0);
-                colors.primary_foreground = rgb(0xf4fbff);
-                colors.secondary = rgb(0x0f6f7a);
-                colors.secondary_foreground = rgb(0xf4fbff);
-                colors.muted = rgb(0xc2e1f2);
-                colors.muted_foreground = rgb(0x42677d);
-                colors.accent = rgb(0xa8531a);
-                colors.accent_foreground = rgb(0xf4fbff);
-                colors.destructive = rgb(0xb3261e);
-                colors.destructive_foreground = rgb(0xf4fbff);
-                colors.border = rgb(0x70a9c9);
-                colors.input = rgb(0xf4fbff);
-                colors.ring = rgb(0x1261a0);
-            }
-            (Self::Ocean, ThemeMode::Dark) => {
-                colors.background = rgb(0x071a2b);
-                colors.foreground = rgb(0xc8e7f5);
-                colors.card = rgb(0x0d2b43);
-                colors.card_foreground = rgb(0xd9f1fb);
-                colors.popover = rgb(0x0d2b43);
-                colors.popover_foreground = rgb(0xd9f1fb);
-                colors.primary = rgb(0x4db8ff);
-                colors.primary_foreground = rgb(0x041321);
-                colors.secondary = rgb(0x2dd4bf);
-                colors.secondary_foreground = rgb(0x041c1a);
-                colors.muted = rgb(0x123b57);
-                colors.muted_foreground = rgb(0x82b8d2);
-                colors.accent = rgb(0xffb86b);
-                colors.accent_foreground = rgb(0x291400);
-                colors.destructive = rgb(0xff6b6b);
-                colors.destructive_foreground = rgb(0x2b0505);
-                colors.border = rgb(0x276184);
-                colors.input = rgb(0x0a2237);
-                colors.ring = rgb(0x4db8ff);
-            }
+        // Every arm is a complete literal. A new colour field is therefore a
+        // compile error in every preset instead of silently inheriting an ANSI
+        // default, which the previous piecemeal mutation script allowed.
+        let colors = match (self, mode) {
+            (Self::Geek, ThemeMode::Light) => ThemeColors {
+                background: rgb(0xeaf8ed),
+                foreground: rgb(0x073b18),
+                card: rgb(0xd5f0da),
+                card_foreground: rgb(0x073b18),
+                popover: rgb(0xf4fff5),
+                popover_foreground: rgb(0x073b18),
+                primary: rgb(0x087f23),
+                primary_foreground: rgb(0xf2fff4),
+                secondary: rgb(0x149447),
+                secondary_foreground: rgb(0xf2fff4),
+                muted: rgb(0xc5e6cb),
+                muted_foreground: rgb(0x286c3b),
+                accent: rgb(0x3f8a00),
+                accent_foreground: rgb(0xf2fff4),
+                destructive: rgb(0xb42318),
+                destructive_foreground: rgb(0xfff5f4),
+                border: rgb(0x3c9b57),
+                input: rgb(0xf4fff5),
+                ring: rgb(0x087f23),
+            },
+            (Self::Geek, ThemeMode::Dark) => ThemeColors {
+                background: rgb(0x010b04),
+                foreground: rgb(0x9cffaa),
+                card: rgb(0x032b12),
+                card_foreground: rgb(0x9cffaa),
+                popover: rgb(0x021c0b),
+                popover_foreground: rgb(0xb7ffc0),
+                primary: rgb(0x39ff14),
+                primary_foreground: rgb(0x001b07),
+                secondary: rgb(0x00c853),
+                secondary_foreground: rgb(0x001b07),
+                muted: rgb(0x063b1a),
+                muted_foreground: rgb(0x61c875),
+                accent: rgb(0xb6ff00),
+                accent_foreground: rgb(0x001b07),
+                destructive: rgb(0xff5370),
+                destructive_foreground: rgb(0x220006),
+                border: rgb(0x0b7d3e),
+                input: rgb(0x02200c),
+                ring: rgb(0x39ff14),
+            },
+            (Self::Mono, ThemeMode::Light) => ThemeColors {
+                background: rgb(0xffffff),
+                foreground: rgb(0x111111),
+                card: rgb(0xf2f2f2),
+                card_foreground: rgb(0x111111),
+                popover: rgb(0xffffff),
+                popover_foreground: rgb(0x111111),
+                primary: rgb(0x222222),
+                primary_foreground: rgb(0xffffff),
+                secondary: rgb(0x4d4d4d),
+                secondary_foreground: rgb(0xffffff),
+                muted: rgb(0xeaeaea),
+                muted_foreground: rgb(0x5c5c5c),
+                accent: rgb(0x3d3d3d),
+                accent_foreground: rgb(0xffffff),
+                destructive: rgb(0x8c1d18),
+                destructive_foreground: rgb(0xffffff),
+                border: rgb(0x999999),
+                input: rgb(0xffffff),
+                ring: rgb(0x222222),
+            },
+            (Self::Mono, ThemeMode::Dark) => ThemeColors {
+                background: rgb(0x0f0f0f),
+                foreground: rgb(0xf5f5f5),
+                card: rgb(0x1b1b1b),
+                card_foreground: rgb(0xf5f5f5),
+                popover: rgb(0x161616),
+                popover_foreground: rgb(0xf5f5f5),
+                primary: rgb(0xf5f5f5),
+                primary_foreground: rgb(0x0f0f0f),
+                secondary: rgb(0xbbbbbb),
+                secondary_foreground: rgb(0x0f0f0f),
+                muted: rgb(0x262626),
+                muted_foreground: rgb(0xa3a3a3),
+                accent: rgb(0xdedede),
+                accent_foreground: rgb(0x0f0f0f),
+                destructive: rgb(0xff8a80),
+                destructive_foreground: rgb(0x1a0503),
+                border: rgb(0x606060),
+                input: rgb(0x161616),
+                ring: rgb(0xf5f5f5),
+            },
+            (Self::Latte, ThemeMode::Light) => ThemeColors {
+                background: rgb(0xeff1f5),
+                foreground: rgb(0x4c4f69),
+                card: rgb(0xccd0da),
+                card_foreground: rgb(0x4c4f69),
+                popover: rgb(0xe6e9ef),
+                popover_foreground: rgb(0x4c4f69),
+                primary: rgb(0x1e66f5),
+                primary_foreground: rgb(0xffffff),
+                secondary: rgb(0x0f766e),
+                secondary_foreground: rgb(0xffffff),
+                muted: rgb(0xe6e9ef),
+                muted_foreground: rgb(0x6c6f85),
+                accent: rgb(0x9a5b00),
+                accent_foreground: rgb(0xffffff),
+                destructive: rgb(0xd20f39),
+                destructive_foreground: rgb(0xffffff),
+                border: rgb(0x7f849c),
+                input: rgb(0xffffff),
+                ring: rgb(0x1e66f5),
+            },
+            (Self::Latte, ThemeMode::Dark) => ThemeColors {
+                background: rgb(0x1e1e2e),
+                foreground: rgb(0xcdd6f4),
+                card: rgb(0x313244),
+                card_foreground: rgb(0xcdd6f4),
+                popover: rgb(0x181825),
+                popover_foreground: rgb(0xcdd6f4),
+                primary: rgb(0x89b4fa),
+                primary_foreground: rgb(0x11111b),
+                secondary: rgb(0x94e2d5),
+                secondary_foreground: rgb(0x11111b),
+                muted: rgb(0x313244),
+                muted_foreground: rgb(0xa6adc8),
+                accent: rgb(0xf9e2af),
+                accent_foreground: rgb(0x11111b),
+                destructive: rgb(0xf38ba8),
+                destructive_foreground: rgb(0x11111b),
+                border: rgb(0x6c7086),
+                input: rgb(0x181825),
+                ring: rgb(0x89b4fa),
+            },
+            (Self::Nord, ThemeMode::Light) => ThemeColors {
+                background: rgb(0xeceff4),
+                foreground: rgb(0x2e3440),
+                card: rgb(0xe5e9f0),
+                card_foreground: rgb(0x2e3440),
+                popover: rgb(0xf8f9fb),
+                popover_foreground: rgb(0x2e3440),
+                primary: rgb(0x5e81ac),
+                primary_foreground: rgb(0xf8f9fb),
+                secondary: rgb(0x4f8f8c),
+                secondary_foreground: rgb(0x2e3440),
+                muted: rgb(0xd8dee9),
+                muted_foreground: rgb(0x4c566a),
+                accent: rgb(0xa85f42),
+                accent_foreground: rgb(0xf8f9fb),
+                destructive: rgb(0xbf616a),
+                destructive_foreground: rgb(0xf8f9fb),
+                border: rgb(0x8490a3),
+                input: rgb(0xf8f9fb),
+                ring: rgb(0x5e81ac),
+            },
+            (Self::Nord, ThemeMode::Dark) => ThemeColors {
+                background: rgb(0x2e3440),
+                foreground: rgb(0xd8dee9),
+                card: rgb(0x3b4252),
+                card_foreground: rgb(0xe5e9f0),
+                popover: rgb(0x3b4252),
+                popover_foreground: rgb(0xe5e9f0),
+                primary: rgb(0x88c0d0),
+                primary_foreground: rgb(0x2e3440),
+                secondary: rgb(0x81a1c1),
+                secondary_foreground: rgb(0x2e3440),
+                muted: rgb(0x434c5e),
+                muted_foreground: rgb(0x9aa6ba),
+                accent: rgb(0xebcb8b),
+                accent_foreground: rgb(0x2e3440),
+                destructive: rgb(0xcf7a82),
+                destructive_foreground: rgb(0x2e3440),
+                border: rgb(0x78839c),
+                input: rgb(0x3b4252),
+                ring: rgb(0x88c0d0),
+            },
+            (Self::Dracula, ThemeMode::Light) => ThemeColors {
+                background: rgb(0xf8f8f2),
+                foreground: rgb(0x282a36),
+                card: rgb(0xe9e9e2),
+                card_foreground: rgb(0x282a36),
+                popover: rgb(0xffffff),
+                popover_foreground: rgb(0x282a36),
+                primary: rgb(0x6441a5),
+                primary_foreground: rgb(0xffffff),
+                secondary: rgb(0x0f766e),
+                secondary_foreground: rgb(0xffffff),
+                muted: rgb(0xe1e1d8),
+                muted_foreground: rgb(0x6272a4),
+                accent: rgb(0x9a5b00),
+                accent_foreground: rgb(0xffffff),
+                destructive: rgb(0xb3122a),
+                destructive_foreground: rgb(0xffffff),
+                border: rgb(0x9a9a90),
+                input: rgb(0xffffff),
+                ring: rgb(0x6441a5),
+            },
+            (Self::Dracula, ThemeMode::Dark) => ThemeColors {
+                background: rgb(0x282a36),
+                foreground: rgb(0xf8f8f2),
+                card: rgb(0x343746),
+                card_foreground: rgb(0xf8f8f2),
+                popover: rgb(0x343746),
+                popover_foreground: rgb(0xf8f8f2),
+                primary: rgb(0xbd93f9),
+                primary_foreground: rgb(0x282a36),
+                secondary: rgb(0x50fa7b),
+                secondary_foreground: rgb(0x282a36),
+                muted: rgb(0x44475a),
+                muted_foreground: rgb(0xb8b8b0),
+                accent: rgb(0xffb86c),
+                accent_foreground: rgb(0x282a36),
+                destructive: rgb(0xff5555),
+                destructive_foreground: rgb(0x282a36),
+                border: rgb(0x6272a4),
+                input: rgb(0x21222c),
+                ring: rgb(0xbd93f9),
+            },
+            (Self::Solarized, ThemeMode::Light) => ThemeColors {
+                background: rgb(0xfdf6e3),
+                foreground: rgb(0x657b83),
+                card: rgb(0xeee8d5),
+                card_foreground: rgb(0x586e75),
+                popover: rgb(0xfdf6e3),
+                popover_foreground: rgb(0x586e75),
+                primary: rgb(0x1c6fb0),
+                primary_foreground: rgb(0xfdf6e3),
+                secondary: rgb(0x1f7a72),
+                secondary_foreground: rgb(0xfdf6e3),
+                muted: rgb(0xeee8d5),
+                muted_foreground: rgb(0x657b83),
+                accent: rgb(0x8a6800),
+                accent_foreground: rgb(0xfdf6e3),
+                destructive: rgb(0xcf3f2c),
+                destructive_foreground: rgb(0xfdf6e3),
+                border: rgb(0x93a1a1),
+                input: rgb(0xffffff),
+                ring: rgb(0x1c6fb0),
+            },
+            (Self::Solarized, ThemeMode::Dark) => ThemeColors {
+                background: rgb(0x002b36),
+                foreground: rgb(0x93a1a1),
+                card: rgb(0x073642),
+                card_foreground: rgb(0x93a1a1),
+                popover: rgb(0x073642),
+                popover_foreground: rgb(0x93a1a1),
+                primary: rgb(0x4aa3e0),
+                primary_foreground: rgb(0x002b36),
+                secondary: rgb(0x2aa198),
+                secondary_foreground: rgb(0x002b36),
+                muted: rgb(0x073642),
+                muted_foreground: rgb(0x839496),
+                accent: rgb(0xc99b00),
+                accent_foreground: rgb(0x002b36),
+                destructive: rgb(0xe06c5a),
+                destructive_foreground: rgb(0x002b36),
+                border: rgb(0x586e75),
+                input: rgb(0x073642),
+                ring: rgb(0x4aa3e0),
+            },
+            (Self::Ocean, ThemeMode::Light) => ThemeColors {
+                background: rgb(0xeaf6ff),
+                foreground: rgb(0x12324a),
+                card: rgb(0xd6ecfa),
+                card_foreground: rgb(0x12324a),
+                popover: rgb(0xf4fbff),
+                popover_foreground: rgb(0x12324a),
+                primary: rgb(0x1261a0),
+                primary_foreground: rgb(0xf4fbff),
+                secondary: rgb(0x0f6f7a),
+                secondary_foreground: rgb(0xf4fbff),
+                muted: rgb(0xc2e1f2),
+                muted_foreground: rgb(0x42677d),
+                accent: rgb(0xa8531a),
+                accent_foreground: rgb(0xf4fbff),
+                destructive: rgb(0xb3261e),
+                destructive_foreground: rgb(0xf4fbff),
+                border: rgb(0x70a9c9),
+                input: rgb(0xf4fbff),
+                ring: rgb(0x1261a0),
+            },
+            (Self::Ocean, ThemeMode::Dark) => ThemeColors {
+                background: rgb(0x071a2b),
+                foreground: rgb(0xc8e7f5),
+                card: rgb(0x0d2b43),
+                card_foreground: rgb(0xd9f1fb),
+                popover: rgb(0x0d2b43),
+                popover_foreground: rgb(0xd9f1fb),
+                primary: rgb(0x4db8ff),
+                primary_foreground: rgb(0x041321),
+                secondary: rgb(0x2dd4bf),
+                secondary_foreground: rgb(0x041c1a),
+                muted: rgb(0x123b57),
+                muted_foreground: rgb(0x82b8d2),
+                accent: rgb(0xffb86b),
+                accent_foreground: rgb(0x291400),
+                destructive: rgb(0xff6b6b),
+                destructive_foreground: rgb(0x2b0505),
+                border: rgb(0x276184),
+                input: rgb(0x0a2237),
+                ring: rgb(0x4db8ff),
+            },
             (Self::Ansi, _) => unreachable!(),
-        }
+        };
 
         Theme::new(mode, colors).customize(|theme| match self {
             Self::Geek => {
