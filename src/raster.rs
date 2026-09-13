@@ -397,6 +397,68 @@ pub(crate) fn symbols_from_pixels(
     )
 }
 
+// A pure-Rust engine renders each cell as a colored block derived from the
+// average of the pixels it covers. It is deliberately simple: it keeps the
+// no-default-features build useful for raster previews without asserting the
+// quality of the native symbol engine.
+#[cfg(not(feature = "native-raster"))]
+fn symbols_from_rgba(
+    pixels: &[u8],
+    width: u16,
+    height: u16,
+    row_stride: usize,
+    cell_pixels: Size,
+) -> Result<Image, RasterImageError> {
+    let cell_width = usize::from(cell_pixels.width.max(1));
+    let cell_height = usize::from(cell_pixels.height.max(1));
+    let mut rows = Vec::with_capacity(usize::from(height));
+    for y in 0..usize::from(height) {
+        let mut row = Vec::with_capacity(usize::from(width));
+        for x in 0..usize::from(width) {
+            let mut sums = [0u64; 3];
+            let mut count = 0u64;
+            for dy in 0..cell_height {
+                let line = y * cell_height + dy;
+                let base = match line.checked_mul(row_stride) {
+                    Some(base) => base,
+                    None => break,
+                };
+                for dx in 0..cell_width {
+                    let offset = match base.checked_add((x * cell_width + dx).saturating_mul(4)) {
+                        Some(offset) => offset,
+                        None => continue,
+                    };
+                    let Some(pixel) = pixels.get(offset..offset + 4) else {
+                        continue;
+                    };
+                    sums[0] += u64::from(pixel[0]);
+                    sums[1] += u64::from(pixel[1]);
+                    sums[2] += u64::from(pixel[2]);
+                    count += 1;
+                }
+            }
+            let average = |channel: usize| -> u8 {
+                match sums[channel].checked_div(count) {
+                    Some(value) => value.min(255) as u8,
+                    None => 0,
+                }
+            };
+            let fg = Color::Rgb {
+                r: average(0),
+                g: average(1),
+                b: average(2),
+            };
+            row.push(
+                Cell::styled(fg, Color::Reset, Attributes::default(), "█".to_string())
+                    .unwrap_or_else(|_| Cell::blank()),
+            );
+        }
+        rows.push(row);
+    }
+    Image::from_rows(rows).map_err(|_| RasterImageError::ChafaUnavailable)
+}
+
+#[cfg(feature = "native-raster")]
 fn symbols_from_rgba(
     pixels: &[u8],
     width: u16,
@@ -580,6 +642,7 @@ fn align_offset(space: u32, content: u32, align: ImageAlign) -> i64 {
     }
 }
 
+#[cfg(feature = "native-raster")]
 fn packed_color(value: i32) -> Color {
     if value < 0 {
         Color::Reset

@@ -1,3 +1,7 @@
+// Native raster protocol tests require the `native-raster` feature; without
+// it the renderer rejects those protocols before any worker starts.
+#![cfg(feature = "native-raster")]
+
 use std::{sync::Arc, thread, time::Duration};
 
 use icmd::{

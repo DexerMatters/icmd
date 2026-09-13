@@ -1,3 +1,4 @@
+use super::image::Passthrough;
 use super::image::{
     ImageManager, KittyBackend, NativeTile, PreparedRaster, ScreenRect, TileKey, TransformKey,
     surround_native,
@@ -19,6 +20,7 @@ use crossterm::style::{
 use crossterm::terminal::{Clear, ClearType};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+#[cfg(feature = "native-raster")]
 use std::ffi::CString;
 use std::fmt;
 use std::fmt::Write as _;
@@ -66,6 +68,12 @@ pub enum FrameError {
         height: u16,
         cells: usize,
     },
+    // The requested raster protocol needs the `native-raster` feature. Emitted
+    // before any worker or terminal resource exists, so capability is reported
+    // deterministically instead of degrading silently.
+    UnsupportedProtocol {
+        protocol: ImageProtocol,
+    },
     AllocationFailed {
         cells: usize,
     },
@@ -99,6 +107,10 @@ impl fmt::Display for FrameError {
             Self::AllocationFailed { cells } => {
                 write!(f, "renderer allocation failed for {cells} cells")
             }
+            Self::UnsupportedProtocol { protocol } => write!(
+                f,
+                "image protocol {protocol:?} requires the `native-raster` feature"
+            ),
         }
     }
 }
@@ -157,10 +169,20 @@ struct CachedPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct LayerKey(i32, u64, u64, u64);
 
+// SAFETY/invariants for this wrapper:
+// * It is created and dropped inside `detect_terminal`, which runs on the
+//   calling thread before the renderer worker starts; the pointer never
+//   outlives that function. Only the derived `Passthrough` value crosses into
+//   the worker, so no foreign object needs a thread-transfer guarantee.
+// * `chafa_term_db_get_default` returns a borrowed, library-owned database and
+//   `chafa_term_db_detect` transfers one reference to the caller. `Drop`
+//   releases exactly that reference and is the only release path.
+// * Every use null-checks the pointer and holds no other borrow across the
+//   unref.
+#[cfg(feature = "native-raster")]
 struct TermInfo(*mut chafa_sys::ChafaTermInfo);
 
-unsafe impl Send for TermInfo {}
-
+#[cfg(feature = "native-raster")]
 impl Drop for TermInfo {
     fn drop(&mut self) {
         if !self.0.is_null() {
@@ -227,7 +249,7 @@ pub struct Renderer {
     layers_dirty: bool,
     full_redraw: bool,
     pub(super) protocol: ImageProtocol,
-    term_info: TermInfo,
+    passthrough: Passthrough,
     // Source I/O and fallback transitions are shared by every output mode.
     pub(super) image_manager: ImageManager,
     native_cache: HashMap<NativeKey, CachedPayload>,
@@ -255,7 +277,14 @@ impl Renderer {
     pub fn with_config(viewport: Size, config: RendererConfig) -> Result<Self, FrameError> {
         let cells = blank_cells(viewport)?;
         let cell_count = cells.len();
-        let (protocol, term_info) = detect_terminal(config.image_protocol);
+        let (protocol, passthrough) = detect_terminal(config.image_protocol);
+        #[cfg(not(feature = "native-raster"))]
+        if matches!(
+            protocol,
+            ImageProtocol::Kitty | ImageProtocol::Sixel | ImageProtocol::Iterm2
+        ) {
+            return Err(FrameError::UnsupportedProtocol { protocol });
+        }
         let detect_cell_pixels = config.cell_pixel_size.is_none();
         let cell_pixels = config
             .cell_pixel_size
@@ -278,7 +307,7 @@ impl Renderer {
             layers_dirty: true,
             full_redraw: true,
             protocol,
-            term_info,
+            passthrough,
             image_manager: ImageManager::new(),
             native_cache: HashMap::new(),
             native_cache_bytes: 0,
@@ -1225,7 +1254,7 @@ impl Renderer {
             tile.key.height,
             self.cell_pixels,
             self.protocol,
-            self.term_info.0,
+            self.passthrough,
         )?;
         if value.len() <= self.native_cache_limit {
             self.evict_cache(value.len());
@@ -1248,7 +1277,7 @@ impl Renderer {
             &mut self.native_tiles,
             &self.prepared,
             self.cell_pixels,
-            self.term_info.0,
+            self.passthrough,
         )
     }
 
@@ -1257,7 +1286,7 @@ impl Renderer {
             return None;
         }
         self.native_tiles.clear();
-        self.kitty.shutdown(self.term_info.0)
+        self.kitty.shutdown(self.passthrough)
     }
 
     fn collect_native_tiles(&mut self) -> Vec<NativeTile> {
@@ -1527,7 +1556,46 @@ fn surface_size(surface: &Surface) -> (usize, usize) {
     }
 }
 
-fn detect_terminal(requested: ImageProtocol) -> (ImageProtocol, TermInfo) {
+// Pure-Rust terminal capability detection. Without the native backend the
+// framework still selects a correct protocol from the environment, so a build
+// with no Chafa, pkg-config, or libclang remains fully functional for cell
+// output and reports raster capability honestly.
+#[cfg(not(feature = "native-raster"))]
+fn detect_terminal(requested: ImageProtocol) -> (ImageProtocol, Passthrough) {
+    let term = std::env::var("TERM").unwrap_or_default();
+    let program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let passthrough = if std::env::var_os("TMUX").is_some() {
+        Passthrough::Tmux
+    } else if term.starts_with("screen") {
+        Passthrough::Screen
+    } else {
+        Passthrough::None
+    };
+    let protocol = match requested {
+        ImageProtocol::Auto => {
+            let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some()
+                || term.contains("kitty")
+                || program.eq_ignore_ascii_case("kitty")
+                || std::env::var("TERM_PROGRAM").is_ok_and(|value| value == "WezTerm");
+            let sixel = term.contains("sixel") || term.contains("mlterm") || term.contains("yaft");
+            let iterm = program == "iTerm.app";
+            if kitty {
+                ImageProtocol::Kitty
+            } else if iterm {
+                ImageProtocol::Iterm2
+            } else if sixel {
+                ImageProtocol::Sixel
+            } else {
+                ImageProtocol::Symbols
+            }
+        }
+        value => value,
+    };
+    (protocol, passthrough)
+}
+
+#[cfg(feature = "native-raster")]
+fn detect_terminal(requested: ImageProtocol) -> (ImageProtocol, Passthrough) {
     unsafe {
         let database = chafa_sys::chafa_term_db_get_default();
         let mut environment: Vec<CString> = std::env::vars()
@@ -1555,7 +1623,15 @@ fn detect_terminal(requested: ImageProtocol) -> (ImageProtocol, TermInfo) {
             ImageProtocol::Auto => ImageProtocol::Symbols,
             value => value,
         };
-        (protocol, TermInfo(info))
+        let passthrough = if info.is_null() {
+            Passthrough::None
+        } else {
+            Passthrough::from_chafa(chafa_sys::chafa_term_info_get_passthrough_type(info))
+        };
+        // The term-info reference is released here; only the plain passthrough
+        // value survives, so nothing native crosses a thread boundary.
+        drop(TermInfo(info));
+        (protocol, passthrough)
     }
 }
 
@@ -1569,6 +1645,25 @@ fn live_cell_pixels() -> Option<Size> {
     })
 }
 
+// Without the native backend there is no encoder for Kitty/Sixel/iTerm2
+// payloads, so those protocols report unsupported instead of emitting a
+// malformed escape sequence. Symbols output is pure Rust and unaffected.
+#[cfg(not(feature = "native-raster"))]
+#[allow(clippy::too_many_arguments)]
+fn encode_native_slice(
+    _pixels: &RasterPixels,
+    _column: u16,
+    _line: u16,
+    _width: u16,
+    _height: u16,
+    _cell_pixels: Size,
+    _protocol: ImageProtocol,
+    _passthrough: Passthrough,
+) -> Option<String> {
+    None
+}
+
+#[cfg(feature = "native-raster")]
 #[allow(clippy::too_many_arguments)]
 fn encode_native_slice(
     pixels: &RasterPixels,
@@ -1578,7 +1673,7 @@ fn encode_native_slice(
     height: u16,
     cell_pixels: Size,
     protocol: ImageProtocol,
-    term_info: *mut chafa_sys::ChafaTermInfo,
+    passthrough: Passthrough,
 ) -> Option<String> {
     let mode = match protocol {
         ImageProtocol::Kitty => chafa_sys::ChafaPixelMode_CHAFA_PIXEL_MODE_KITTY,
@@ -1598,12 +1693,7 @@ fn encode_native_slice(
             i32::from(cell_pixels.height.max(1)),
         );
         chafa_sys::chafa_canvas_config_set_pixel_mode(config, mode);
-        if !term_info.is_null() {
-            chafa_sys::chafa_canvas_config_set_passthrough(
-                config,
-                chafa_sys::chafa_term_info_get_passthrough_type(term_info),
-            );
-        }
+        chafa_sys::chafa_canvas_config_set_passthrough(config, passthrough.to_chafa());
         let canvas = chafa_sys::chafa_canvas_new(config);
         chafa_sys::chafa_canvas_config_unref(config);
         if canvas.is_null() {
@@ -1654,6 +1744,7 @@ fn encode_native_slice(
 }
 
 #[repr(C)]
+#[cfg(feature = "native-raster")]
 struct GStringLayout {
     data: *mut std::ffi::c_char,
     len: usize,

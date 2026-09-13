@@ -7,6 +7,7 @@ use flate2::{Compression, write::ZlibEncoder};
 
 use crate::Size;
 
+use super::passthrough::Passthrough;
 use super::surround_native;
 use super::types::{NativeTile, PreparedRaster, TileKey, TransformKey};
 
@@ -51,7 +52,7 @@ impl KittyBackend {
         native_tiles: &mut HashSet<TileKey>,
         prepared: &HashMap<TransformKey, PreparedRaster>,
         cell_pixels: Size,
-        term_info: *mut chafa_sys::ChafaTermInfo,
+        passthrough: Passthrough,
     ) -> String {
         let desired: HashSet<_> = tiles.iter().map(|tile| tile.key).collect();
         let desired_transforms: HashSet<_> = tiles.iter().map(|tile| tile.key.transform).collect();
@@ -62,7 +63,7 @@ impl KittyBackend {
         }
 
         for image in std::mem::take(&mut self.releases) {
-            output.push_str(&self.command(&format!("a=d,d=I,i={image},q=2"), term_info));
+            output.push_str(&self.command(&format!("a=d,d=I,i={image},q=2"), passthrough));
         }
 
         let mut old = std::mem::take(&mut self.placements);
@@ -108,7 +109,7 @@ impl KittyBackend {
                 preferred_image,
                 force_upload,
                 prepared,
-                term_info,
+                passthrough,
                 &mut output,
             );
             let placement = placement.unwrap_or_else(|| self.allocate_id());
@@ -131,7 +132,7 @@ impl KittyBackend {
                         "a=p,i={image},p={placement},x={x},y={y},w={width},h={height},c={},r={},C=1,z={},q=2",
                         tile.key.width, tile.key.height, tile.key.level
                     ),
-                    term_info,
+                    passthrough,
                 )
             );
         }
@@ -142,7 +143,7 @@ impl KittyBackend {
         for (key, placement) in old {
             if let Some(image) = self.images.get(&key.transform) {
                 output.push_str(
-                    &self.command(&format!("a=d,d=i,i={image},p={placement},q=2"), term_info),
+                    &self.command(&format!("a=d,d=i,i={image},p={placement},q=2"), passthrough),
                 );
             }
         }
@@ -150,10 +151,7 @@ impl KittyBackend {
         surround_native(output)
     }
 
-    pub(in crate::runtime) fn shutdown(
-        &mut self,
-        term_info: *mut chafa_sys::ChafaTermInfo,
-    ) -> Option<String> {
+    pub(in crate::runtime) fn shutdown(&mut self, passthrough: Passthrough) -> Option<String> {
         let mut ids: Vec<_> = self.images.values().copied().collect();
         ids.sort_unstable();
         ids.dedup();
@@ -163,7 +161,7 @@ impl KittyBackend {
         self.releases.clear();
         let mut output = String::new();
         for image in ids {
-            output.push_str(&self.command(&format!("a=d,d=I,i={image},q=2"), term_info));
+            output.push_str(&self.command(&format!("a=d,d=I,i={image},q=2"), passthrough));
         }
         (!output.is_empty()).then(|| surround_native(output))
     }
@@ -180,7 +178,7 @@ impl KittyBackend {
         preferred_image: Option<u32>,
         force_upload: bool,
         prepared: &HashMap<TransformKey, PreparedRaster>,
-        term_info: *mut chafa_sys::ChafaTermInfo,
+        passthrough: Passthrough,
         output: &mut String,
     ) -> u32 {
         let existing = self.images.get(&key).copied();
@@ -212,32 +210,29 @@ impl KittyBackend {
                         prepared.pixels.pixels.len() / (prepared.pixels.width as usize * 4),
                         base64(chunk),
                     ),
-                    term_info,
+                    passthrough,
                 ));
             } else {
-                output.push_str(&self.command(&format!("m={more};{}", base64(chunk)), term_info));
+                output.push_str(&self.command(&format!("m={more};{}", base64(chunk)), passthrough));
             }
         }
         self.images.insert(key, image);
         image
     }
 
-    fn command(&self, payload: &str, term_info: *mut chafa_sys::ChafaTermInfo) -> String {
-        native_escape(&format!("\x1b_G{payload}\x1b\\"), term_info)
+    fn command(&self, payload: &str, passthrough: Passthrough) -> String {
+        native_escape(&format!("\x1b_G{payload}\x1b\\"), passthrough)
     }
 }
 
-fn native_escape(command: &str, term_info: *mut chafa_sys::ChafaTermInfo) -> String {
-    let passthrough = (!term_info.is_null())
-        .then(|| unsafe { chafa_sys::chafa_term_info_get_passthrough_type(term_info) });
-    match passthrough {
-        Some(chafa_sys::ChafaPassthrough_CHAFA_PASSTHROUGH_TMUX) => {
-            format!("\x1bPtmux;{}\x1b\\", command.replace('\x1b', "\x1b\x1b"))
-        }
-        Some(chafa_sys::ChafaPassthrough_CHAFA_PASSTHROUGH_SCREEN) => {
-            format!("\x1bP{}\x1b\\", command.replace('\x1b', "\x1b\x1b"))
-        }
-        _ => command.to_owned(),
+// Kitty/Sixel payloads must be wrapped for a multiplexer, and every embedded
+// escape has to be doubled inside the passthrough envelope.
+fn native_escape(command: &str, passthrough: Passthrough) -> String {
+    match passthrough.escape(command) {
+        Some(envelope) => envelope
+            .replace('\x1b', "\x1b\x1b")
+            .replacen("\x1b\x1b", "\x1b", 1),
+        None => command.to_owned(),
     }
 }
 

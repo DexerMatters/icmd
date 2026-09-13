@@ -3,8 +3,15 @@ name = "icmd"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["native-raster"]
+# Native Chafa-backed raster encoding (Kitty/Sixel/iTerm2 payloads and symbol
+# rendering). Requires pkg-config, the Chafa development package, and libclang
+# at build time. Disable it for a pure-Rust build that only emits cell output.
+native-raster = ["dep:chafa-sys"]
+
 [dependencies]
-chafa-sys = "0.1.4"
+chafa-sys = { version = "0.1.4", optional = true }
 crossbeam-channel = "0.5.16"
 crossterm = "0.29.0"
 flate2 = "1"

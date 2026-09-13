@@ -1,7 +1,10 @@
 use std::{
     cell::RefCell,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
 };
 
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -15,11 +18,21 @@ use super::{
 
 type ListenerCallback<E> = Box<dyn FnMut(E) + Send + 'static>;
 
-// A callback that panics must not lose its failure and must not leave the
-// runtime running in an unknown partially-mutated state. The first fault is
-// recorded here and surfaced through the runtime error channel; later faults
-// are ignored so the original cause is preserved.
-static CALLBACK_FAULT: OnceLock<Mutex<Option<CallbackFault>>> = OnceLock::new();
+// A callback that panics must not leave the runtime running in an unknown
+// partially-mutated state. The first fault is recorded and surfaced through the
+// runtime error channel; later faults are ignored so the cause is preserved.
+//
+// The slot is per-thread: an application callback only ever runs on the thread
+// that dispatches events, so per-thread state is both correct for the runtime
+// and free of the cross-test leakage a process-global slot would create.
+thread_local! {
+    static CALLBACK_FAULT: RefCell<Option<CallbackFault>> = const { RefCell::new(None) };
+}
+
+// Reentrancy is detected by the listener that is being re-entered, while a
+// panic is caught after unwinding; both funnel through this counter so a
+// non-dispatching thread can still be observed.
+static FAULT_OBSERVED: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CallbackFault {
@@ -39,19 +52,17 @@ impl CallbackFault {
 }
 
 pub(crate) fn record_callback_fault(fault: CallbackFault) {
-    let slot = CALLBACK_FAULT.get_or_init(|| Mutex::new(None));
-    let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if slot.is_none() {
-        *slot = Some(fault);
-    }
+    CALLBACK_FAULT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(fault);
+        }
+    });
+    FAULT_OBSERVED.fetch_add(1, Ordering::SeqCst);
 }
 
 pub(crate) fn take_callback_fault() -> Option<CallbackFault> {
-    CALLBACK_FAULT.get().and_then(|slot| {
-        slot.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-    })
+    CALLBACK_FAULT.with(|slot| slot.borrow_mut().take())
 }
 
 #[derive(fmt_derive::Debug)]
