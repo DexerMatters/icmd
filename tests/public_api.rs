@@ -195,3 +195,77 @@ fn text_and_canvas_naming_is_domain_qualified() {
     assert_eq!(canvas.foreground_color(), crossterm::style::Color::Red);
     assert_eq!(canvas.background_color(), crossterm::style::Color::Blue);
 }
+
+// API-14: typed frame construction prevents wrong-surface operations and
+// duplicate/removal mistakes before the renderer sees them.
+#[test]
+fn typed_frame_builder_tracks_kind_and_removal() {
+    use icmd::{
+        BuildError, Cell, CellEdit, CellSurfaceHandle, FrameBuilder, Image, ImagePosition,
+        RasterImage, RasterPlacement, Renderer, ScreenPosition, Size,
+    };
+
+    let mut builder = FrameBuilder::new().with_viewport(Size::new(6, 3));
+    let cells = builder.create_cells(
+        Image::new(2, 1, Cell::plain(" ").unwrap()).unwrap(),
+        ScreenPosition::new(0, 0),
+        0,
+    );
+    builder
+        .patch_cells(
+            cells,
+            vec![CellEdit {
+                position: ImagePosition::new(0, 0),
+                cell: Cell::plain("A").unwrap(),
+            }],
+        )
+        .expect("a cell patch on a cell handle");
+
+    let image = RasterImage::from_rgba8(2, 2, vec![64u8; 16]).unwrap();
+    let raster = builder.create_raster(
+        RasterPlacement::new(icmd::ImageSource::loaded(image), 1, 1, Default::default()),
+        ScreenPosition::new(0, 0),
+        0,
+    );
+    builder
+        .set_raster_clip(raster, Some(icmd::Rect::new(0, 0, 1, 1)))
+        .expect("a clip on a raster handle");
+
+    // Removal is tracked: a second removal is rejected, not silently emitted.
+    builder.remove(raster).expect("first removal");
+    assert_eq!(builder.remove(raster), Err(BuildError::Removed));
+
+    let frame = builder.finish();
+    let mut renderer = Renderer::with_config(
+        Size::new(6, 3),
+        RendererConfig {
+            image_protocol: icmd::ImageProtocol::Symbols,
+            ..RendererConfig::default()
+        },
+    )
+    .unwrap();
+    renderer
+        .apply_frame(frame)
+        .expect("a builder-produced frame must validate");
+    let output = renderer.render_diff().unwrap().unwrap();
+    assert!(output.contains('A'), "frame was {output:?}");
+
+    // A stale handle from another builder is rejected.
+    let mut other = FrameBuilder::new();
+    let foreign: CellSurfaceHandle = other.create_cells(
+        Image::new(1, 1, Cell::plain(" ").unwrap()).unwrap(),
+        ScreenPosition::new(0, 0),
+        0,
+    );
+    let mut third = FrameBuilder::new();
+    assert_eq!(
+        third.patch_cells(
+            foreign,
+            vec![CellEdit {
+                position: ImagePosition::new(0, 0),
+                cell: Cell::plain("Z").unwrap(),
+            }]
+        ),
+        Err(BuildError::UnknownHandle)
+    );
+}

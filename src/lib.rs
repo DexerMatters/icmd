@@ -2,6 +2,7 @@ mod app;
 pub mod basic;
 pub mod data;
 pub mod elements;
+mod frame_builder;
 mod glyph;
 mod raster;
 mod runtime;
@@ -41,6 +42,9 @@ pub use basic::{
 pub use data::{
     Cell, CellEdit, CellError, EmojiMerging, Frame, Image, ImageError, ImageId, ImagePosition,
     MAX_GLYPH_BYTES, MAX_SURFACE_CELLS, Operation, Rect, ScreenPosition, Size,
+};
+pub use frame_builder::{
+    BuildError, CellSurfaceHandle, FrameBuilder, RasterSurfaceHandle, SurfaceHandle,
 };
 pub use raster::{
     ImageAlign, ImageFit, ImageLoading, ImageMode, ImageProtocol, ImageRenderOptions, ImageSource,
