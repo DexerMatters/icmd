@@ -244,6 +244,30 @@ fn shutdown_timeout_names_the_pending_stage() {
 }
 
 #[test]
+fn dropping_the_handle_stops_workers_without_blocking_forever() {
+    let viewport = Size::new(8, 2);
+    let (commit, _) = Commit::new(viewport);
+    let runtime = Runtime::new(Lower::with_limits(ResourceLimits::default()))
+        .then(commit)
+        .then(Renderer::new(viewport).unwrap())
+        .start_handle();
+    let input = runtime.input();
+    input.send(nested(1)).unwrap();
+
+    // Dropping the handle (with a live sender clone) must initiate a bounded
+    // best-effort shutdown rather than hanging.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        drop(runtime);
+        let _ = done_tx.send(());
+    });
+    let finished = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    drop(input);
+    assert!(finished, "dropping the handle must not block forever");
+    worker.join().unwrap();
+}
+
+#[test]
 fn capacity_one_backpressure_still_delivers() {
     let viewport = Size::new(20, 5);
     let (commit, _) = Commit::new(viewport);

@@ -13,7 +13,7 @@ use crate::runtime::hooks::{EffectCallback, FiberId, HookSlot, StateUpdate, Upda
 use crossbeam_channel::Sender;
 
 use super::{
-    common::{Attr, Node},
+    common::{Attr, Node, fragment},
     props::Props,
 };
 
@@ -49,6 +49,7 @@ pub fn create_context<T>(default: T) -> ContextKey<T> {
     ContextKey::new(default)
 }
 
+#[derive(Clone)]
 pub struct ProviderProps<T: 'static> {
     pub context_key: Attr<&'static ContextKey<T>>,
     pub value: Attr<T>,
@@ -63,16 +64,20 @@ impl<T> Default for ProviderProps<T> {
     }
 }
 
+// Legacy provider component retained for macro compatibility. Missing required
+// fields are a defined no-op: the children render with the inherited context
+// rather than panicking the worker. `ContextKey::provider(value, child)` is the
+// canonical, type-safe construction path.
 pub fn provider<T>(_cx: &mut ComponentContext, props: &Props<ProviderProps<T>>) -> Node
 where
     T: Clone + Send + Sync + 'static,
 {
-    let key = props
-        .context_key
-        .as_ref()
-        .copied()
-        .expect("missing context_key");
-    let value = props.value.as_ref().cloned().expect("missing value");
+    let (Some(key), Some(value)) = (
+        props.context_key.as_ref().copied(),
+        props.value.as_ref().cloned(),
+    ) else {
+        return fragment(props.children.clone());
+    };
     key.provider(value, props.children.clone())
 }
 

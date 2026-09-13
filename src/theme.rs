@@ -558,7 +558,10 @@ pub struct ThemeProviderProps {
 }
 
 pub fn theme_provider(_cx: &mut ComponentContext, props: &Props<ThemeProviderProps>) -> Node {
-    let value = props.value.as_ref().cloned().expect("missing theme value");
+    // Omitting the value has coherent semantics: provide the default theme.
+    // The old `expect` turned a syntactically valid macro omission into a
+    // worker panic.
+    let value = props.value.as_ref().cloned().unwrap_or_else(Theme::default);
     theme_context().provider(value, props.children.clone())
 }
 

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use icmd::{
     Commit, Component, ComponentContext, Lower, Node, Props, Renderer, Runtime, Size, StateSetter,
-    create_context,
+    create_context, provider,
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -105,4 +105,63 @@ fn provider_value_changes_are_visible_to_consumers() {
         .unwrap()
         .unwrap();
     assert!(contains_text(&second, "dark"));
+}
+
+// SAF-11: a default-constructible provider whose required values are omitted
+// must not panic a render worker. Omission renders the children with the
+// inherited context instead.
+#[test]
+fn provider_omitting_required_fields_renders_children_without_panicking() {
+    // Construct the legacy component with explicitly omitted required props.
+    // `provider::<Theme>` with default props: both required fields are unset,
+    // which used to reach `expect` during rendering.
+    let node: Node = provider::<Theme>.child("child text");
+    let (frame, teardown) = frame_for(node);
+    assert!(
+        contains_text(&frame, "child"),
+        "an incomplete provider must still render its children"
+    );
+    teardown();
+}
+
+// SAF-12: dynamic fill assignment is fallible and never panics on ordinary
+// caller input.
+#[test]
+fn invalid_dynamic_fill_is_a_typed_error_not_a_panic() {
+    let mut style = icmd::Style::default();
+    assert!(
+        style.fill.set_fill("").is_err(),
+        "empty fill must be rejected"
+    );
+    assert!(
+        style.fill.set_fill("ab").is_err(),
+        "a multi-grapheme fill must be rejected"
+    );
+    assert!(
+        style.fill.set_fill("\u{7}").is_err(),
+        "a control fill must be rejected"
+    );
+    assert!(
+        style.fill.set_fill("\u{200b}").is_err(),
+        "a zero-width fill must be rejected"
+    );
+    style
+        .fill
+        .set_fill("█")
+        .expect("a single printable grapheme is valid");
+    assert_eq!(style.fill.fill().map(|fill| fill.symbol()), Some("█"));
+}
+
+#[test]
+fn fill_operator_assignment_ignores_invalid_input_instead_of_panicking() {
+    // The operator surface cannot report failure; it must therefore refuse
+    // rather than panic.
+    let mut style = icmd::Style::default();
+    style.fill /= "";
+    assert!(
+        style.fill.fill().is_none(),
+        "an invalid fill is not applied"
+    );
+    style.fill /= 'x';
+    assert_eq!(style.fill.fill().map(|fill| fill.symbol()), Some("x"));
 }

@@ -608,16 +608,39 @@ impl Style {
     }
 }
 
+// Operator assignment is a transitional convenience. It cannot report a
+// validation failure, so an invalid glyph is ignored rather than allowed to
+// panic a worker or a caller; use `set_fill` for a fallible, explicit path.
 impl ops::DivAssign<&str> for Attr<Fill> {
     fn div_assign(&mut self, rhs: &str) {
-        *self /= Fill::new(rhs).expect("style fill must be one printable terminal grapheme");
+        if let Ok(fill) = Fill::new(rhs) {
+            self.overlay(&Attr::Set(fill));
+        }
     }
 }
 
 impl ops::DivAssign<char> for Attr<Fill> {
     fn div_assign(&mut self, rhs: char) {
-        *self /=
-            Fill::new(rhs.to_string()).expect("style fill must be one printable terminal grapheme");
+        if let Ok(fill) = Fill::new(rhs.to_string()) {
+            self.overlay(&Attr::Set(fill));
+        }
+    }
+}
+
+impl Attr<Fill> {
+    // Fallible dynamic-glyph assignment. This is the canonical path for values
+    // that did not come from a validated literal.
+    pub fn set_fill(&mut self, symbol: impl Into<String>) -> Result<(), FillError> {
+        let fill = Fill::new(symbol)?;
+        self.overlay(&Attr::Set(fill));
+        Ok(())
+    }
+
+    pub fn fill(&self) -> Option<&Fill> {
+        match self {
+            Attr::Set(fill) => Some(fill),
+            Attr::Unset => None,
+        }
     }
 }
 
