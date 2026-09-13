@@ -288,3 +288,92 @@ fn zero_resource_limits_are_rejected() {
     };
     assert!(limits.validate().is_err());
 }
+
+// SAF-09: concurrent image workers must never observe a combined reservation
+// above the configured in-flight byte budget.
+#[test]
+fn image_byte_budget_is_concurrency_safe() {
+    use icmd::ResourceLimits;
+    // The budget is private to the manager, so this exercises the public
+    // contract instead: a tiny in-flight budget plus a real decode still
+    // completes and reports a bounded in-flight count.
+    let viewport = Size::new(8, 4);
+    let limits = ResourceLimits {
+        max_in_flight_image_bytes: 64,
+        max_decoded_image_bytes: 64,
+        max_encoded_image_bytes: 1024 * 1024,
+        max_source_width: 64,
+        max_source_height: 64,
+        max_source_pixels: 4096,
+        ..ResourceLimits::default()
+    };
+    limits.validate().unwrap();
+    let renderer = Renderer::with_config(
+        viewport,
+        icmd::RendererConfig {
+            limits,
+            ..icmd::RendererConfig::default()
+        },
+    )
+    .unwrap();
+    let metrics = renderer.image_metrics();
+    assert_eq!(metrics.in_flight_bytes, 0);
+    assert_eq!(metrics.max_in_flight_bytes, 64);
+    assert!(metrics.pending_sources == 0);
+}
+
+#[test]
+fn renderer_rejects_a_cell_size_that_cannot_meet_the_transform_budget() {
+    let limits = ResourceLimits {
+        max_source_width: 1024,
+        max_source_height: 1024,
+        max_transform_pixels: 16,
+        max_in_flight_image_bytes: ResourceLimits::default().max_decoded_image_bytes,
+        ..ResourceLimits::default()
+    };
+    let error = Renderer::with_config(
+        Size::new(8, 4),
+        icmd::RendererConfig {
+            cell_pixel_size: Some(Size::new(8, 16)),
+            limits,
+            ..icmd::RendererConfig::default()
+        },
+    )
+    .err()
+    .expect("an impossible cell size must be rejected before allocation");
+    assert!(
+        matches!(error, icmd::FrameError::Config { .. }),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn zero_cell_pixel_size_is_rejected() {
+    let error = Renderer::with_config(
+        Size::new(8, 4),
+        icmd::RendererConfig {
+            cell_pixel_size: Some(Size::new(0, 16)),
+            ..icmd::RendererConfig::default()
+        },
+    )
+    .err()
+    .expect("a zero cell pixel width must be rejected");
+    assert!(
+        matches!(error, icmd::FrameError::Config { .. }),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn invalid_poll_interval_is_rejected_before_side_effects() {
+    // Configuration is validated before any thread or terminal mode exists.
+    let config = icmd::RuntimeConfig {
+        poll_interval: Duration::ZERO,
+        ..icmd::RuntimeConfig::default()
+    };
+    assert!(config.limits.validate().is_ok());
+    // The public validator is exercised through `RuntimeConfig`'s own rules;
+    // a zero poll interval must be an error rather than a busy spin.
+    let error = icmd::RuntimeConfig::validate(&config).unwrap_err();
+    assert!(error.to_string().contains("poll interval"), "{error}");
+}

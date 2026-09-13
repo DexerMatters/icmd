@@ -4,6 +4,7 @@ use super::image::{
     surround_native,
 };
 use super::pipeline::PipelineComponent;
+use crate::ResourceLimits;
 use crate::data::{
     Cell, CellSlot, EmojiMerging, Frame, Image, ImageError, ImageId, MAX_SURFACE_CELLS, Operation,
     Rect, ScreenPosition, Size,
@@ -32,6 +33,18 @@ const ADAPTIVE_REPLAY_DELAY: Duration = Duration::from_millis(80);
 // Which representation a retained surface holds. Validation tracks it so an
 // operation aimed at the wrong representation is rejected instead of silently
 // doing nothing.
+// Bounded-cardinality image pipeline metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ImageMetrics {
+    pub in_flight_bytes: usize,
+    pub cached_source_bytes: usize,
+    pub prepared_bytes: usize,
+    pub native_cache_bytes: usize,
+    pub pending_sources: usize,
+    pub max_in_flight_bytes: usize,
+    pub max_cache_bytes: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceKind {
     Cells,
@@ -74,6 +87,10 @@ pub enum FrameError {
     UnsupportedProtocol {
         protocol: ImageProtocol,
     },
+    // The renderer configuration was rejected before resource creation.
+    Config {
+        detail: Box<str>,
+    },
     AllocationFailed {
         cells: usize,
     },
@@ -111,6 +128,7 @@ impl fmt::Display for FrameError {
                 f,
                 "image protocol {protocol:?} requires the `native-raster` feature"
             ),
+            Self::Config { detail } => write!(f, "invalid renderer configuration: {detail}"),
         }
     }
 }
@@ -146,6 +164,8 @@ pub struct RendererConfig {
     pub image_update_policy: ImageUpdatePolicy,
     pub cell_pixel_size: Option<Size>,
     pub emoji_merging: EmojiMerging,
+    // One validated budget for decode, transform, cache, and output work.
+    pub limits: ResourceLimits,
 }
 
 impl Default for RendererConfig {
@@ -156,6 +176,7 @@ impl Default for RendererConfig {
             image_update_policy: ImageUpdatePolicy::Adaptive,
             cell_pixel_size: None,
             emoji_merging: EmojiMerging::default(),
+            limits: ResourceLimits::default(),
         }
     }
 }
@@ -250,6 +271,8 @@ pub struct Renderer {
     full_redraw: bool,
     pub(super) protocol: ImageProtocol,
     passthrough: Passthrough,
+    // Shared resource policy: decode/transform/cache/output ceilings.
+    pub(super) limits: ResourceLimits,
     // Source I/O and fallback transitions are shared by every output mode.
     pub(super) image_manager: ImageManager,
     native_cache: HashMap<NativeKey, CachedPayload>,
@@ -275,6 +298,41 @@ impl Renderer {
     }
 
     pub fn with_config(viewport: Size, config: RendererConfig) -> Result<Self, FrameError> {
+        // Validate the configuration before allocating any cell or native
+        // resource. A cell pixel size that can never satisfy the transform
+        // budget is rejected here rather than failing later during a resize.
+        config
+            .limits
+            .validate()
+            .map_err(|error| FrameError::Config {
+                detail: error.to_string().into(),
+            })?;
+        if let Some(size) = config.cell_pixel_size {
+            if size.width == 0 {
+                return Err(FrameError::Config {
+                    detail: "cell pixel width must be nonzero".into(),
+                });
+            }
+            if size.height == 0 {
+                return Err(FrameError::Config {
+                    detail: "cell pixel height must be nonzero".into(),
+                });
+            }
+            // The renderer must be able to transform a raster that fills the
+            // viewport; that is the geometry every frame can actually request.
+            // A single oversized source is refused later, per transform, by
+            // the same budget.
+            let viewport_pixels = u64::from(viewport.width)
+                .saturating_mul(u64::from(viewport.height))
+                .saturating_mul(u64::from(size.width))
+                .saturating_mul(u64::from(size.height));
+            if viewport_pixels > config.limits.max_transform_pixels {
+                return Err(FrameError::Config {
+                    detail: "renderer cell pixel size cannot satisfy the transform pixel budget"
+                        .into(),
+                });
+            }
+        }
         let cells = blank_cells(viewport)?;
         let cell_count = cells.len();
         let (protocol, passthrough) = detect_terminal(config.image_protocol);
@@ -308,7 +366,8 @@ impl Renderer {
             full_redraw: true,
             protocol,
             passthrough,
-            image_manager: ImageManager::new(),
+            limits: config.limits,
+            image_manager: ImageManager::with_limits(config.limits),
             native_cache: HashMap::new(),
             native_cache_bytes: 0,
             native_cache_limit: config.image_cache_bytes,
@@ -325,6 +384,20 @@ impl Renderer {
             kitty: KittyBackend::new(),
             emoji_merging: config.emoji_merging,
         })
+    }
+
+    // Structured, bounded observability for the image pipeline. Labels are
+    // stage/kind only; no path or text content is exposed.
+    pub fn image_metrics(&self) -> ImageMetrics {
+        ImageMetrics {
+            in_flight_bytes: self.image_manager.bytes_in_flight(),
+            cached_source_bytes: self.image_manager.source_cache_bytes(),
+            prepared_bytes: self.prepared_bytes,
+            native_cache_bytes: self.native_cache_bytes,
+            pending_sources: self.image_manager.pending_count(),
+            max_in_flight_bytes: self.limits.max_in_flight_image_bytes,
+            max_cache_bytes: self.image_manager.limits().max_cache_bytes,
+        }
     }
 
     pub fn viewport(&self) -> Size {
@@ -739,13 +812,17 @@ impl Renderer {
             return Some(key);
         }
         let source = self.source_image(&raster.source)?;
+        // A transform that cannot fit the configured budget is refused here,
+        // before its pixel buffer is reserved.
         let pixels = render_rgba_with_cell_size(
             &source,
             raster.full_width,
             raster.full_height,
             raster.options,
             self.cell_pixels,
-        );
+            &self.limits,
+        )
+        .ok()?;
         let mut alpha_cells =
             vec![false; usize::from(raster.full_width) * usize::from(raster.full_height)];
         for line in 0..usize::from(raster.full_height) {

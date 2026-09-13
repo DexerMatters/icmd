@@ -15,4 +15,6 @@ pub use pipeline::{
     PipelineComponent, Runtime, RuntimeError, RuntimeHandle, ShutdownPolicy, Stage,
     live_worker_count,
 };
-pub use renderer::{ChannelRenderer, FrameError, Renderer, RendererConfig, SurfaceKind};
+pub use renderer::{
+    ChannelRenderer, FrameError, ImageMetrics, Renderer, RendererConfig, SurfaceKind,
+};

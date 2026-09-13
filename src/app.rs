@@ -19,9 +19,9 @@ use crossterm::{
 };
 
 use crate::{
-    Commit, CommitConfig, Component, ComponentContext, EmojiMerging, FrameError, ImageProtocol,
-    ImageUpdatePolicy, Lower, Node, Props, Renderer, RendererConfig, Runtime, RuntimeError,
-    ShutdownPolicy, Size,
+    Commit, CommitConfig, Component, ComponentContext, ConfigError, EmojiMerging, FrameError,
+    ImageProtocol, ImageUpdatePolicy, Lower, Node, Props, Renderer, RendererConfig, ResourceLimits,
+    Runtime, RuntimeError, ShutdownPolicy, Size,
 };
 
 #[derive(Debug, Clone)]
@@ -36,6 +36,9 @@ pub struct RuntimeConfig {
     pub image_cache_bytes: usize,
     pub image_update_policy: ImageUpdatePolicy,
     pub emoji_merging: EmojiMerging,
+    // Hard resource ceilings for the whole runtime. Invalid combinations are
+    // rejected by `validate` before any thread or terminal mode exists.
+    pub limits: ResourceLimits,
 }
 
 impl Default for RuntimeConfig {
@@ -51,6 +54,7 @@ impl Default for RuntimeConfig {
             image_cache_bytes: 64 * 1024 * 1024,
             image_update_policy: ImageUpdatePolicy::Adaptive,
             emoji_merging: EmojiMerging::default(),
+            limits: ResourceLimits::default(),
         }
     }
 }
@@ -74,6 +78,8 @@ pub enum RenderError {
     ApplicationCallback(&'static str),
     /// A pipeline stage failed or was not joined; the typed cause is preserved.
     Stage(RuntimeError),
+    /// The configuration could not produce a valid runtime.
+    Config(ConfigError),
 }
 
 impl fmt::Display for RenderError {
@@ -84,6 +90,7 @@ impl fmt::Display for RenderError {
             Self::RuntimeClosed => write!(f, "rendering runtime stopped unexpectedly"),
             Self::ApplicationCallback(detail) => write!(f, "application callback failed: {detail}"),
             Self::Stage(error) => write!(f, "runtime stage failed: {error}"),
+            Self::Config(error) => write!(f, "invalid runtime configuration: {error}"),
         }
     }
 }
@@ -95,6 +102,7 @@ impl Error for RenderError {
             Self::Frame(error) => Some(error),
             Self::RuntimeClosed | Self::ApplicationCallback(_) => None,
             Self::Stage(error) => Some(error),
+            Self::Config(error) => Some(error),
         }
     }
 }
@@ -192,7 +200,31 @@ fn receive_frame(
     }
 }
 
+impl RuntimeConfig {
+    // Validate configuration before any side effect exists: no thread, no raw
+    // mode, no alternate screen. A rejected configuration is an ordinary error.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.limits.validate()?;
+        let poll = self.poll_interval;
+        // A zero interval busy-spins; an enormous one makes input latency
+        // unbounded. Both are rejected rather than silently clamped.
+        if poll.is_zero() || poll > Duration::from_secs(60) {
+            return Err(ConfigError::InvalidPollInterval {
+                millis: poll.as_millis(),
+            });
+        }
+        Ok(())
+    }
+}
+
+// Validate configuration before any side effect exists: no thread, no raw
+// mode, no alternate screen. A rejected configuration is an ordinary error.
+fn validate_config(config: &RuntimeConfig) -> Result<(), RenderError> {
+    config.validate().map_err(RenderError::Config)
+}
+
 pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), RenderError> {
+    validate_config(&config)?;
     let viewport = terminal::size().map(|(width, height)| Size::new(width, height))?;
     let mut terminal = TerminalSession::enter(config.clone())?;
     let (commit, _, dispatcher) = Commit::with_config_and_events(
@@ -212,6 +244,7 @@ pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), Render
             // value for deterministic tests.
             cell_pixel_size: None,
             emoji_merging: config.emoji_merging,
+            limits: config.limits,
         },
     )
     .map_err(RenderError::Frame)?;

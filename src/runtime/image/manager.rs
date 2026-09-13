@@ -1,10 +1,12 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
     thread,
 };
 
 use crossbeam_channel::{Receiver, Sender};
 
+use crate::ResourceLimits;
 use crate::raster::ImageSourceKey;
 use crate::{Cell, Image, ImageSource, RasterImage, RasterImageError, RasterPlacement};
 
@@ -26,11 +28,12 @@ struct ImageLoader {
 }
 
 impl ImageLoader {
-    fn new() -> Self {
-        Self::with_workers(2, None)
-    }
-
-    fn with_workers(workers: usize, gate: Option<Receiver<()>>) -> Self {
+    fn with_workers(
+        workers: usize,
+        gate: Option<Receiver<()>>,
+        limits: ResourceLimits,
+        budget: Arc<ByteBudget>,
+    ) -> Self {
         let (jobs, job_rx) = crossbeam_channel::bounded::<ImageSource>(32);
         // Bounded results: decoded pixels cannot accumulate without limit while
         // the renderer is busy. Workers block once the queue is full, which is
@@ -40,19 +43,30 @@ impl ImageLoader {
             let job_rx = job_rx.clone();
             let result_tx = result_tx.clone();
             let gate = gate.clone();
-            thread::spawn(move || {
-                while let Ok(source) = job_rx.recv() {
-                    if let Some(gate) = &gate {
-                        // Test-only stall point: a disconnected gate releases
-                        // every present and future job.
-                        let _ = gate.recv();
+            let budget = budget.clone();
+            thread::Builder::new()
+                .name("icmd-image-loader".to_string())
+                .spawn(move || {
+                    while let Ok(source) = job_rx.recv() {
+                        if let Some(gate) = &gate {
+                            // Test-only stall point: a disconnected gate
+                            // releases every present and future job.
+                            let _ = gate.recv();
+                        }
+                        let result = source.load_with_limits(&limits);
+                        // The reservation is released as soon as the decoded
+                        // pixels leave this worker, on every return path.
+                        let bytes = result
+                            .as_ref()
+                            .map(|image| image.rgba8().len())
+                            .unwrap_or(0);
+                        let _reservation = budget.reserve(bytes).ok();
+                        if result_tx.send((source, result)).is_err() {
+                            break;
+                        }
                     }
-                    let result = source.load();
-                    if result_tx.send((source, result)).is_err() {
-                        break;
-                    }
-                }
-            });
+                })
+                .expect("failed to spawn image loader");
         }
         Self { jobs, results }
     }
@@ -63,6 +77,69 @@ impl ImageLoader {
             Err(crossbeam_channel::TrySendError::Full(_)) => ScheduleResult::Backpressured,
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => ScheduleResult::Closed,
         }
+    }
+}
+
+// Concurrency-safe byte accounting shared by every image worker. A reservation
+// is RAII: capacity returns to the pool when the decoded buffer is dropped, on
+// both the success and failure paths.
+#[derive(Debug)]
+pub(crate) struct ByteBudget {
+    limit: usize,
+    used: std::sync::atomic::AtomicUsize,
+}
+
+impl ByteBudget {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            used: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Result<ByteReservation, ()> {
+        let mut current = self.used.load(std::sync::atomic::Ordering::SeqCst);
+        loop {
+            // `checked_add` keeps an accounting overflow from wrapping into a
+            // silently small value.
+            let Some(next) = current.checked_add(bytes) else {
+                return Err(());
+            };
+            if next > self.limit {
+                return Err(());
+            }
+            match self.used.compare_exchange_weak(
+                current,
+                next,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    return Ok(ByteReservation {
+                        budget: self.clone(),
+                        bytes,
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    pub(crate) fn used(&self) -> usize {
+        self.used.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+pub(crate) struct ByteReservation {
+    budget: Arc<ByteBudget>,
+    bytes: usize,
+}
+
+impl Drop for ByteReservation {
+    fn drop(&mut self) {
+        self.budget
+            .used
+            .fetch_sub(self.bytes, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -95,6 +172,8 @@ pub(crate) enum SourceRequest {
 #[derive(Debug)]
 pub(crate) struct ImageManager {
     loader: ImageLoader,
+    limits: ResourceLimits,
+    budget: Arc<ByteBudget>,
     // Keyed by cache identity, so two spellings of the same opened file share
     // one load and one entry.
     source_cache: HashMap<ImageSourceKey, SourceCacheEntry>,
@@ -108,13 +187,17 @@ pub(crate) struct ImageManager {
 }
 
 impl ImageManager {
-    pub(crate) fn new() -> Self {
-        Self::with_loader(ImageLoader::new())
+    pub(crate) fn with_limits(limits: ResourceLimits) -> Self {
+        let budget = Arc::new(ByteBudget::new(limits.max_in_flight_image_bytes));
+        let loader = ImageLoader::with_workers(2, None, limits, budget.clone());
+        Self::with_loader(loader, limits, budget)
     }
 
-    fn with_loader(loader: ImageLoader) -> Self {
+    fn with_loader(loader: ImageLoader, limits: ResourceLimits, budget: Arc<ByteBudget>) -> Self {
         Self {
             loader,
+            limits,
+            budget,
             source_cache: HashMap::new(),
             source_cache_bytes: 0,
             loading: HashSet::new(),
@@ -274,7 +357,14 @@ impl ImageManager {
         self.source_cache_bytes
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn bytes_in_flight(&self) -> usize {
+        self.budget.used()
+    }
+
+    pub(crate) fn limits(&self) -> &ResourceLimits {
+        &self.limits
+    }
+
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -327,7 +417,10 @@ mod tests {
     fn a_full_queue_is_backpressure_not_failure() {
         // Two workers, both stalled; the 32-slot job queue then fills up.
         let (gate_tx, gate_rx) = crossbeam_channel::bounded(0);
-        let mut manager = ImageManager::with_loader(ImageLoader::with_workers(2, Some(gate_rx)));
+        let limits = ResourceLimits::default();
+        let budget = Arc::new(ByteBudget::new(limits.max_in_flight_image_bytes));
+        let loader = ImageLoader::with_workers(2, Some(gate_rx), limits, budget.clone());
+        let mut manager = ImageManager::with_loader(loader, limits, budget);
         let mut backpressured = None;
         for index in 0..64 {
             let outcome = manager.request(&source(&index.to_string()));
@@ -374,7 +467,10 @@ mod tests {
     fn a_disconnected_queue_reports_closed() {
         // Zero workers drop the job receiver immediately, so scheduling has no
         // destination at all.
-        let mut manager = ImageManager::with_loader(ImageLoader::with_workers(0, None));
+        let limits = ResourceLimits::default();
+        let budget = Arc::new(ByteBudget::new(limits.max_in_flight_image_bytes));
+        let loader = ImageLoader::with_workers(0, None, limits, budget.clone());
+        let mut manager = ImageManager::with_loader(loader, limits, budget);
         assert_eq!(manager.request(&source("closed")), SourceRequest::Closed);
         // A closed queue is not a decode failure and must not be cached as one.
         assert!(manager.source_image(&source("closed")).is_none());

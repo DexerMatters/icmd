@@ -11,6 +11,7 @@ use std::{
 
 use crossterm::style::{Attributes, Color};
 
+use crate::runtime::limits::{LimitError, ResourceLimits};
 use crate::{Cell, Image, Size};
 
 static NEXT_RASTER_ID: AtomicU64 = AtomicU64::new(1);
@@ -37,6 +38,8 @@ pub enum RasterImageError {
         path: PathBuf,
         source: Arc<std::io::Error>,
     },
+    // A configured resource ceiling rejected the work before allocating.
+    Limit(LimitError),
     ChafaUnavailable,
 }
 
@@ -52,6 +55,10 @@ impl RasterImageError {
             path: path.to_path_buf(),
             source: Arc::new(error),
         }
+    }
+
+    fn limit(error: LimitError) -> Self {
+        Self::Limit(error)
     }
 }
 
@@ -70,6 +77,7 @@ impl fmt::Display for RasterImageError {
             Self::Io { path, source } => {
                 write!(f, "could not read image {}: {source}", path.display())
             }
+            Self::Limit(error) => write!(f, "{error}"),
             Self::ChafaUnavailable => write!(f, "Chafa could not create an image canvas"),
         }
     }
@@ -80,12 +88,37 @@ impl Error for RasterImageError {
         match self {
             Self::Decode { source } => Some(source.as_ref()),
             Self::Io { source, .. } => Some(source.as_ref()),
+            Self::Limit(error) => Some(error),
             Self::Empty
             | Self::InvalidLength { .. }
             | Self::DimensionsTooLarge { .. }
             | Self::ChafaUnavailable => None,
         }
     }
+}
+
+// Configure the decoder from framework policy and enforce the dimension and
+// decoded-byte ceilings from the actual header before the pixel buffer exists.
+fn decode_reader<R: std::io::BufRead + std::io::Seek>(
+    mut reader: ::image::ImageReader<R>,
+    limits: &ResourceLimits,
+) -> Result<::image::RgbaImage, RasterImageError> {
+    let mut image_limits = ::image::Limits::default();
+    image_limits.max_image_width = Some(limits.max_source_width);
+    image_limits.max_image_height = Some(limits.max_source_height);
+    image_limits.max_alloc = Some(limits.max_decoded_image_bytes as u64);
+    reader.limits(image_limits);
+    let decoded = reader
+        .decode()
+        .map_err(RasterImageError::decode)?
+        .to_rgba8();
+    limits
+        .check_source_size(decoded.width(), decoded.height())
+        .map_err(RasterImageError::limit)?;
+    limits
+        .check_decoded_bytes(decoded.as_raw().len())
+        .map_err(RasterImageError::limit)?;
+    Ok(decoded)
 }
 
 #[derive(Clone)]
@@ -149,9 +182,23 @@ impl RasterImage {
     }
 
     pub fn decode(bytes: impl AsRef<[u8]>) -> Result<Self, RasterImageError> {
-        let decoded = ::image::load_from_memory(bytes.as_ref())
-            .map_err(RasterImageError::decode)?
-            .to_rgba8();
+        Self::decode_with_limits(bytes.as_ref(), &ResourceLimits::default())
+    }
+
+    // Decoding a byte slice consults the same header/dimension/byte budgets as
+    // file loading. The reader is configured from the policy rather than the
+    // dependency's defaults, so the framework can state its own upper bound.
+    pub fn decode_with_limits(
+        bytes: &[u8],
+        limits: &ResourceLimits,
+    ) -> Result<Self, RasterImageError> {
+        limits
+            .check_encoded_bytes(bytes.len() as u64)
+            .map_err(RasterImageError::limit)?;
+        let reader = ::image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|error| RasterImageError::io(Path::new("<memory>"), error))?;
+        let decoded = decode_reader(reader, limits)?;
         Self::from_rgba8(decoded.width(), decoded.height(), decoded.into_raw())
     }
 
@@ -160,9 +207,26 @@ impl RasterImage {
     // the link is traversed, so folding `..` textually can select a different
     // file than the kernel would. The original path is preserved in errors.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RasterImageError> {
+        Self::open_with_limits(path, &ResourceLimits::default())
+    }
+
+    pub fn open_with_limits(
+        path: impl AsRef<Path>,
+        limits: &ResourceLimits,
+    ) -> Result<Self, RasterImageError> {
         let path = path.as_ref();
-        let bytes = fs::read(path).map_err(|error| RasterImageError::io(path, error))?;
-        Self::decode(bytes)
+        // Reject an oversized encoded file from metadata before reading it, so
+        // a huge file never becomes a huge buffer.
+        let metadata = fs::metadata(path).map_err(|error| RasterImageError::io(path, error))?;
+        limits
+            .check_encoded_bytes(metadata.len())
+            .map_err(RasterImageError::limit)?;
+        let file = fs::File::open(path).map_err(|error| RasterImageError::io(path, error))?;
+        let reader = ::image::ImageReader::new(std::io::BufReader::new(file))
+            .with_guessed_format()
+            .map_err(|error| RasterImageError::io(path, error))?;
+        let decoded = decode_reader(reader, limits)?;
+        Self::from_rgba8(decoded.width(), decoded.height(), decoded.into_raw())
     }
 
     pub const fn width(&self) -> u32 {
@@ -230,10 +294,13 @@ impl ImageSource {
         }
     }
 
-    pub(crate) fn load(&self) -> Result<RasterImage, RasterImageError> {
+    pub(crate) fn load_with_limits(
+        &self,
+        limits: &ResourceLimits,
+    ) -> Result<RasterImage, RasterImageError> {
         match self {
             Self::Loaded(image) => Ok(image.clone()),
-            Self::File(path) => RasterImage::open(path.as_path()),
+            Self::File(path) => RasterImage::open_with_limits(path.as_path(), limits),
         }
     }
 
@@ -413,7 +480,7 @@ pub(crate) fn symbols_tile(
     if width == 0 || height == 0 {
         return Err(RasterImageError::Empty);
     }
-    let full = render_rgba(source, full_width, full_height, options);
+    let full = render_rgba(source, full_width, full_height, options)?;
     let pixels = crop_rgba(&full, column, line, width, height);
     symbols_from_rgba(
         &pixels,
@@ -577,30 +644,70 @@ pub(crate) fn render_rgba(
     full_width: u16,
     full_height: u16,
     options: ImageRenderOptions,
-) -> RasterPixels {
-    render_rgba_with_cell_size(source, full_width, full_height, options, Size::new(8, 16))
+) -> Result<RasterPixels, RasterImageError> {
+    render_rgba_with_cell_size(
+        source,
+        full_width,
+        full_height,
+        options,
+        Size::new(8, 16),
+        &ResourceLimits::default(),
+    )
 }
 
+// Every dimension and byte count is checked before allocation. Saturating
+// multiplication is deliberately avoided: it turns an invalid request into a
+// huge allocation instead of a typed error. The output buffer is reserved
+// fallibly, so a capacity failure is a resource error, not a process abort.
 pub(crate) fn render_rgba_with_cell_size(
     source: &RasterImage,
     full_width: u16,
     full_height: u16,
     options: ImageRenderOptions,
     cell_pixels: Size,
-) -> RasterPixels {
-    let width = u32::from(full_width)
-        .saturating_mul(u32::from(cell_pixels.width.max(1)))
-        .max(1);
-    let height = u32::from(full_height)
-        .saturating_mul(u32::from(cell_pixels.height.max(1)))
-        .max(1);
-    let mut full = vec![0; width.saturating_mul(height).saturating_mul(4) as usize];
+    limits: &ResourceLimits,
+) -> Result<RasterPixels, RasterImageError> {
+    let cell_width = u64::from(cell_pixels.width.max(1));
+    let cell_height = u64::from(cell_pixels.height.max(1));
+    let width_u64 = (u64::from(full_width) * cell_width).max(1);
+    let height_u64 = (u64::from(full_height) * cell_height).max(1);
+    let width = u32::try_from(width_u64).unwrap_or(u32::MAX);
+    let height = u32::try_from(height_u64).unwrap_or(u32::MAX);
+    limits
+        .check_source_size(width, height)
+        .map_err(RasterImageError::limit)?;
+    let bytes = ResourceLimits::checked_area(width, height)
+        .and_then(|pixels| {
+            pixels.checked_mul(4).ok_or(LimitError::Overflow {
+                what: "RGBA byte length",
+            })
+        })
+        .map_err(RasterImageError::limit)?;
+    let bytes = usize::try_from(bytes).map_err(|_| {
+        RasterImageError::limit(LimitError::Overflow {
+            what: "RGBA byte length",
+        })
+    })?;
+    let mut full: Vec<u8> = Vec::new();
+    full.try_reserve_exact(bytes).map_err(|_| {
+        RasterImageError::limit(LimitError::Exceeded {
+            resource: crate::ImageResource::TransformPixels,
+            limit: limits.max_transform_pixels,
+            requested: bytes as u64,
+        })
+    })?;
+    full.resize(bytes, 0);
     let source_image = ::image::ImageBuffer::<::image::Rgba<u8>, _>::from_raw(
         source.width(),
         source.height(),
         source.rgba8(),
     )
-    .expect("RasterImage validates RGBA8 length");
+    .ok_or(RasterImageError::InvalidLength {
+        expected: (source.width() as usize)
+            .saturating_mul(source.height() as usize)
+            .saturating_mul(4),
+        actual: source.rgba8().len(),
+    })?;
     let (scaled_width, scaled_height) =
         scaled_size(source.width(), source.height(), width, height, options.fit);
     let scaled = ::image::imageops::resize(
@@ -625,10 +732,10 @@ pub(crate) fn render_rgba_with_cell_size(
             full[dst..dst + 4].copy_from_slice(&scaled.get_pixel(x, y).0);
         }
     }
-    RasterPixels {
+    Ok(RasterPixels {
         width,
         pixels: full,
-    }
+    })
 }
 
 pub(crate) fn crop_rgba(
@@ -694,5 +801,144 @@ fn packed_color(value: i32) -> Color {
             g: ((value >> 8) & 0xff) as u8,
             b: (value & 0xff) as u8,
         }
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    fn tiny() -> RasterImage {
+        RasterImage::from_rgba8(2, 2, vec![0u8; 16]).unwrap()
+    }
+
+    #[test]
+    fn transform_boundary_succeeds_and_one_past_fails() {
+        let source = tiny();
+        let limits = ResourceLimits {
+            max_source_pixels: 64,
+            max_transform_pixels: 64,
+            max_decoded_image_bytes: 64 * 4,
+            max_in_flight_image_bytes: 64 * 4,
+            max_source_width: 64,
+            max_source_height: 64,
+            ..ResourceLimits::default()
+        };
+        // 2x2 cells at 4x4 pixels = 8x8 = 64 pixels, exactly the budget.
+        let ok = render_rgba_with_cell_size(
+            &source,
+            2,
+            2,
+            ImageRenderOptions::default(),
+            Size::new(4, 4),
+            &limits,
+        )
+        .expect("exactly at the budget must succeed");
+        assert_eq!(ok.width, 8);
+
+        // One cell more exceeds the transform pixel budget.
+        let error = render_rgba_with_cell_size(
+            &source,
+            3,
+            3,
+            ImageRenderOptions::default(),
+            Size::new(4, 4),
+            &limits,
+        )
+        .expect_err("one past the budget must fail");
+        assert!(matches!(error, RasterImageError::Limit(_)), "{error:?}");
+    }
+
+    #[test]
+    fn transform_dimension_overflow_is_a_typed_error() {
+        let source = tiny();
+        // u16::MAX cells at a large cell size overflows any sane budget; the
+        // checked width must report a limit error instead of allocating.
+        let limits = ResourceLimits {
+            max_source_width: 1,
+            max_source_height: 1,
+            ..ResourceLimits::default()
+        };
+        let error = render_rgba_with_cell_size(
+            &source,
+            u16::MAX,
+            u16::MAX,
+            ImageRenderOptions::default(),
+            Size::new(u16::MAX, u16::MAX),
+            &limits,
+        )
+        .expect_err("overflow must not allocate");
+        assert!(matches!(error, RasterImageError::Limit(_)), "{error:?}");
+    }
+
+    #[test]
+    fn decoded_bytes_boundary_is_enforced() {
+        let limits = ResourceLimits {
+            max_decoded_image_bytes: 16,
+            max_in_flight_image_bytes: 16,
+            ..ResourceLimits::default()
+        };
+        // 2x2 RGBA is exactly 16 bytes.
+        assert!(RasterImage::from_rgba8(2, 2, vec![0u8; 16]).is_ok());
+        limits.check_decoded_bytes(16).unwrap();
+        assert!(limits.check_decoded_bytes(17).is_err());
+    }
+
+    // A tiny file can still declare enormous dimensions in its header. The
+    // decoder must refuse it from the header, before any pixel buffer exists.
+    #[test]
+    fn a_crafted_huge_header_never_allocates_the_declared_size() {
+        // PNG signature + IHDR with 100_000 x 100_000.
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&13u32.to_be_bytes());
+        ihdr.extend_from_slice(b"IHDR");
+        ihdr.extend_from_slice(&100_000u32.to_be_bytes());
+        ihdr.extend_from_slice(&100_000u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        ihdr.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&ihdr);
+        assert!(bytes.len() < 64, "the crafted input stays tiny");
+
+        let limits = ResourceLimits {
+            max_source_width: 4096,
+            max_source_height: 4096,
+            max_source_pixels: 4096 * 4096,
+            ..ResourceLimits::default()
+        };
+        let error = RasterImage::decode_with_limits(&bytes, &limits)
+            .expect_err("a 10-gigapixel header must be rejected");
+        // Either the reader's configured header limit or the framework's own
+        // check rejects it; both are typed resource/decode errors, never an
+        // allocation of the declared shape.
+        assert!(
+            matches!(
+                error,
+                RasterImageError::Limit(_) | RasterImageError::Decode { .. }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn file_source_budget_is_checked_before_reading() {
+        let limits = ResourceLimits {
+            max_encoded_image_bytes: 4,
+            ..ResourceLimits::default()
+        };
+        let source = ImageSource::file("examples/res/amber.jpg");
+        let error = source
+            .load_with_limits(&limits)
+            .expect_err("an oversized file must be rejected before reading it");
+        assert!(
+            matches!(
+                error,
+                RasterImageError::Limit(LimitError::Exceeded {
+                    resource: crate::ImageResource::EncodedBytes,
+                    ..
+                })
+            ),
+            "{error:?}"
+        );
     }
 }
