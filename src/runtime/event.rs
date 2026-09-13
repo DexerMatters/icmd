@@ -395,7 +395,7 @@ impl EventDispatcher {
 
     pub fn dispatch(&self, event: Event) -> DispatchOutcome {
         match event {
-            Event::Mouse(event) => DispatchOutcome::from_delivered(self.dispatch_mouse(event)),
+            Event::Mouse(event) => self.dispatch_mouse(event),
             Event::Key(event) => self.dispatch_key(KeyboardEvent { key: event }),
             Event::Paste(value) => {
                 DispatchOutcome::from_delivered(self.dispatch_paste(PasteEvent { text: value }))
@@ -608,12 +608,22 @@ impl EventDispatcher {
             .map(|capture| capture.target)
     }
 
-    fn dispatch_mouse(&self, event: MouseEvent) -> usize {
+    fn dispatch_mouse(&self, event: MouseEvent) -> DispatchOutcome {
         let mut pointer_deliveries = Vec::new();
         let mut wheel_deliveries = Vec::new();
         let mut scroll_deliveries = Vec::new();
         let mut focus_target = None;
         let mut scroll_changed = false;
+        // A wheel scroll applies its offset while routing, before listeners run.
+        // The snapshot lets a listener that calls `prevent_default` restore the
+        // offset it refused, so the built-in scroll action is genuinely
+        // suppressible instead of already committed.
+        let wheel_offsets_before = wheel_delta(event.kind).map(|_| {
+            self.scroll_offsets
+                .lock()
+                .expect("scroll mutex poisoned")
+                .clone()
+        });
 
         {
             let mut state = self.state.write().expect("event registry poisoned");
@@ -937,27 +947,60 @@ impl EventDispatcher {
         }
 
         // DOM ordering puts pointerdown (and its capture lifecycle) before
-        // the focus transition caused by the press.
+        // the focus transition caused by the press. Every event family shares
+        // one propagation frame, so a listener can stop propagation or prevent
+        // the framework's default action for pointer and wheel events too.
+        let dispatch = crate::basic::events::begin_dispatch();
         let mut count = 0;
         for (listener, event) in pointer_deliveries {
             listener.call(event);
             count += 1;
+            if crate::basic::events::propagation_stopped() {
+                break;
+            }
         }
-        for (listener, event) in wheel_deliveries {
-            listener.call(event);
-            count += 1;
+        if !crate::basic::events::propagation_stopped() {
+            for (listener, event) in wheel_deliveries {
+                listener.call(event);
+                count += 1;
+                if crate::basic::events::propagation_stopped() {
+                    break;
+                }
+            }
         }
-        for (listener, event) in scroll_deliveries {
-            listener.call(event);
-            count += 1;
+        if !crate::basic::events::propagation_stopped() {
+            for (listener, event) in scroll_deliveries {
+                listener.call(event);
+                count += 1;
+                if crate::basic::events::propagation_stopped() {
+                    break;
+                }
+            }
         }
-        if scroll_changed {
+        let stopped = crate::basic::events::propagation_stopped();
+        let prevented = crate::basic::events::default_prevented();
+        drop(dispatch);
+
+        // A prevented default suppresses the built-in action: focus-on-press and
+        // the scroll the runtime applied for a wheel event.
+        if prevented && let Some(before) = wheel_offsets_before {
+            *self.scroll_offsets.lock().expect("scroll mutex poisoned") = before;
+            scroll_changed = false;
+        }
+        if scroll_changed && !prevented {
             self.viewport.request_redraw();
         }
-        if let Some(target) = focus_target {
+        if let Some(target) = focus_target
+            && !prevented
+        {
             count += self.change_focus(target).1;
         }
-        count
+        DispatchOutcome {
+            delivered: count,
+            propagation_stopped: stopped,
+            default_prevented: prevented,
+            redraw_requested: scroll_changed && !prevented,
+        }
     }
 
     fn dispatch_key(&self, event: KeyboardEvent) -> DispatchOutcome {
@@ -996,41 +1039,45 @@ impl EventDispatcher {
 
         // The guard restores thread-local propagation state on every exit path,
         // including a listener that unwinds.
-        let dispatch = KeyboardEvent::begin_dispatch();
+        let dispatch = crate::basic::events::begin_dispatch();
         let mut count = 0;
         // Target-specific handlers run first, allowing an editor to consume a
         // key before application-level keyboard listeners see it.
         for listener in key_callbacks {
             listener.call(event);
             count += 1;
-            if KeyboardEvent::propagation_stopped() {
+            if crate::basic::events::propagation_stopped() {
                 break;
             }
         }
-        if !KeyboardEvent::propagation_stopped() {
+        if !crate::basic::events::propagation_stopped() {
             for listener in keyboard_callbacks {
                 listener.call(event);
                 count += 1;
-                if KeyboardEvent::propagation_stopped() {
+                if crate::basic::events::propagation_stopped() {
                     break;
                 }
             }
         }
         // Application-global shortcuts run last, and only when no focused
         // widget consumed the key.
-        if !KeyboardEvent::propagation_stopped() {
+        if !crate::basic::events::propagation_stopped() {
             for listener in app_callbacks {
                 listener.call(event);
                 count += 1;
-                if KeyboardEvent::propagation_stopped() {
+                if crate::basic::events::propagation_stopped() {
                     break;
                 }
             }
         }
-        let consumed = KeyboardEvent::propagation_stopped();
+        let consumed = crate::basic::events::propagation_stopped();
+        let prevented = crate::basic::events::default_prevented();
         drop(dispatch);
 
+        // A listener that prevented the default suppresses the built-in
+        // keyboard scrolling for this key.
         if !consumed
+            && !prevented
             && let Some(target) = target
             && matches!(
                 event.key.kind,
@@ -1066,7 +1113,7 @@ impl EventDispatcher {
         DispatchOutcome {
             delivered: count,
             propagation_stopped: consumed,
-            default_prevented: false,
+            default_prevented: prevented,
             redraw_requested: scroll_changed,
         }
     }

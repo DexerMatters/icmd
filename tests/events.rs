@@ -335,3 +335,165 @@ fn focus_transitions_report_a_structured_outcome() {
     drop(input);
     let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
 }
+
+// API-04: every event family shares one propagation frame, so pointer and wheel
+// events can stop propagation and prevent their default action, not only
+// keyboard events.
+#[test]
+fn pointer_events_can_stop_propagation() {
+    let viewport = Size::new(20, 5);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    let outer = Arc::new(AtomicUsize::new(0));
+    let inner = Arc::new(AtomicUsize::new(0));
+    let outer_for_listener = outer.clone();
+    let inner_for_listener = inner.clone();
+
+    let child = icmd::view
+        .events(move |events| {
+            events.pointer_down /= EventListener::new(move |event: icmd::PointerEvent| {
+                inner_for_listener.fetch_add(1, Ordering::SeqCst);
+                event.stop_propagation();
+            });
+        })
+        .apply(
+            icmd::Props::new(()).with_dom(icmd::DomProps::default().with_style(icmd::style(
+                |style| {
+                    style.width /= icmd::Dimension::Cells(10);
+                    style.height /= icmd::Dimension::Cells(3);
+                },
+            ))),
+        );
+    let node = icmd::view
+        .events(move |events| {
+            events.pointer_down /= EventListener::new(move |_event: icmd::PointerEvent| {
+                outer_for_listener.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .apply(icmd::Props::new(()).children([child]).with_dom(
+            icmd::DomProps::default().with_style(icmd::style(|style| {
+                style.width /= icmd::Dimension::Max;
+                style.height /= icmd::Dimension::Max;
+            })),
+        ));
+    input.send(node).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let outcome = dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(outcome.propagation_stopped, "{outcome:?}");
+    assert_eq!(inner.load(Ordering::SeqCst), 1, "the target heard it");
+    assert_eq!(
+        outer.load(Ordering::SeqCst),
+        0,
+        "an ancestor must not hear a stopped event"
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+}
+
+#[test]
+fn keyboard_events_can_prevent_the_default_action() {
+    // A listener that prevents the default keeps the framework from applying
+    // its built-in behavior; the outcome reports it so callers can react.
+    let viewport = Size::new(20, 5);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    let node = icmd::view
+        .events(move |events| {
+            events.keyboard_event /= EventListener::new(move |event: icmd::KeyboardEvent| {
+                event.prevent_default();
+            });
+        })
+        .apply(
+            icmd::Props::new(()).with_dom(
+                icmd::DomProps::default()
+                    .with_focusable(true)
+                    .with_style(icmd::style(|style| {
+                        style.width /= icmd::Dimension::Max;
+                        style.height /= icmd::Dimension::Max;
+                    })),
+            ),
+        );
+    input.send(node).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // Focus the node, then send a key that would otherwise scroll.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    let outcome = dispatcher.dispatch(Event::Key(KeyEvent::new_with_kind(
+        KeyCode::PageDown,
+        KeyModifiers::empty(),
+        KeyEventKind::Press,
+    )));
+    assert!(outcome.default_prevented, "{outcome:?}");
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+}
+
+#[test]
+fn wheel_scrolling_is_restored_when_default_is_prevented() {
+    let viewport = Size::new(20, 6);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    let area = icmd::scroll_area
+        .props(icmd::ScrollAreaProps {
+            axes: icmd::Attr::Set(icmd::ScrollAxes::Vertical),
+            scrollbar_visibility: icmd::Attr::Set(icmd::ScrollbarVisibility::Hidden),
+            ..icmd::ScrollAreaProps::default()
+        })
+        .style(|style| {
+            style.width /= icmd::Dimension::Cells(18);
+            style.height /= icmd::Dimension::Cells(4);
+        })
+        .children((0..20).map(|index| icmd::text(format!("row {index}"))));
+    // The wheel listener sits on an ancestor, where bubbling reaches it.
+    let node = icmd::view
+        .events(|events| {
+            events.wheel /= EventListener::new(|event: icmd::WheelEvent| {
+                event.prevent_default();
+            });
+        })
+        .apply(icmd::Props::new(()).children([area]).with_dom(
+            icmd::DomProps::default().with_style(icmd::style(|style| {
+                style.width /= icmd::Dimension::Max;
+                style.height /= icmd::Dimension::Max;
+            })),
+        ));
+    input.send(node).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let outcome = dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(outcome.default_prevented, "{outcome:?}");
+    assert!(
+        !outcome.redraw_requested,
+        "a prevented scroll must not request a redraw"
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+}

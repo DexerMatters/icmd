@@ -279,30 +279,46 @@ pub struct KeyboardEvent {
     pub key: KeyEvent,
 }
 
-thread_local! {
-    static KEYBOARD_PROPAGATION: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+// One propagation frame per dispatch, shared by every event family. Every
+// event type can stop propagation and prevent its default action, not just
+// keyboard events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DispatchFrame {
+    pub(crate) stopped: bool,
+    pub(crate) default_prevented: bool,
 }
 
-impl KeyboardEvent {
-    pub fn stop_propagation(&self) {
-        KEYBOARD_PROPAGATION.with(|stack| {
-            if let Some(stopped) = stack.borrow_mut().last_mut() {
-                *stopped = true;
-            }
-        });
-    }
+thread_local! {
+    static PROPAGATION: RefCell<Vec<DispatchFrame>> = const { RefCell::new(Vec::new()) };
+}
 
-    pub(crate) fn propagation_stopped() -> bool {
-        KEYBOARD_PROPAGATION.with(|stack| stack.borrow().last().copied().unwrap_or(false))
-    }
+fn update_frame(update: impl FnOnce(&mut DispatchFrame)) {
+    PROPAGATION.with(|stack| {
+        if let Some(frame) = stack.borrow_mut().last_mut() {
+            update(frame);
+        }
+    });
+}
 
-    // The guard owns the thread-local propagation frame. Because restoration is
-    // tied to `Drop`, an unwinding listener cannot leave stale "stopped" state
-    // behind for the next, unrelated dispatch.
-    pub(crate) fn begin_dispatch() -> PropagationGuard {
-        KEYBOARD_PROPAGATION.with(|stack| stack.borrow_mut().push(false));
-        PropagationGuard { _private: () }
-    }
+pub(crate) fn propagation_stopped() -> bool {
+    PROPAGATION.with(|stack| stack.borrow().last().is_some_and(|frame| frame.stopped))
+}
+
+pub(crate) fn default_prevented() -> bool {
+    PROPAGATION.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .is_some_and(|frame| frame.default_prevented)
+    })
+}
+
+// The guard owns the thread-local propagation frame. Because restoration is
+// tied to `Drop`, an unwinding listener cannot leave stale "stopped" state
+// behind for the next, unrelated dispatch.
+pub(crate) fn begin_dispatch() -> PropagationGuard {
+    PROPAGATION.with(|stack| stack.borrow_mut().push(DispatchFrame::default()));
+    PropagationGuard { _private: () }
 }
 
 pub(crate) struct PropagationGuard {
@@ -311,9 +327,41 @@ pub(crate) struct PropagationGuard {
 
 impl Drop for PropagationGuard {
     fn drop(&mut self) {
-        KEYBOARD_PROPAGATION.with(|stack| {
+        PROPAGATION.with(|stack| {
             stack.borrow_mut().pop();
         });
+    }
+}
+
+// Every event type exposes the same propagation controls.
+macro_rules! propagation_controls {
+    ($($event:ty),+ $(,)?) => {
+        $(
+            impl $event {
+                // Stop the event from reaching further ancestors.
+                pub fn stop_propagation(&self) {
+                    update_frame(|frame| frame.stopped = true);
+                }
+
+                // Prevent the framework's built-in default action for this
+                // event (focus-on-press, wheel scrolling, text editing).
+                pub fn prevent_default(&self) {
+                    update_frame(|frame| frame.default_prevented = true);
+                }
+            }
+        )+
+    };
+}
+
+propagation_controls!(PointerEvent, WheelEvent, ScrollEvent);
+
+impl KeyboardEvent {
+    pub fn stop_propagation(&self) {
+        update_frame(|frame| frame.stopped = true);
+    }
+
+    pub fn prevent_default(&self) {
+        update_frame(|frame| frame.default_prevented = true);
     }
 }
 
