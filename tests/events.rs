@@ -2,6 +2,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -171,6 +172,58 @@ fn reentrant_listener_delivery_terminates_without_deadlock() {
         dispatcher.take_callback_fault(),
         Some("an event listener dispatched an event into itself")
     );
+}
+
+// PERF-06: a deep route performs O(depth) ID lookups rather than rescanning
+// every published region at each ancestry step.
+#[test]
+fn deep_key_routing_scales_with_depth_not_region_count() {
+    let viewport = Size::new(20, 5);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    // A deep chain plus a wide fan of sibling regions at every level.
+    fn nest(depth: usize, width: usize) -> Node {
+        let mut node = Node::element(
+            icmd::DomProps::default().with_focusable(true),
+            Vec::<Node>::new(),
+        );
+        for _ in 0..depth {
+            let mut children: Vec<Node> = (0..width)
+                .map(|_| Node::element(icmd::DomProps::default(), Vec::<Node>::new()))
+                .collect();
+            children.push(node);
+            node = Node::element(icmd::DomProps::default(), children);
+        }
+        node
+    }
+
+    let depth = 40;
+    input.send(nest(depth, 20)).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // Focus the deep leaf, then route a key to it.
+
+    dispatcher.focus(icmd::DomId(0));
+
+    let _ = dispatcher.take_id_probe_count();
+    dispatcher.dispatch(Event::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('x'),
+        KeyModifiers::empty(),
+        KeyEventKind::Press,
+    )));
+    let probes = dispatcher.take_id_probe_count();
+    // One probe per ancestor on the route; a scan-based implementation would
+    // multiply this by the number of published regions.
+    assert!(
+        probes <= (depth as u64) * 8,
+        "deep routing used {probes} ID probes for depth {depth}"
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
 }
 
 #[test]

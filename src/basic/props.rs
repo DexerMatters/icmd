@@ -694,6 +694,29 @@ pub(crate) struct ScrollConfig {
 }
 
 impl DomProps {
+    // `DomProps` holds one private configuration field, so external callers
+    // cannot use a struct literal with `..Default::default()`. These builders
+    // are the supported construction path.
+    pub fn with_style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn with_events(mut self, events: EventHandlers) -> Self {
+        self.events = events;
+        self
+    }
+
+    pub fn with_focusable(mut self, focusable: bool) -> Self {
+        self.focusable = focusable;
+        self
+    }
+
+    pub fn with_autofocus(mut self, autofocus: bool) -> Self {
+        self.autofocus = autofocus;
+        self
+    }
+
     pub fn with_overrides(mut self, overrides: &Self) -> Self {
         self.style = self.style.with_overrides(&overrides.style);
         self.events.merge(&overrides.events);

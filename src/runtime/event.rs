@@ -188,6 +188,11 @@ pub(crate) struct RuntimeScrollOffset {
 #[derive(Default)]
 struct EventState {
     regions: Vec<EventRegion>,
+    // Published ID index. Without it, every ancestry step during routing was a
+    // linear scan of all regions, making a deep route O(depth * regions).
+    by_id: HashMap<DomId, usize>,
+    // Test/diagnostic probe counter for the ID index.
+    id_probes: std::sync::atomic::AtomicU64,
     focused: Option<DomId>,
     captured: Option<PointerCapture>,
     hovered: Option<DomId>,
@@ -257,9 +262,7 @@ impl EventDispatcher {
                 let old = state.focused.take();
                 old.and_then(|id| {
                     state
-                        .regions
-                        .iter()
-                        .find(|region| region.id == id)
+                        .region(id)
                         .and_then(|region| listener(&region.handlers.focus_event))
                 })
             } else {
@@ -308,6 +311,11 @@ impl EventDispatcher {
             {
                 state.hovered = None;
             }
+            state.by_id = regions
+                .iter()
+                .enumerate()
+                .map(|(index, region)| (region.id, index))
+                .collect();
             state.regions = regions;
             // A pending focus request is granted now that the published region
             // set is known, but only while nothing else owns focus.
@@ -321,9 +329,7 @@ impl EventDispatcher {
                 {
                     state.focused = Some(pending);
                     state
-                        .regions
-                        .iter()
-                        .find(|region| region.id == pending)
+                        .region(pending)
                         .and_then(|region| listener(&region.handlers.focus_event))
                 }
                 _ => None,
@@ -396,18 +402,18 @@ impl EventDispatcher {
     fn change_focus(&self, id: DomId) -> (bool, usize) {
         let callbacks = {
             let mut state = self.state.write().expect("event registry poisoned");
-            if !state.regions.iter().any(|region| region.id == id) || state.focused == Some(id) {
+            if state.region(id).is_none() || state.focused == Some(id) {
                 return (false, 0);
             }
             let old = state.focused.replace(id);
             let mut callbacks = Vec::with_capacity(2);
             if let Some(old) = old
-                && let Some(region) = state.regions.iter().find(|region| region.id == old)
+                && let Some(region) = state.region(old)
                 && let Some(listener) = listener(&region.handlers.focus_event)
             {
                 callbacks.push((listener, FocusEvent::Lost));
             }
-            if let Some(region) = state.regions.iter().find(|region| region.id == id)
+            if let Some(region) = state.region(id)
                 && let Some(listener) = listener(&region.handlers.focus_event)
             {
                 callbacks.push((listener, FocusEvent::Gained));
@@ -429,9 +435,7 @@ impl EventDispatcher {
                 return false;
             };
             state
-                .regions
-                .iter()
-                .find(|region| region.id == old)
+                .region(old)
                 .and_then(|region| listener(&region.handlers.focus_event))
         };
         if let Some(listener) = callback {
@@ -442,6 +446,17 @@ impl EventDispatcher {
 
     pub fn focused(&self) -> Option<DomId> {
         self.state.read().expect("event registry poisoned").focused
+    }
+
+    // Number of indexed region lookups since the last call. Used by tests to
+    // prove a deep route is O(route depth), not O(depth * published regions).
+    #[doc(hidden)]
+    pub fn take_id_probe_count(&self) -> u64 {
+        self.state
+            .read()
+            .expect("event registry poisoned")
+            .id_probes
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
     }
 
     // Surface (and clear) the first callback fault recorded during dispatch.
@@ -680,9 +695,7 @@ impl EventDispatcher {
                         state.drag = None;
                         if let Some((source, bar)) = state.scrollbar_at(target, position) {
                             let enable_mouse = state
-                                .regions
-                                .iter()
-                                .find(|region| region.id == source)
+                                .region(source)
                                 .and_then(|region| region.scroll)
                                 .is_some_and(|scroll| scroll.enable_mouse);
                             if enable_mouse {
@@ -1027,7 +1040,7 @@ impl EventDispatcher {
             if !visited.insert(id) {
                 break;
             }
-            let Some(region) = state.regions.iter().find(|region| region.id == id) else {
+            let Some(region) = state.region(id) else {
                 break;
             };
             if let Some(scroll) = region.scroll {
@@ -1163,7 +1176,7 @@ impl EventDispatcher {
             if !visited.insert(id) {
                 break;
             }
-            let Some(region) = state.regions.iter().find(|region| region.id == id) else {
+            let Some(region) = state.region(id) else {
                 break;
             };
             if let Some(scroll) = region.scroll
@@ -1218,7 +1231,7 @@ impl EventDispatcher {
             if !visited.insert(id) {
                 break;
             }
-            let Some(region) = state.regions.iter().find(|region| region.id == id) else {
+            let Some(region) = state.region(id) else {
                 break;
             };
             if let Some(scroll) = region.scroll
@@ -1500,8 +1513,13 @@ fn pointer_slot(
 }
 
 impl EventState {
+    // Indexed lookup: routing walks ancestors and must not rescan every region.
     fn region(&self, id: DomId) -> Option<&EventRegion> {
-        self.regions.iter().find(|region| region.id == id)
+        self.id_probes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.by_id
+            .get(&id)
+            .and_then(|index| self.regions.get(*index))
     }
 
     fn hit_target(&self, position: ScreenPosition) -> Option<DomId> {
@@ -1517,9 +1535,7 @@ impl EventState {
         target: DomId,
         handler: PointerHandler,
     ) -> Option<EventListener<PointerEvent>> {
-        self.regions
-            .iter()
-            .find(|region| region.id == target)
+        self.region(target)
             .and_then(|region| pointer_slot(&region.handlers, handler))
     }
 
@@ -1547,7 +1563,7 @@ impl EventState {
             if !visited.insert(id) {
                 break;
             }
-            let Some(region) = self.regions.iter().find(|region| region.id == id) else {
+            let Some(region) = self.region(id) else {
                 break;
             };
             if region.focusable {
@@ -1581,7 +1597,7 @@ impl EventState {
             if !visited.insert(id) {
                 return false;
             }
-            let Some(region) = self.regions.iter().find(|region| region.id == id) else {
+            let Some(region) = self.region(id) else {
                 return false;
             };
             if region.scroll.is_some() {
@@ -1603,7 +1619,7 @@ impl EventState {
             if !visited.insert(id) {
                 break;
             }
-            let Some(region) = self.regions.iter().find(|region| region.id == id) else {
+            let Some(region) = self.region(id) else {
                 break;
             };
             if let Some(scroll) = region.scroll {
@@ -1637,7 +1653,7 @@ impl EventState {
             if !visited.insert(id) {
                 break;
             }
-            let Some(region) = self.regions.iter().find(|region| region.id == id) else {
+            let Some(region) = self.region(id) else {
                 break;
             };
             if let Some(callback) = listener(&region.handlers) {
