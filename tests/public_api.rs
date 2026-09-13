@@ -51,3 +51,54 @@ fn style_and_event_tiers_are_constructible() {
     let _ = Layout::Vertical;
     let _ = BorderKind::Single;
 }
+
+// API-06: explicit attribute operations replace operator-based mutation, and an
+// explicit `false` can override a default `true`.
+#[test]
+fn attr_operations_distinguish_unset_default_and_explicit() {
+    let mut attr: Attr<bool> = Attr::Unset;
+    assert!(!attr.is_explicit());
+    assert!(!attr.is_set());
+
+    attr.set_default(true);
+    assert_eq!(attr, Attr::Set(true));
+    assert!(attr.is_explicit());
+
+    // `set_default` never overwrites an existing value.
+    attr.set_default(false);
+    assert_eq!(attr, Attr::Set(true));
+
+    // `set` does overwrite, including to an explicit false.
+    attr.set(false);
+    assert_eq!(attr, Attr::Set(false));
+
+    attr.clear();
+    assert_eq!(attr, Attr::Unset);
+    assert!(!attr.is_explicit());
+}
+
+#[test]
+fn focus_override_can_clear_a_default_true() {
+    // The old `focusable: bool` merged with boolean OR, so a caller could never
+    // turn a default-focusable node off.
+    let focusable_default = || icmd::DomProps::default().with_focusable(true);
+    let override_off = icmd::DomProps::default().with_focusable(false);
+    let merged = focusable_default().with_overrides(&override_off);
+    assert_eq!(
+        merged.focusable,
+        Attr::Set(false),
+        "an explicit false must override a default true"
+    );
+
+    // An unset override leaves the default in place.
+    let merged = focusable_default().with_overrides(&icmd::DomProps::default());
+    assert_eq!(merged.focusable, Attr::Set(true));
+
+    // An explicit true overrides a default true and a default false.
+    let off_default = icmd::DomProps::default().with_focusable(false);
+    let on_override = icmd::DomProps::default().with_focusable(true);
+    assert_eq!(
+        off_default.with_overrides(&on_override).focusable,
+        Attr::Set(true)
+    );
+}

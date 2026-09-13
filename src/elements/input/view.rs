@@ -545,7 +545,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
     // attributes below, and the scroll area nested inside it provides scrolling
     // without introducing a second event or focus identity.
     let mut scroll_host = props.host_props(DomProps::default());
-    scroll_host.focusable = !config.policy.disabled;
+    scroll_host.focusable = Attr::Set(!config.policy.disabled);
     // Autofocus is an explicit runtime focus request processed after the region
     // is published; the editor never claims focus merely by receiving a key.
     scroll_host.autofocus = (props.autofocus | false) && !config.policy.disabled;

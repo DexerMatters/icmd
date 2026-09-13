@@ -683,7 +683,9 @@ impl ops::DivAssign<&StylePatch> for Style {
 pub struct DomProps {
     pub style: Style,
     pub events: EventHandlers,
-    pub focusable: bool,
+    // Tri-state so an explicit `false` can override a default `true`. The old
+    // `bool` plus boolean-OR merge made a false override impossible.
+    pub focusable: Attr<bool>,
     // Ask the runtime to focus this region after it is published, if nothing
     // else owns focus. This is the explicit post-publication focus request an
     // input uses to start focused without inferring focus from input delivery.
@@ -719,7 +721,7 @@ impl DomProps {
     }
 
     pub fn with_focusable(mut self, focusable: bool) -> Self {
-        self.focusable = focusable;
+        self.focusable = Attr::Set(focusable);
         self
     }
 
@@ -731,7 +733,7 @@ impl DomProps {
     pub fn with_overrides(mut self, overrides: &Self) -> Self {
         self.style = self.style.with_overrides(&overrides.style);
         self.events.merge(&overrides.events);
-        self.focusable |= overrides.focusable;
+        self.focusable.overlay(&overrides.focusable);
         self.autofocus |= overrides.autofocus;
         if overrides.scroll.is_some() {
             self.scroll = overrides.scroll.clone();

@@ -432,8 +432,38 @@ impl<T> Attr<T> {
         }
     }
 
+    // Explicit attribute operations. These are the canonical mutation API;
+    // the `/=`, `|`, and `|=` operators remain as transitional surface syntax
+    // and desugar to exactly these calls.
     pub fn set(&mut self, value: T) {
         *self = Self::Set(value);
+    }
+
+    // Set only when currently unset: the "default" behaviour of the `|`
+    // operator, named explicitly.
+    pub fn set_default(&mut self, value: T) {
+        if matches!(self, Self::Unset) {
+            *self = Self::Set(value);
+        }
+    }
+
+    // Return to the unset state, which is distinct from an explicit value.
+    pub fn clear(&mut self) {
+        *self = Self::Unset;
+    }
+
+    pub fn is_explicit(&self) -> bool {
+        matches!(self, Self::Set(_))
+    }
+
+    pub fn cloned(&self) -> Attr<T>
+    where
+        T: Clone,
+    {
+        match self {
+            Self::Unset => Self::Unset,
+            Self::Set(value) => Self::Set(value.clone()),
+        }
     }
 
     pub fn as_ref(&self) -> Option<&T> {
