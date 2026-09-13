@@ -34,6 +34,34 @@ fn manifest_declares_release_metadata_and_content_allowlist() {
     }
 }
 
+// The release checklist requires CI to cover the pure-Rust build, the native
+// feature, the MSRV, a downstream fixture, and scheduled hardening runs.
+#[test]
+fn ci_covers_the_release_gates() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect("the CI workflow must exist");
+    for gate in [
+        "cargo test --no-default-features",
+        "cargo test --all-features",
+        "icmd-high-level-fixture",
+        "cargo audit",
+        "cargo package",
+    ] {
+        assert!(ci.contains(gate), "CI must run `{gate}`");
+    }
+    let stress = std::fs::read_to_string(root.join(".github/workflows/stress.yml"))
+        .expect("the scheduled stress workflow must exist");
+    assert!(
+        stress.contains("cargo miri test"),
+        "Miri must run on a schedule"
+    );
+    assert!(
+        stress.contains("--test property"),
+        "the property corpus must replay on a schedule"
+    );
+}
+
 #[test]
 fn license_files_are_present() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

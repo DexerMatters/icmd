@@ -26,8 +26,15 @@ jobs:
         run: cargo build -p icmd-high-level-fixture --no-default-features
 
   native-raster:
-    name: native raster (minimum and newest Chafa)
-    runs-on: ubuntu-latest
+    name: native raster (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # The older runner image carries a lower Chafa; the newer one carries a
+        # higher one. Together they pin the supported ABI range that `build.rs`
+        # enforces.
+        runner: [ubuntu-22.04, ubuntu-latest]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -35,6 +42,8 @@ jobs:
           components: rustfmt, clippy
       - name: Install Chafa
         run: sudo apt-get update && sudo apt-get install -y libchafa-dev pkg-config clang
+      - name: Report the discovered ABI
+        run: pkg-config --modversion chafa
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
 

@@ -1,0 +1,72 @@
+# Longer-running hardening checks. These are scheduled rather than per-PR so the
+# pull-request path stays fast, and they run in release mode so the property and
+# concurrency corpora exercise optimized code.
+name: Stress
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  property:
+    name: property and fuzz corpus replay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Pure-Rust property corpus
+        run: cargo test --release --no-default-features --test property --test limits -- --nocapture
+      - name: Glyph characterization over arbitrary UTF-8
+        run: cargo test --release --no-default-features --lib glyph
+
+  concurrency:
+    name: runtime concurrency and shutdown stress
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Repeat the lifecycle suites to surface races
+        run: |
+          for run in 1 2 3 4 5; do
+            echo "=== lifecycle run $run ==="
+            cargo test --release --no-default-features --test limits
+          done
+      - name: Image pipeline stress
+        run: cargo test --release --all-features --test raster
+
+  miri:
+    name: Miri on the unsafe-free core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - name: Miri
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+        run: cargo miri test --no-default-features --lib
+
+  sanitizer:
+    name: ThreadSanitizer (signal, not yet a hard gate)
+    runs-on: ubuntu-latest
+    # TSan needs a nightly sysroot built with the sanitizer runtime, which is not
+    # guaranteed on hosted runners. It is reported so a failure is visible, but
+    # it does not block until a pinned sanitizer image is available.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Build and run the threaded lifecycle suite under TSan
+        env:
+          RUSTFLAGS: "-Zsanitizer=thread -D warnings"
+        run: |
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu \
+            --no-default-features --test limits
