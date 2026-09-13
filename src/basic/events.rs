@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Mutex,
@@ -65,9 +66,16 @@ pub(crate) fn take_callback_fault() -> Option<CallbackFault> {
     CALLBACK_FAULT.with(|slot| slot.borrow_mut().take())
 }
 
-#[derive(fmt_derive::Debug)]
 pub struct EventListener<E> {
     pub(crate) callback: Arc<Mutex<ListenerCallback<E>>>,
+}
+
+// Opaque by design: the callback closure is not inspectable, and printing an
+// address would make debug output unstable and leak implementation detail.
+impl<E> fmt::Debug for EventListener<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EventListener").finish_non_exhaustive()
+    }
 }
 
 impl<E> EventListener<E> {
