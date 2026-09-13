@@ -91,6 +91,12 @@ pub enum FrameError {
     Config {
         detail: Box<str>,
     },
+    // One frame's assembled terminal payload exceeded the configured output
+    // budget. Nothing was written and the previously presented frame stands.
+    OutputTooLarge {
+        limit: usize,
+        requested: usize,
+    },
     AllocationFailed {
         cells: usize,
     },
@@ -129,6 +135,10 @@ impl fmt::Display for FrameError {
                 "image protocol {protocol:?} requires the `native-raster` feature"
             ),
             Self::Config { detail } => write!(f, "invalid renderer configuration: {detail}"),
+            Self::OutputTooLarge { limit, requested } => write!(
+                f,
+                "frame output of {requested} bytes exceeds the {limit}-byte budget"
+            ),
         }
     }
 }
@@ -398,6 +408,13 @@ impl Renderer {
             max_in_flight_bytes: self.limits.max_in_flight_image_bytes,
             max_cache_bytes: self.image_manager.limits().max_cache_bytes,
         }
+    }
+
+    // Test-only hook so a budget rejection can be observed followed by a
+    // successful render on the same renderer.
+    #[doc(hidden)]
+    pub fn set_output_budget_for_test(&mut self, bytes: usize) {
+        self.limits.max_output_bytes_per_frame = bytes;
     }
 
     pub fn viewport(&self) -> Size {
@@ -1220,6 +1237,9 @@ impl Renderer {
             native_tiles.clear();
         }
         let full_redraw = self.full_redraw || replay_due || (replay_only && native_changed);
+        // Everything below is staged: `self.last` and every retained cache is
+        // mutated only after the complete payload fits the frame output budget.
+        // An over-budget frame therefore leaves the presented state untouched.
         let mut desired = std::mem::take(&mut self.scratch);
         if desired.capacity() < self.last.len()
             && desired
@@ -1259,6 +1279,23 @@ impl Renderer {
         } else {
             self.native_output(native_tiles, full_redraw)
         };
+        // Bound the assembled payload before it can reach the terminal. A
+        // single valid render that exceeds the budget fails here, so no partial
+        // escape sequence is ever written and presented state stays unchanged.
+        let total = ansi
+            .as_ref()
+            .map_or(0usize, String::len)
+            .saturating_add(native.len());
+        if total > self.limits.max_output_bytes_per_frame {
+            // Pending damage is deliberately retained so a later attempt with a
+            // larger budget (or smaller scene) can re-encode it. Only the
+            // staged buffers are returned; nothing presented changes.
+            self.scratch = desired;
+            return Err(FrameError::OutputTooLarge {
+                limit: self.limits.max_output_bytes_per_frame,
+                requested: total,
+            });
+        }
         std::mem::swap(&mut self.last, &mut desired);
         self.scratch = desired;
         self.dirty.fill(false);

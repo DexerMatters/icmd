@@ -364,6 +364,55 @@ fn zero_cell_pixel_size_is_rejected() {
     );
 }
 
+// SAF-09/PR 2.6: an over-budget frame writes nothing and leaves the previously
+// presented frame exactly as it was.
+#[test]
+fn an_over_budget_frame_writes_nothing_and_keeps_presented_state() {
+    use icmd::{Cell, Frame, Image, ImageId, Operation, ScreenPosition};
+
+    let viewport = Size::new(8, 2);
+    let limits = ResourceLimits {
+        // Far below the escape bytes a full redraw of an 8x2 viewport needs.
+        max_output_bytes_per_frame: 8,
+        ..ResourceLimits::default()
+    };
+    limits.validate().unwrap();
+    let mut renderer = Renderer::with_config(
+        viewport,
+        icmd::RendererConfig {
+            limits,
+            ..icmd::RendererConfig::default()
+        },
+    )
+    .unwrap();
+    let cells = Image::new(1, 1, Cell::plain("A").unwrap()).unwrap();
+    renderer
+        .apply_frame(Frame::new(vec![Operation::Create {
+            id: ImageId(1),
+            image: cells,
+            position: ScreenPosition::default(),
+            level: 0,
+        }]))
+        .unwrap();
+    let error = renderer
+        .render_diff()
+        .expect_err("an over-budget frame must fail before writing");
+    assert!(
+        matches!(error, icmd::FrameError::OutputTooLarge { .. }),
+        "got {error:?}"
+    );
+
+    // The renderer is still usable and presented state is unchanged: raising
+    // the budget lets the same scene render normally.
+    let mut raised = renderer;
+    raised.set_output_budget_for_test(4096);
+    let frame = raised
+        .render_diff()
+        .expect("a within-budget frame must render")
+        .expect("the scene change must produce output");
+    assert!(frame.contains('A'));
+}
+
 #[test]
 fn invalid_poll_interval_is_rejected_before_side_effects() {
     // Configuration is validated before any thread or terminal mode exists.
