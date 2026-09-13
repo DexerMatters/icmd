@@ -637,15 +637,23 @@ fn build_layout(value: &str, config: &Config, merging: EmojiMerging) -> text_lay
     build_layout_at(value, config, config.width, merging)
 }
 
+// The committed layout is shared, not copied: pointer and vertical queries only
+// read it, and deep-cloning a layout per event scaled with the document.
 fn committed_layout(
     probe: &LayoutProbe,
     state: &InputState,
     config: &Config,
-) -> text_layout::TextLayout {
+) -> Arc<text_layout::TextLayout> {
     probe
         .committed()
-        .map(|committed| (*committed.layout).clone())
-        .unwrap_or_else(|| build_layout(&state.model.value, config, probe.emoji_merging()))
+        .map(|committed| committed.layout.clone())
+        .unwrap_or_else(|| {
+            Arc::new(build_layout(
+                &state.model.value,
+                config,
+                probe.emoji_merging(),
+            ))
+        })
 }
 
 fn reconcile_scroll(
