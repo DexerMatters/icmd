@@ -32,6 +32,35 @@ fn render(node: Node) -> String {
         .unwrap()
 }
 
+// A generated on-disk image fixture. Tests must not depend on demo media
+// shipped in the repository, which the published package deliberately excludes.
+fn asset_path() -> std::path::PathBuf {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("icmd-raster-asset-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fixture.jpg");
+        if !path.exists() {
+            let pixels: Vec<u8> = (0..(8 * 8 * 3))
+                .map(|index| ((index * 7) % 256) as u8)
+                .collect();
+            let file = std::fs::File::create(&path).unwrap();
+            let encoder = image::codecs::jpeg::JpegEncoder::new(file);
+            image::ImageEncoder::write_image(
+                encoder,
+                &pixels,
+                8,
+                8,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        }
+        path
+    })
+    .clone()
+}
+
 fn asset() -> RasterImage {
     RasterImage::from_rgba8(
         2,
@@ -369,7 +398,7 @@ fn kitty_multipart_uploads_have_one_metadata_header() {
 
 #[test]
 fn lazy_file_sources_load_only_when_reaching_the_prefetch_region() {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/res/amber.jpg");
+    let path = asset_path();
     let source = ImageSource::file(path);
     let mut renderer = Renderer::with_config(
         Size::new(4, 2),
@@ -415,9 +444,7 @@ fn lazy_file_sources_load_only_when_reaching_the_prefetch_region() {
 
 #[test]
 fn commit_retains_lazy_rasters_in_the_prefetch_margin_without_painting_them() {
-    let source = ImageSource::file(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/res/amber.jpg"),
-    );
+    let source = ImageSource::file(asset_path());
     let mut root_props = DomProps::default();
     root_props.style = Style {
         width: Attr::Set(Dimension::Cells(4)),
@@ -456,7 +483,7 @@ fn commit_retains_lazy_rasters_in_the_prefetch_margin_without_painting_them() {
 
 #[test]
 fn lazy_image_without_dimensions_renders_an_error_placeholder() {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/res/amber.jpg");
+    let path = asset_path();
     let node = ui! { <image src={ImageSource::file(path)} width=2 /> };
     let frame = render(node);
     assert!(frame.contains("×"), "{frame:?}");
@@ -464,7 +491,7 @@ fn lazy_image_without_dimensions_renders_an_error_placeholder() {
 
 #[test]
 fn direct_lazy_raster_without_dimensions_fails_without_loading() {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/res/amber.jpg");
+    let path = asset_path();
     let mut renderer = Renderer::with_config(
         Size::new(3, 2),
         RendererConfig {
@@ -488,8 +515,7 @@ fn direct_lazy_raster_without_dimensions_fails_without_loading() {
 #[test]
 fn missing_lazy_files_transition_from_loading_to_error() {
     let source = ImageSource::file(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/res/does-not-exist.jpg"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("does-not-exist.jpg"),
     );
     let mut renderer = Renderer::with_config(
         Size::new(4, 2),

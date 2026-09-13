@@ -2,6 +2,21 @@
 name = "icmd"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "A retained, terminal-native UI framework with Unicode-aware text, transactional frame validation, and optional native raster rendering."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/example/icmd"
+keywords = ["tui", "terminal", "ui", "unicode", "widgets"]
+categories = ["command-line-interface", "gui"]
+# Planning documents, local scratch state, and demo media must never ship in a
+# published package. Everything else is included implicitly.
+exclude = [
+    "agents/",
+    ".scratch/",
+    "examples/res/",
+    "target/",
+]
 
 [features]
 default = ["native-raster"]

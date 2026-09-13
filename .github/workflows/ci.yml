@@ -1,0 +1,57 @@
+# One job per release gate from the productization roadmap. `pure-rust` exists
+# specifically to prove the crate builds without Chafa, pkg-config, or libclang.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  pure-rust:
+    name: pure Rust (no native raster)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - run: cargo test --no-default-features
+
+  native-raster:
+    name: native raster (minimum and newest Chafa)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Chafa
+        run: sudo apt-get update && sudo apt-get install -y libchafa-dev pkg-config clang
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
+
+  supply-chain:
+    name: package and dependency gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Chafa
+        run: sudo apt-get update && sudo apt-get install -y libchafa-dev pkg-config clang
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - run: cargo audit
+      - name: Package content allowlist
+        run: cargo package --allow-dirty
+      - name: Packaged crate builds standalone
+        run: |
+          cd target/package
+          tar xzf icmd-*.crate
+          cd icmd-*/
+          cargo build --no-default-features
