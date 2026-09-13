@@ -9,7 +9,7 @@ use std::time::Duration;
 use crossterm::style::Color;
 use icmd::{
     Attr, BadgeProps, BadgeVariant, Commit, Component, Lower, Node, Renderer, Runtime, Size, Span,
-    Text, badge,
+    Text, TextStyle, badge,
     theme::{Theme, ThemeColors, ThemeMode, ThemePreset},
     theme_provider, ui, view,
 };
@@ -527,4 +527,38 @@ fn themed_leaves_share_one_theme_instance() {
         observed.iter().all(|value| *value == first),
         "themed consumers must share one theme instance"
     );
+}
+
+// API-09: derivation happens once, explicitly, with deterministic precedence
+// between palette-derived defaults and explicit overrides.
+#[test]
+fn theme_builder_precedence_is_deterministic() {
+    use icmd::theme::{ThemeBuilder, ThemeColors, ThemeMode, ThemeTypography};
+
+    let colors = ThemeColors::dark();
+
+    // Palette-derived defaults come from the palette.
+    let derived = ThemeBuilder::from_palette(ThemeMode::Dark, colors.clone()).build();
+    let reference = Theme::new(ThemeMode::Dark, colors.clone());
+    assert_eq!(derived, reference, "from_palette must match Theme::new");
+
+    // An explicit override replaces exactly that token and nothing else.
+    let custom = ThemeTypography {
+        body: TextStyle::default().bold(),
+        ..derived.typography.clone()
+    };
+    let overridden = ThemeBuilder::from_palette(ThemeMode::Dark, colors.clone())
+        .typography(custom.clone())
+        .build();
+    assert_eq!(overridden.typography, custom);
+    assert_eq!(
+        overridden.colors, derived.colors,
+        "a typography override must not change the palette"
+    );
+    assert_eq!(overridden.borders, derived.borders);
+    assert_eq!(overridden.scrollbar, derived.scrollbar);
+
+    // Building twice from the same inputs is identical.
+    let again = ThemeBuilder::from_palette(ThemeMode::Dark, colors).build();
+    assert_eq!(again, derived);
 }

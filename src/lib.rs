@@ -9,7 +9,7 @@ pub mod theme;
 mod ui;
 
 pub use app::{RenderError, RuntimeConfig, render};
-pub use theme::{ThemeProviderProps, theme_context, theme_provider};
+pub use theme::{ThemeBuilder, ThemeProviderProps, theme_context, theme_provider};
 
 pub use elements::{
     AlertProps, AlertVariant, BadgeProps, BadgeVariant, CanvasContext, CanvasDraw, CanvasError,

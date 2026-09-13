@@ -552,6 +552,66 @@ pub struct Theme {
     pub scrollbar: ScrollbarStyle,
 }
 
+// Derivation is explicit and happens once. `ThemeBuilder::from_palette`
+// resolves every derived token from the palette; afterwards each token is an
+// independent resolved value, so a later field assignment cannot leave the
+// theme in a half-derived state. Use `Theme::from_palette` for the common case.
+#[derive(Debug, Clone)]
+pub struct ThemeBuilder {
+    mode: ThemeMode,
+    colors: ThemeColors,
+    typography: ThemeTypography,
+    spacing: ThemeSpacing,
+    borders: ThemeBorders,
+    scrollbar: ScrollbarStyle,
+}
+
+impl ThemeBuilder {
+    pub fn from_palette(mode: ThemeMode, colors: ThemeColors) -> Self {
+        Self {
+            mode,
+            typography: ThemeTypography::from_colors(&colors),
+            borders: ThemeBorders::from_colors(&colors),
+            scrollbar: scrollbar_style(&colors),
+            spacing: ThemeSpacing::default(),
+            colors,
+        }
+    }
+
+    // Replace one resolved derived token. This is a deliberate override, not a
+    // recomputation trigger.
+    pub fn typography(mut self, typography: ThemeTypography) -> Self {
+        self.typography = typography;
+        self
+    }
+
+    pub fn borders(mut self, borders: ThemeBorders) -> Self {
+        self.borders = borders;
+        self
+    }
+
+    pub fn scrollbar(mut self, scrollbar: ScrollbarStyle) -> Self {
+        self.scrollbar = scrollbar;
+        self
+    }
+
+    pub fn spacing(mut self, spacing: ThemeSpacing) -> Self {
+        self.spacing = spacing;
+        self
+    }
+
+    pub fn build(self) -> Theme {
+        Theme::from_parts(
+            self.mode,
+            self.colors,
+            self.typography,
+            self.spacing,
+            self.borders,
+            self.scrollbar,
+        )
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ThemeProviderProps {
     pub value: Attr<Theme>,
@@ -586,18 +646,15 @@ impl Theme {
         Self::ansi(ThemeMode::Dark)
     }
 
+    // One-shot derivation from a complete palette. Prefer this (or
+    // `ThemeBuilder` when an override is needed) over mutating `colors` after
+    // construction, which would leave derived tokens stale.
     pub fn new(mode: ThemeMode, colors: ThemeColors) -> Self {
-        let typography = ThemeTypography::from_colors(&colors);
-        let borders = ThemeBorders::from_colors(&colors);
-        let scrollbar = scrollbar_style(&colors);
-        Self::from_parts(
-            mode,
-            colors,
-            typography,
-            ThemeSpacing::default(),
-            borders,
-            scrollbar,
-        )
+        ThemeBuilder::from_palette(mode, colors).build()
+    }
+
+    pub fn from_palette(mode: ThemeMode, colors: ThemeColors) -> Self {
+        Self::new(mode, colors)
     }
 
     pub fn from_parts(
