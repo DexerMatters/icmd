@@ -1784,7 +1784,14 @@ impl PipelineComponent for Renderer {
     type Input = Frame;
     type Output = Result<String, FrameError>;
 
-    fn run(mut self, input: Receiver<Self::Input>, output: Sender<Self::Output>) {
+    const STAGE: crate::runtime::pipeline::Stage = crate::runtime::pipeline::Stage::Renderer;
+
+    fn run(
+        mut self,
+        input: Receiver<Self::Input>,
+        output: Sender<Self::Output>,
+        _errors: Sender<crate::runtime::pipeline::RuntimeError>,
+    ) -> Result<(), crate::runtime::pipeline::RuntimeError> {
         enum Wake {
             Frame(Frame),
             Load((ImageSource, Result<RasterImage, crate::RasterImageError>)),
@@ -1808,14 +1815,14 @@ impl PipelineComponent for Renderer {
                 Wake::Closed => break,
                 Wake::Timer => {
                     if !self.emit_render(&output) {
-                        return;
+                        return Ok(());
                     }
                     continue;
                 }
                 Wake::Load(result) => {
                     self.image_manager.queue_result(result);
                     if !self.emit_render(&output) {
-                        return;
+                        return Ok(());
                     }
                     continue;
                 }
@@ -1833,11 +1840,11 @@ impl PipelineComponent for Renderer {
                 if let Err(error) = self.apply_frame(frame)
                     && output.send(Err(error)).is_err()
                 {
-                    return;
+                    return Ok(());
                 }
             }
             if !self.emit_render(&output) {
-                return;
+                return Ok(());
             }
         }
 
@@ -1845,6 +1852,7 @@ impl PipelineComponent for Renderer {
         if let Some(cleanup) = self.shutdown_native() {
             let _ = output.send(Ok(cleanup));
         }
+        Ok(())
     }
 }
 
@@ -1855,6 +1863,37 @@ impl Renderer {
             Ok(None) => true,
             Err(error) => output.send(Err(error)).is_ok(),
         }
+    }
+}
+
+// A renderer whose output already carries the terminal payload. This is the
+// shape the pipeline uses internally; it is exposed so a component that
+// replaces the commit stage can still drive a real renderer.
+pub struct ChannelRenderer(pub(crate) Renderer);
+
+impl ChannelRenderer {
+    pub fn new(viewport: Size) -> Result<Self, FrameError> {
+        Ok(Self(Renderer::new(viewport)?))
+    }
+
+    pub fn with_config(viewport: Size, config: RendererConfig) -> Result<Self, FrameError> {
+        Ok(Self(Renderer::with_config(viewport, config)?))
+    }
+}
+
+impl PipelineComponent for ChannelRenderer {
+    type Input = Frame;
+    type Output = Result<String, FrameError>;
+
+    const STAGE: crate::runtime::pipeline::Stage = crate::runtime::pipeline::Stage::Renderer;
+
+    fn run(
+        self,
+        input: Receiver<Self::Input>,
+        output: Sender<Self::Output>,
+        errors: Sender<crate::runtime::pipeline::RuntimeError>,
+    ) -> Result<(), crate::runtime::pipeline::RuntimeError> {
+        self.0.run(input, output, errors)
     }
 }
 

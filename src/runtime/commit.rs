@@ -253,7 +253,14 @@ impl crate::runtime::pipeline::PipelineComponent for Commit {
     type Input = DomNode;
     type Output = Frame;
 
-    fn run(mut self, input: Receiver<Self::Input>, output: Sender<Self::Output>) {
+    const STAGE: crate::runtime::pipeline::Stage = crate::runtime::pipeline::Stage::Commit;
+
+    fn run(
+        mut self,
+        input: Receiver<Self::Input>,
+        output: Sender<Self::Output>,
+        _errors: Sender<crate::runtime::pipeline::RuntimeError>,
+    ) -> Result<(), crate::runtime::pipeline::RuntimeError> {
         loop {
             crossbeam_channel::select! {
                 recv(input) -> message => {
@@ -266,6 +273,7 @@ impl crate::runtime::pipeline::PipelineComponent for Commit {
                 }
             }
         }
+        Ok(())
     }
 }
 

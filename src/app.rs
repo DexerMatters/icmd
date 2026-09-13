@@ -20,7 +20,8 @@ use crossterm::{
 
 use crate::{
     Commit, CommitConfig, Component, ComponentContext, EmojiMerging, FrameError, ImageProtocol,
-    ImageUpdatePolicy, Lower, Node, Props, Renderer, RendererConfig, Runtime, Size,
+    ImageUpdatePolicy, Lower, Node, Props, Renderer, RendererConfig, Runtime, RuntimeError,
+    ShutdownPolicy, Size,
 };
 
 #[derive(Debug, Clone)]
@@ -71,6 +72,8 @@ pub enum RenderError {
     /// An application event listener panicked or re-entered itself. The runtime
     /// stops instead of continuing in an unknown partially-mutated state.
     ApplicationCallback(&'static str),
+    /// A pipeline stage failed or was not joined; the typed cause is preserved.
+    Stage(RuntimeError),
 }
 
 impl fmt::Display for RenderError {
@@ -80,6 +83,7 @@ impl fmt::Display for RenderError {
             Self::Frame(error) => write!(f, "rendering frame failed: {error}"),
             Self::RuntimeClosed => write!(f, "rendering runtime stopped unexpectedly"),
             Self::ApplicationCallback(detail) => write!(f, "application callback failed: {detail}"),
+            Self::Stage(error) => write!(f, "runtime stage failed: {error}"),
         }
     }
 }
@@ -90,6 +94,7 @@ impl Error for RenderError {
             Self::Io(error) => Some(error),
             Self::Frame(error) => Some(error),
             Self::RuntimeClosed | Self::ApplicationCallback(_) => None,
+            Self::Stage(error) => Some(error),
         }
     }
 }
@@ -210,39 +215,53 @@ pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), Render
         },
     )
     .map_err(RenderError::Frame)?;
-    let (input, output) = Runtime::new(Lower::default())
+    let runtime = Runtime::new(Lower::default())
         .then(commit)
         .then(renderer)
-        .start();
+        .start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+    let errors = runtime.errors();
     input
         .send(root.apply(node.into()))
         .map_err(|_| RenderError::RuntimeClosed)?;
 
-    'render: loop {
+    let outcome = 'render: loop {
         if let Some(frame) = receive_frame(&output, config.poll_interval)? {
             terminal.write(&frame)?;
+        }
+        // A typed stage failure is terminal and must not look like a normal
+        // channel close.
+        if let Ok(error) = errors.try_recv() {
+            break 'render Err(RenderError::Stage(error));
         }
         while event::poll(Duration::ZERO)? {
             let event = event::read()?;
             if matches!(&event, Event::Key(key) if is_exit_key(*key, config.exit_key)) {
-                break 'render;
+                break 'render Ok(());
             }
             dispatcher.dispatch(event);
             // A panicking or reentrant listener is a controlled stop, not a
             // silent no-op; leaving the loop runs terminal RAII cleanup.
             if let Some(detail) = dispatcher.take_callback_fault() {
-                return Err(RenderError::ApplicationCallback(detail));
+                break 'render Err(RenderError::ApplicationCallback(detail));
             }
         }
-    }
+    };
 
     // Closing the root input lets every pipeline stage unwind. The renderer
     // emits one final targeted Kitty cleanup frame before its output channel
     // closes, so alternate-screen teardown cannot leave virtual placements
-    // behind in the terminal.
+    // behind in the terminal. Shutdown is acknowledged: workers are joined
+    // before the terminal session unwinds.
     drop(input);
     while let Ok(result) = output.recv_timeout(Duration::from_secs(1)) {
         terminal.write(&result?)?;
     }
-    Ok(())
+    let drained = runtime.shutdown(ShutdownPolicy::default());
+    match (outcome, drained) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(RenderError::Stage(error)),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }

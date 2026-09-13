@@ -1,7 +1,8 @@
 use std::{
     any::{Any, TypeId},
     collections::{HashSet, VecDeque},
-    mem,
+    error::Error,
+    fmt, mem,
     sync::{Arc, Mutex},
 };
 
@@ -9,6 +10,8 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 use slotmap::SlotMap;
 
 use super::hooks::{FiberId, HookSlot, UpdateQueue};
+use super::limits::ResourceLimits;
+use super::pipeline::RuntimeError;
 use crate::basic::{
     DomId, DomNode, DomProps, Key, Node,
     common::{NodeKind, RenderFn},
@@ -16,6 +19,41 @@ use crate::basic::{
 };
 
 type FiberArena = SlotMap<FiberId, Fiber>;
+
+// Lowering is iterative over the logical tree, but a public tree can still be
+// arbitrarily deep or large. Both ceilings are checked before the recursive
+// work they bound, and reported as typed errors instead of aborting a worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LowerError {
+    TreeTooDeep {
+        limit: usize,
+        observed_at_least: usize,
+    },
+    TreeTooLarge {
+        limit: usize,
+        observed: usize,
+    },
+}
+
+impl fmt::Display for LowerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TreeTooDeep {
+                limit,
+                observed_at_least,
+            } => write!(
+                f,
+                "logical tree depth exceeds the limit of {limit} (at least {observed_at_least})"
+            ),
+            Self::TreeTooLarge { limit, observed } => write!(
+                f,
+                "logical tree node count exceeds the limit of {limit} (at least {observed})"
+            ),
+        }
+    }
+}
+
+impl Error for LowerError {}
 
 enum FiberKind {
     Root,
@@ -48,6 +86,9 @@ enum FiberKind {
 
 struct Fiber {
     parent: Option<FiberId>,
+    // Logical depth from the root, kept on the fiber so the depth limit is a
+    // constant-time check instead of an ancestor walk per mount.
+    depth: usize,
     key: Option<Key>,
     kind: FiberKind,
     children: Vec<FiberId>,
@@ -60,6 +101,7 @@ impl Fiber {
     fn root() -> Self {
         Self {
             parent: None,
+            depth: 0,
             key: None,
             kind: FiberKind::Root,
             children: Vec::new(),
@@ -73,7 +115,14 @@ impl Fiber {
 pub struct Lower {
     fibers: FiberArena,
     root: FiberId,
-    root_node: Option<Node>,
+    // Only whether a root is mounted matters; retaining the whole logical root
+    // duplicated the caller's tree for no observable behavior.
+    mounted: bool,
+    live_nodes: usize,
+    limits: ResourceLimits,
+    // Set when a limit rejects a mount. Checked by `lower`/`rerender` so the
+    // caller receives one typed error instead of a silently truncated tree.
+    pending_error: Option<LowerError>,
     next_dom_id: u64,
     updates: UpdateQueue,
     wake_tx: Sender<()>,
@@ -87,6 +136,40 @@ impl Default for Lower {
     }
 }
 
+// Iterative, allocation-bounded pre-pass over the logical tree. Component
+// children are not materialized here; expansion is rechecked by the live-node
+// counter during lowering, so a recursive component cannot escape the ceiling.
+fn validate_tree(root: &Node, limits: &ResourceLimits) -> Result<(), LowerError> {
+    let mut stack: Vec<(&Node, usize)> = vec![(root, 1)];
+    let mut count = 0usize;
+    while let Some((node, depth)) = stack.pop() {
+        count = count.saturating_add(1);
+        if depth > limits.max_tree_depth {
+            return Err(LowerError::TreeTooDeep {
+                limit: limits.max_tree_depth,
+                observed_at_least: depth,
+            });
+        }
+        if count > limits.max_nodes {
+            return Err(LowerError::TreeTooLarge {
+                limit: limits.max_nodes,
+                observed: count,
+            });
+        }
+        match &node.kind {
+            NodeKind::Element { children, .. }
+            | NodeKind::Provider { children, .. }
+            | NodeKind::Fragment(children) => {
+                for child in children {
+                    stack.push((child, depth.saturating_add(1)));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 impl Lower {
     fn new() -> Self {
         let mut fibers = FiberArena::with_key();
@@ -95,7 +178,10 @@ impl Lower {
         Self {
             fibers,
             root,
-            root_node: None,
+            mounted: false,
+            live_nodes: 0,
+            limits: ResourceLimits::default(),
+            pending_error: None,
             next_dom_id: 1,
             updates: Arc::new(Mutex::new(VecDeque::new())),
             wake_tx,
@@ -104,15 +190,29 @@ impl Lower {
         }
     }
 
-    fn lower(&mut self, node: Node) -> DomNode {
-        let _ = self.apply_updates();
-        self.root_node = Some(node.clone());
-        self.reconcile_children(self.root, vec![node]);
-        self.commit_effects();
-        self.root_dom()
+    pub fn with_limits(limits: ResourceLimits) -> Self {
+        let mut lower = Self::new();
+        lower.limits = limits;
+        lower
     }
 
-    fn rerender(&mut self, dirty: Vec<FiberId>) -> DomNode {
+    fn lower(&mut self, node: Node) -> Result<DomNode, LowerError> {
+        let _ = self.apply_updates();
+        // Validate the incoming root iteratively, before any recursive
+        // traversal, so an over-deep tree cannot reach the recursive code.
+        validate_tree(&node, &self.limits)?;
+        self.pending_error = None;
+        self.mounted = true;
+        self.reconcile_children(self.root, vec![node]);
+        if let Some(error) = self.pending_error.take() {
+            return Err(error);
+        }
+        self.commit_effects();
+        Ok(self.root_dom())
+    }
+
+    fn rerender(&mut self, dirty: Vec<FiberId>) -> Result<DomNode, LowerError> {
+        self.pending_error = None;
         let requested: HashSet<_> = dirty.into_iter().collect();
         let roots: Vec<_> = requested
             .iter()
@@ -137,8 +237,11 @@ impl Lower {
                 self.render_component(fiber);
             }
         }
+        if let Some(error) = self.pending_error.take() {
+            return Err(error);
+        }
         self.commit_effects();
-        self.root_dom()
+        Ok(self.root_dom())
     }
 
     fn unmount(&mut self) {
@@ -234,7 +337,25 @@ impl Lower {
         let mut children = Vec::with_capacity(nodes.len());
         let mut seen_keys = HashSet::new();
 
+        let child_depth = self.fibers[parent].depth.saturating_add(1);
         for (index, node) in nodes.into_iter().enumerate() {
+            if self.pending_error.is_some() {
+                break;
+            }
+            if child_depth > self.limits.max_tree_depth {
+                self.pending_error = Some(LowerError::TreeTooDeep {
+                    limit: self.limits.max_tree_depth,
+                    observed_at_least: child_depth,
+                });
+                break;
+            }
+            if self.live_nodes >= self.limits.max_nodes {
+                self.pending_error = Some(LowerError::TreeTooLarge {
+                    limit: self.limits.max_nodes,
+                    observed: self.live_nodes.saturating_add(1),
+                });
+                break;
+            }
             if let Some(key) = node.node_key()
                 && !seen_keys.insert(key.clone())
             {
@@ -358,8 +479,10 @@ impl Lower {
             ),
             NodeKind::Fragment(_) => (FiberKind::Fragment, None, ContextValues::default()),
         };
+        self.live_nodes = self.live_nodes.saturating_add(1);
         let fiber = self.fibers.insert(Fiber {
             parent: Some(parent),
+            depth: self.fibers[parent].depth.saturating_add(1),
             key,
             kind,
             children: Vec::new(),
@@ -490,6 +613,7 @@ impl Lower {
             self.remove_subtree(child);
         }
         let removed = self.fibers.remove(fiber).expect("fiber already removed");
+        self.live_nodes = self.live_nodes.saturating_sub(1);
         for hook in removed.hooks {
             hook.cleanup();
         }
@@ -544,23 +668,46 @@ impl super::pipeline::PipelineComponent for Lower {
     type Input = Node;
     type Output = DomNode;
 
-    fn run(mut self, input: Receiver<Self::Input>, output: Sender<Self::Output>) {
+    const STAGE: super::pipeline::Stage = super::pipeline::Stage::Lower;
+
+    fn run(
+        mut self,
+        input: Receiver<Self::Input>,
+        output: Sender<Self::Output>,
+        errors: Sender<RuntimeError>,
+    ) -> Result<(), RuntimeError> {
         let wake = self.wake_rx.clone();
         loop {
             crossbeam_channel::select! {
                 recv(input) -> message => {
                     let Ok(node) = message else { break; };
-                    if output.send(self.lower(node)).is_err() { break; }
+                    // A rejected tree is a typed, recoverable error: the caller
+                    // is told exactly which budget was exceeded and the worker
+                    // keeps serving later valid roots.
+                    match self.lower(node) {
+                        Ok(dom) => {
+                            if output.send(dom).is_err() { break; }
+                        }
+                        Err(error) => {
+                            if errors.send(RuntimeError::Lower(error)).is_err() { break; }
+                        }
+                    }
                 }
                 recv(wake) -> _ => {
                     let dirty = self.apply_updates();
-                    if !dirty.is_empty() && self.root_node.is_some()
-                        && output.send(self.rerender(dirty)).is_err()
-                    {
-                        break;
+                    if !dirty.is_empty() && self.mounted {
+                        match self.rerender(dirty) {
+                            Ok(dom) => {
+                                if output.send(dom).is_err() { break; }
+                            }
+                            Err(error) => {
+                                if errors.send(RuntimeError::Lower(error)).is_err() { break; }
+                            }
+                        }
                     }
                 }
             }
         }
+        Ok(())
     }
 }
