@@ -238,10 +238,10 @@ impl Commit {
         self.event_dispatcher
             .publish(event_regions, &retained_scroll_ids);
 
-        let operations = self.diff_scene(&next);
-        self.scene_order = next.keys().copied().collect();
-        self.scene_order
-            .sort_by_key(|key| (next[key].order, key.node.0, key.role));
+        // `diff_scene` produces the one canonical sorted order for this commit;
+        // collecting and sorting a second time here was pure duplication.
+        let (operations, order) = self.diff_scene(&next);
+        self.scene_order = order;
         self.scene = next;
         self.latest = Some(root);
         self.text_cache.retain(|id, _| self.text_seen.contains(id));

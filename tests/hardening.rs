@@ -304,3 +304,63 @@ fn renderer_handles_wide_patch_boundaries_and_resize() {
         .unwrap();
     assert!(renderer.render_diff().unwrap().unwrap().contains("\x1b[2J"));
 }
+
+// PERF-11: a commit produces one canonical scene order. The rendered output for
+// a given scene must therefore be byte-identical across repeated builds, with no
+// dependence on hash iteration order.
+#[test]
+fn scene_order_is_canonical_and_deterministic() {
+    let viewport = Size::new(24, 6);
+    let build = || {
+        let children: Vec<Node> = (0..24_i32)
+            .map(|index| {
+                let node = text(format!("row{index}"));
+                let mut dom = icmd::DomProps::default();
+                dom.style = icmd::style(|style| {
+                    style.line /= icmd::AxisPosition::Cells(index % 6);
+                    style.column /= icmd::AxisPosition::Cells((index % 4) * 5);
+                    style.width /= Dimension::Cells(4);
+                    style.height /= Dimension::Cells(1);
+                });
+                Node::element(dom, [node])
+            })
+            .collect();
+        Node::element(icmd::DomProps::default(), children)
+    };
+
+    let first = render(build(), viewport);
+    for _ in 0..3 {
+        assert_eq!(
+            render(build(), viewport),
+            first,
+            "identical scenes must render identically"
+        );
+    }
+}
+
+// The scene order is produced once per commit: a no-op commit must not emit a
+// second ordering pass or duplicate operations.
+#[test]
+fn a_second_identical_frame_emits_no_operations() {
+    let viewport = Size::new(12, 3);
+    let (commit, _) = Commit::new(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+    let node = || -> Node { text("same") };
+    input.send(node()).unwrap();
+    let first = output.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(
+        !first.operations.is_empty(),
+        "the first frame creates the scene"
+    );
+    input.send(node()).unwrap();
+    let second = output.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(
+        second.operations.is_empty(),
+        "an unchanged scene must emit no operations, got {:?}",
+        second.operations
+    );
+    drop(input);
+    let _ = runtime.shutdown(icmd::ShutdownPolicy::default());
+}

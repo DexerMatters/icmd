@@ -6,10 +6,18 @@ use super::Commit;
 use super::types::{PaintContent, PaintFragment, PaintKey};
 
 impl Commit {
-    pub(super) fn diff_scene(&mut self, next: &HashMap<PaintKey, PaintFragment>) -> Vec<Operation> {
+    // Returns the operations for this commit plus the one canonical sorted
+    // order for the new scene. Callers store that order instead of collecting
+    // and sorting a second time.
+    pub(super) fn diff_scene(
+        &mut self,
+        next: &HashMap<PaintKey, PaintFragment>,
+    ) -> (Vec<Operation>, Vec<PaintKey>) {
         let mut operations = Vec::new();
         let mut retired = Vec::new();
-        let old_keys = self.scene_order.clone();
+        // The previous order is replaced by the new one, so it can be moved out
+        // instead of cloned.
+        let old_keys = std::mem::take(&mut self.scene_order);
         for key in old_keys {
             let Some(new) = next.get(&key) else {
                 operations.push(Operation::Remove {
@@ -78,7 +86,8 @@ impl Commit {
 
         let mut next_keys: Vec<_> = next.keys().copied().collect();
         next_keys.sort_by_key(|key| (next[key].order, key.node.0, key.role));
-        for key in next_keys {
+        for key in &next_keys {
+            let key = *key;
             let value = &next[&key];
             if !self.scene.contains_key(&key) {
                 let id = self.image_id(key);
@@ -110,7 +119,7 @@ impl Commit {
                 });
             }
         }
-        operations
+        (operations, next_keys)
     }
 
     fn image_id(&mut self, key: PaintKey) -> ImageId {
