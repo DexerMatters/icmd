@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use crossterm::style::Color;
 use icmd::{
-    Attr, BadgeProps, BadgeVariant, Commit, Lower, Node, Renderer, Runtime, Size, Span, Text,
-    badge,
-    theme::{ThemeColors, ThemeMode, ThemePreset},
+    Attr, BadgeProps, BadgeVariant, Commit, Component, Lower, Node, Renderer, Runtime, Size, Span,
+    Text, badge,
+    theme::{Theme, ThemeColors, ThemeMode, ThemePreset},
     theme_provider, ui, view,
 };
 
@@ -484,4 +484,47 @@ fn every_preset_defines_a_complete_palette_for_both_modes() {
             );
         }
     }
+}
+
+// PERF-05: the theme is shared through the context. Many themed leaves must
+// observe one shared theme allocation instead of a clone per consumer.
+#[test]
+fn themed_leaves_share_one_theme_instance() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct ProbeProps {
+        seen: Arc<Mutex<Vec<usize>>>,
+    }
+
+    fn probe(cx: &mut icmd::ComponentContext, props: &icmd::Props<ProbeProps>) -> Node {
+        let theme = cx.use_theme();
+        props
+            .user_defined
+            .seen
+            .lock()
+            .unwrap()
+            .push(Arc::as_ptr(&theme) as usize);
+        icmd::text("x")
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let children: Vec<Node> = (0..200)
+        .map(|_| probe.props(ProbeProps { seen: seen.clone() }).node())
+        .collect();
+    let node = icmd::theme_provider
+        .props(icmd::ThemeProviderProps {
+            value: Attr::Set(Theme::light()),
+        })
+        .children(children);
+
+    let _ = render(node, Size::new(20, 4));
+
+    let observed = seen.lock().unwrap().clone();
+    assert_eq!(observed.len(), 200, "every probe must run");
+    let first = observed[0];
+    assert!(
+        observed.iter().all(|value| *value == first),
+        "themed consumers must share one theme instance"
+    );
 }

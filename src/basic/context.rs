@@ -43,6 +43,12 @@ impl<T> ContextKey<T> {
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
+
+    // The default is stored once as an `Arc`, so returning it to a consumer is
+    // a refcount bump rather than a deep clone of the value.
+    pub(crate) fn default_arc(&self) -> Arc<T> {
+        self.default.clone()
+    }
 }
 
 pub fn create_context<T>(default: T) -> ContextKey<T> {
@@ -87,14 +93,14 @@ pub(crate) struct ContextValues {
 }
 
 impl ContextValues {
-    pub(crate) fn get<T>(&self, key: &ContextKey<T>) -> Option<T>
+    // Shared read: the stored value is an `Arc`, so this does not clone `T`.
+    pub(crate) fn get_arc<T>(&self, key: &ContextKey<T>) -> Option<Arc<T>>
     where
-        T: Clone + Send + Sync + 'static,
+        T: Send + Sync + 'static,
     {
         self.values
             .get(&key.id)
-            .and_then(|value| value.as_ref().downcast_ref::<T>())
-            .cloned()
+            .and_then(|value| value.clone().downcast::<T>().ok())
     }
 
     pub(crate) fn insert<T>(&mut self, key: &ContextKey<T>, value: T)
@@ -206,10 +212,22 @@ where
     where
         T: Clone + Send + Sync + 'static,
     {
+        (*self.use_context_arc(context)).clone()
+    }
+
+    // Canonical shared read. Consumers that only inspect the value should use
+    // this and dereference, which avoids cloning the value on every render.
+    pub fn use_context_arc<'a, T>(
+        &self,
+        context: impl FnOnce() -> &'a ContextKey<T>,
+    ) -> std::sync::Arc<T>
+    where
+        T: Send + Sync + 'static,
+    {
         let context = context();
         self.inherited_context
-            .get(context)
-            .unwrap_or_else(|| context.default.as_ref().clone())
+            .get_arc(context)
+            .unwrap_or_else(|| context.default_arc())
     }
 
     pub fn provide<T>(&mut self, context: &ContextKey<T>, value: T)

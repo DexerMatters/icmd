@@ -1,7 +1,6 @@
 use crate::{
     Attr, DomProps, Node, Overflow, Props, ScrollAxes, ScrollOffset, ScrollbarStyle,
-    ScrollbarVisibility, basic::ComponentContext, basic::props::ScrollConfig, theme::Theme, ui,
-    view,
+    ScrollbarVisibility, basic::ComponentContext, basic::props::ScrollConfig, ui, view,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -17,7 +16,7 @@ pub struct ScrollAreaProps {
 }
 
 pub fn scroll_area(cx: &mut ComponentContext, props: &Props<ScrollAreaProps>) -> Node {
-    let theme: Theme = cx.use_theme();
+    let theme = cx.use_theme();
     let axes = props.axes | ScrollAxes::Vertical;
     let scrollbar_visibility = props.scrollbar_visibility | ScrollbarVisibility::Auto;
     let horizontal = matches!(axes, ScrollAxes::Horizontal | ScrollAxes::Both);
@@ -44,7 +43,7 @@ pub fn scroll_area(cx: &mut ComponentContext, props: &Props<ScrollAreaProps>) ->
         enable_wheel: props.enable_wheel | true,
         enable_keyboard: props.enable_keyboard | true,
         wheel_step: (props.wheel_step | 1).max(1),
-        scrollbar: props.user_defined.scrollbar_style.clone() | theme.scrollbar,
+        scrollbar: props.user_defined.scrollbar_style.clone() | theme.scrollbar.clone(),
     }));
 
     ui! { <view dom={dom}>{props.children_node()}</view> }

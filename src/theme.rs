@@ -729,7 +729,9 @@ pub fn theme_context() -> &'static ContextKey<Theme> {
 }
 
 impl ComponentContext {
-    pub fn use_theme(&self) -> Theme {
-        self.use_context(theme_context)
+    // Shared read: a themed component borrows the one theme in context instead
+    // of cloning every token on each render.
+    pub fn use_theme(&self) -> std::sync::Arc<Theme> {
+        self.use_context_arc(theme_context)
     }
 }
