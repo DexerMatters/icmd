@@ -812,3 +812,40 @@ fn editor_refuses_input_beyond_the_byte_budget() {
     let fits = ResourceLimits::default();
     fits.validate().unwrap();
 }
+
+// PERF gate: "measure-plus-paint shapes each unchanged text leaf once". A second
+// frame that changes nothing must not re-shape the leaf at all.
+#[test]
+fn an_unchanged_text_leaf_is_not_reshaped() {
+    use icmd::advanced::{Commit, Lower, Runtime, ShutdownPolicy, runtime_metrics};
+    use std::time::Duration;
+
+    // Commit is the stage that measures text, and it emits a frame for every
+    // input, so an unchanged scene is observable here (the renderer suppresses
+    // damage instead).
+    let viewport = Size::new(40, 6);
+    let (commit, _) = Commit::new(viewport);
+    let runtime = Runtime::new(Lower::with_limits(ResourceLimits::default()))
+        .then(commit)
+        .start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    // The text cache is keyed by node and content, so rebuilding an identical
+    // tree must reuse the shaped layout rather than measuring it again.
+    let leaf = || -> Node { icmd::Text::new("unchanged leaf").into() };
+    input.send(leaf()).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+    let after_first = runtime_metrics();
+
+    input.send(leaf()).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+    let delta = runtime_metrics().since(after_first);
+    assert_eq!(
+        delta.text_shaping_calls, 0,
+        "an unchanged leaf must not be reshaped: {delta:?}"
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(ShutdownPolicy::default());
+}
