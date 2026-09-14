@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use crate::runtime::hooks::{EffectCallback, FiberId, HookSlot, StateUpdate, UpdateQueue};
+use super::hooks::{EffectCallback, FiberId, HookSlot, StateUpdate, UpdateQueue};
 use crossbeam_channel::Sender;
 
 use super::common::Node;

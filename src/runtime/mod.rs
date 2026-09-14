@@ -1,6 +1,5 @@
 pub(crate) mod commit;
 mod event;
-pub(crate) mod hooks;
 mod image;
 pub(crate) mod limits;
 pub(crate) mod lower;

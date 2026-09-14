@@ -365,3 +365,36 @@ fn high_level_fixture_does_not_import_the_advanced_tier() {
         );
     }
 }
+
+// DEDUP completion checklist: "Module dependencies follow the declared
+// direction without widget/runtime cycles." The typed props/events/context tier
+// sits above the lowered DOM and runtime, so it must not import from them.
+#[test]
+fn the_context_tier_does_not_depend_on_the_runtime_tier() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/basic");
+    let mut checked = 0;
+    let mut stack = vec![root.clone()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).expect("basic is readable") {
+            let path = entry.expect("readable entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("source is readable");
+            for line in source.lines() {
+                let code = line.split("//").next().unwrap_or("").trim();
+                assert!(
+                    !code.starts_with("use crate::runtime"),
+                    "{} must not depend on the runtime tier: {line}",
+                    path.display()
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "the context tier must have been inspected");
+}

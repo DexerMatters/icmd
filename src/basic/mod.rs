@@ -3,6 +3,7 @@ pub(crate) mod context;
 mod dom;
 pub(crate) mod editor_surface;
 pub(crate) mod events;
+pub(crate) mod hooks;
 pub(crate) mod props;
 mod text;
 pub(crate) mod text_layout;

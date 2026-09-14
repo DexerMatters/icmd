@@ -9,9 +9,9 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded};
 use slotmap::SlotMap;
 
-use super::hooks::{FiberId, HookSlot, UpdateQueue};
 use super::limits::ResourceLimits;
 use super::pipeline::RuntimeError;
+use crate::basic::hooks::{FiberId, HookSlot, UpdateQueue};
 use crate::basic::{
     DomId, DomNode, DomProps, Key, Node,
     common::{NodeKind, RenderFn},
