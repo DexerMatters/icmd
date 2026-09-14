@@ -320,7 +320,7 @@ fn blank_symbol() -> Arc<str> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CellSlot {
+pub enum CellSlot {
     Lead(Cell),
     Continuation(Cell),
 }
@@ -332,7 +332,7 @@ impl CellSlot {
         matches!(self, Self::Lead(cell) if cell.is_blank())
     }
 
-    pub(crate) fn cell(&self) -> &Cell {
+    pub fn cell(&self) -> &Cell {
         match self {
             Self::Lead(cell) | Self::Continuation(cell) => cell,
         }
@@ -564,11 +564,7 @@ impl Image {
             .ok_or(ImageError::OutOfBounds)
     }
 
-    pub(crate) fn patch_rect(
-        &mut self,
-        rect: Rect,
-        rows: &[Vec<Cell>],
-    ) -> Result<Rect, ImageError> {
+    pub fn patch_rect(&mut self, rect: Rect, rows: &[Vec<Cell>]) -> Result<Rect, ImageError> {
         self.validate_rect(rect, rows)?;
         let mut affected_left = rect.column;
         let mut affected_right = rect.right();
@@ -638,7 +634,7 @@ impl Image {
         Ok(affected.unwrap_or(Rect::new(0, 0, 0, 0)))
     }
 
-    pub(crate) fn cell_at(&self, line: usize, column: usize) -> &CellSlot {
+    pub fn cell_at(&self, line: usize, column: usize) -> &CellSlot {
         &self.cells[line * self.width + column]
     }
 
@@ -674,7 +670,7 @@ impl Image {
         Self::from_rows(rows)
     }
 
-    pub(crate) fn diff_patch_rect(&self, next: &Self) -> Option<(Rect, Vec<Vec<Cell>>)> {
+    pub fn diff_patch_rect(&self, next: &Self) -> Option<(Rect, Vec<Vec<Cell>>)> {
         if self.width != next.width || self.height != next.height || self == next {
             return None;
         }
@@ -836,67 +832,4 @@ pub enum Operation {
         id: ImageId,
         edits: Vec<CellEdit>,
     },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cell(symbol: &str) -> Cell {
-        Cell::plain(symbol).unwrap()
-    }
-
-    #[test]
-    fn diff_patch_rebuilds_a_sparse_cell_change() {
-        let old = Image::from_rows(vec![vec![cell("a"), cell("b"), cell("c")]]).unwrap();
-        let next = Image::from_rows(vec![vec![cell("a"), cell("x"), cell("c")]]).unwrap();
-        let (rect, rows) = old.diff_patch_rect(&next).expect("sparse change patches");
-        assert_eq!(rect, Rect::new(0, 1, 1, 1));
-        let mut patched = old.clone();
-        patched.patch_rect(rect, &rows).unwrap();
-        assert_eq!(patched, next);
-    }
-
-    #[test]
-    fn diff_patch_expands_for_wide_glyph_boundaries() {
-        let old = Image::from_rows(vec![vec![cell("a"), cell("界"), cell("c")]]).unwrap();
-        let next =
-            Image::from_rows(vec![vec![cell("a"), cell("x"), Cell::blank(), cell("c")]]).unwrap();
-        let (rect, rows) = old.diff_patch_rect(&next).expect("sparse change patches");
-        assert_eq!(rect, Rect::new(0, 1, 2, 1));
-        let mut patched = old.clone();
-        patched.patch_rect(rect, &rows).unwrap();
-        assert_eq!(patched, next);
-    }
-
-    #[test]
-    fn patch_rect_clears_wide_neighbors_per_row() {
-        let old = Image::from_rows(vec![
-            vec![
-                cell("a"),
-                cell("界"),
-                cell("b"),
-                cell("c"),
-                cell("d"),
-                cell("e"),
-            ],
-            vec![
-                cell("a"),
-                cell("b"),
-                cell("c"),
-                cell("d"),
-                cell("界"),
-                cell("e"),
-            ],
-        ])
-        .unwrap();
-        let rows = vec![
-            vec![cell("x"), cell("x"), cell("x"), cell("x")],
-            vec![cell("y"), cell("y"), cell("y"), cell("y")],
-        ];
-        let mut patched = old.clone();
-        patched.patch_rect(Rect::new(0, 1, 4, 2), &rows).unwrap();
-        assert_eq!(patched.cell_at(0, 5).cell().symbol(), "d");
-        assert_eq!(patched.cell_at(1, 6).cell().symbol(), "e");
-    }
 }

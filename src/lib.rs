@@ -135,6 +135,7 @@ pub mod advanced {
 // Macro expansion support. Public only so external `ui!` expansions compile;
 // nothing here is a stable interface.
 #[doc(hidden)]
+#[doc(hidden)]
 pub mod __private {
     // Macro expansion helpers and test-only layout access. Reachable only
     // through this hidden module so they never pollute the crate root.
@@ -142,6 +143,18 @@ pub mod __private {
         __ui_apply, __ui_events, __ui_tag_names_equal, TextLayoutForTest, indexed_layout_for_test,
     };
     pub use crate::elements::normalize_for_test;
+    // Canonical glyph policy. The public wrappers (Cell, Fill, ScrollbarGlyph)
+    // delegate to it, and the characterization table drives it directly.
+    pub use crate::data::CellSlot;
+    pub use crate::glyph::{
+        AllowedGlyphWidth, GlyphError, ValidatedTerminalGlyph, validate_terminal_glyph,
+    };
+    // Runtime counters record work performed on worker threads. Tests drive
+    // them directly because the producers run inside the pipeline.
+    pub use crate::runtime::metrics::{
+        note_event_dispatched, note_frame_presented, note_node_lowered, note_output_bytes,
+        note_text_shaping,
+    };
 }
 
 // High-level alias for the common entry point.

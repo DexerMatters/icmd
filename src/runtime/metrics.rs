@@ -10,23 +10,23 @@ static OUTPUT_BYTES: AtomicU64 = AtomicU64::new(0);
 static FRAMES_PRESENTED: AtomicU64 = AtomicU64::new(0);
 static EVENTS_DISPATCHED: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn note_text_shaping() {
+pub fn note_text_shaping() {
     TEXT_SHAPING_CALLS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn note_node_lowered() {
+pub fn note_node_lowered() {
     NODES_LOWERED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn note_output_bytes(bytes: usize) {
+pub fn note_output_bytes(bytes: usize) {
     OUTPUT_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
 }
 
-pub(crate) fn note_frame_presented() {
+pub fn note_frame_presented() {
     FRAMES_PRESENTED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn note_event_dispatched() {
+pub fn note_event_dispatched() {
     EVENTS_DISPATCHED.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -67,27 +67,5 @@ pub fn runtime_metrics() -> RuntimeMetrics {
         output_bytes: OUTPUT_BYTES.load(Ordering::Relaxed),
         frames_presented: FRAMES_PRESENTED.load(Ordering::Relaxed),
         events_dispatched: EVENTS_DISPATCHED.load(Ordering::Relaxed),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn deltas_are_monotonic() {
-        let before = runtime_metrics();
-        note_text_shaping();
-        note_node_lowered();
-        note_output_bytes(7);
-        note_frame_presented();
-        note_event_dispatched();
-        let after = runtime_metrics();
-        let delta = after.since(before);
-        assert!(delta.text_shaping_calls >= 1);
-        assert!(delta.nodes_lowered >= 1);
-        assert!(delta.output_bytes >= 7);
-        assert!(delta.frames_presented >= 1);
-        assert!(delta.events_dispatched >= 1);
     }
 }
