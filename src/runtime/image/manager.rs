@@ -12,6 +12,11 @@ use crate::{Cell, Image, ImageSource, RasterImage, RasterImageError, RasterPlace
 
 pub(crate) type LoadResult = (ImageSource, Result<RasterImage, RasterImageError>);
 
+// Bounded capacities, exposed through `ImageMetrics` so queue pressure and
+// result backlog are observable rather than implicit.
+pub(crate) const JOB_QUEUE_CAPACITY: usize = 32;
+pub(crate) const RESULT_QUEUE_CAPACITY: usize = 64;
+
 // Why a scheduling attempt did not (or did) enqueue work. A full worker queue is
 // backpressure, never a decode failure: the request stays pending and retryable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,11 +39,11 @@ impl ImageLoader {
         limits: ResourceLimits,
         budget: Arc<ByteBudget>,
     ) -> Self {
-        let (jobs, job_rx) = crossbeam_channel::bounded::<ImageSource>(32);
+        let (jobs, job_rx) = crossbeam_channel::bounded::<ImageSource>(JOB_QUEUE_CAPACITY);
         // Bounded results: decoded pixels cannot accumulate without limit while
         // the renderer is busy. Workers block once the queue is full, which is
         // exactly the backpressure the render loop drains.
-        let (result_tx, results) = crossbeam_channel::bounded(64);
+        let (result_tx, results) = crossbeam_channel::bounded(RESULT_QUEUE_CAPACITY);
         for _ in 0..workers {
             let job_rx = job_rx.clone();
             let result_tx = result_tx.clone();
@@ -359,6 +364,21 @@ impl ImageManager {
 
     pub(crate) fn bytes_in_flight(&self) -> usize {
         self.budget.used()
+    }
+
+    pub(crate) fn job_capacity(&self) -> usize {
+        JOB_QUEUE_CAPACITY
+    }
+
+    pub(crate) fn result_capacity(&self) -> usize {
+        RESULT_QUEUE_CAPACITY
+    }
+
+    pub(crate) fn result_backlog(&self) -> usize {
+        self.loader
+            .results
+            .len()
+            .saturating_add(self.pending_loads.len())
     }
 
     pub(crate) fn limits(&self) -> &ResourceLimits {

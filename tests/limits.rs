@@ -347,6 +347,10 @@ fn image_byte_budget_is_concurrency_safe() {
     assert_eq!(metrics.in_flight_bytes, 0);
     assert_eq!(metrics.max_in_flight_bytes, 64);
     assert!(metrics.pending_sources == 0);
+    // SAF-05 gate: queue/result capacity and the current backlog are observable.
+    assert!(metrics.job_queue_capacity > 0);
+    assert!(metrics.result_queue_capacity > 0);
+    assert_eq!(metrics.result_backlog, 0);
 }
 
 #[test]

@@ -43,6 +43,11 @@ pub struct ImageMetrics {
     pub pending_sources: usize,
     pub max_in_flight_bytes: usize,
     pub max_cache_bytes: usize,
+    // Bounded queue capacities and the current undelivered result backlog, so
+    // queue pressure is visible without inspecting internals.
+    pub job_queue_capacity: usize,
+    pub result_queue_capacity: usize,
+    pub result_backlog: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,6 +431,9 @@ impl Renderer {
             pending_sources: self.image_manager.pending_count(),
             max_in_flight_bytes: self.limits.max_in_flight_image_bytes,
             max_cache_bytes: self.image_manager.limits().max_cache_bytes,
+            job_queue_capacity: self.image_manager.job_capacity(),
+            result_queue_capacity: self.image_manager.result_capacity(),
+            result_backlog: self.image_manager.result_backlog(),
         }
     }
 

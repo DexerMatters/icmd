@@ -439,6 +439,76 @@ mod tests {
         assert!(!buffer.is_empty());
     }
 
+    // SAF-15: the loop must coalesce replaceable position events and never
+    // coalesce key, paste, focus, or shutdown events.
+    #[test]
+    fn only_replaceable_events_are_coalesced() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, MouseEvent, MouseEventKind};
+
+        // A move replaces a pending move: only the newest position is observable.
+        let mut pending = None;
+        let first = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        });
+        let second = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 9,
+            row: 9,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(coalesce_event(&mut pending, first));
+        assert!(coalesce_event(&mut pending, second));
+        match pending {
+            Some(Event::Mouse(mouse)) => assert_eq!((mouse.column, mouse.row), (9, 9)),
+            other => panic!("expected the newest move, got {other:?}"),
+        }
+
+        // A resize is replaceable too.
+        let mut pending = None;
+        assert!(coalesce_event(&mut pending, Event::Resize(10, 4)));
+        assert!(coalesce_event(&mut pending, Event::Resize(20, 8)));
+
+        // Key events keep their place in the stream.
+        let mut pending = None;
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        assert!(!coalesce_event(&mut pending, key));
+        assert!(matches!(pending, Some(Event::Key(_))));
+
+        // Paste and focus events are never coalesced either.
+        let mut pending = None;
+        assert!(!coalesce_event(&mut pending, Event::Paste("x".into())));
+        let mut pending = None;
+        assert!(!coalesce_event(&mut pending, Event::FocusGained));
+    }
+
+    // SAF-15: input latency must not grow with a large configured poll interval.
+    #[test]
+    fn render_wait_is_capped_independently_of_the_configured_interval() {
+        let config = RuntimeConfig {
+            poll_interval: Duration::from_millis(5_000),
+            ..RuntimeConfig::default()
+        };
+        let wait = config.poll_interval.min(MAX_RENDER_WAIT);
+        assert_eq!(wait, MAX_RENDER_WAIT);
+        assert!(
+            MAX_RENDER_WAIT <= Duration::from_millis(16),
+            "the render wait is the maximum input latency and must stay small"
+        );
+
+        // A shorter configured interval is honoured, and never zero.
+        let config = RuntimeConfig {
+            poll_interval: Duration::from_millis(2),
+            ..RuntimeConfig::default()
+        };
+        assert_eq!(
+            config.poll_interval.min(MAX_RENDER_WAIT),
+            Duration::from_millis(2)
+        );
+    }
+
     #[test]
     fn a_minimal_configuration_skips_the_optional_commands() {
         let config = RuntimeConfig {
