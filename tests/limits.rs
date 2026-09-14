@@ -827,16 +827,11 @@ fn editor_refuses_input_beyond_the_byte_budget() {
 
 // Text shaping cost per frame is bounded by the leaf count, not by the tree
 // shape. This is the guard that matters for the shared-shaping work: a leaf
-// must not be shaped once per ancestor.
+// must not be shaped once per ancestor, and measurement must not shape an
+// unconstrained leaf a second time.
 //
-// The performance plan's stronger goal ("measure-plus-paint shapes each
-// unchanged text leaf once") is NOT yet met: an unchanged frame currently
-// shapes each leaf twice, once for measurement and once for paint. This test
-// pins the per-leaf bound so the double shaping cannot become worse, and the
-// unsatisfied goal is recorded in the plan tracking rather than asserted here.
-//
-// Counters are process-global and tests in this binary run concurrently, so the
-// bound is deliberately generous.
+// Counters are process-global and tests in this binary run concurrently, so a
+// small slack is allowed over the exact leaf count.
 #[test]
 fn text_shaping_per_frame_is_bounded_by_the_leaf_count() {
     let _guard = METRIC_READERS
@@ -870,9 +865,10 @@ fn text_shaping_per_frame_is_bounded_by_the_leaf_count() {
     let second = runtime_metrics().since(first);
 
     assert!(
-        second.text_shaping_calls <= 4 * LEAVES as u64,
-        "shaping must stay bounded by the leaf count, not the tree shape: \
-         second frame shaped {} for {LEAVES} leaves",
+        second.text_shaping_calls <= LEAVES as u64 + 8,
+        "an unchanged leaf must be shaped at most once per frame, so shaping \
+         stays proportional to the leaf count: second frame shaped {} for \
+         {LEAVES} leaves",
         second.text_shaping_calls
     );
 

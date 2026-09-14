@@ -50,13 +50,17 @@ pub(super) fn text_measure(
     let natural = layout(text, usize::MAX / 4, inherited, merging);
     let natural_width = natural.max_row_width() as i32;
     let width = offered_width.map_or(natural_width, |value| natural_width.min(value.max(0)));
-    let wrapped = layout(
-        text,
-        offered_width.unwrap_or(natural_width).max(1) as usize,
-        inherited,
-        merging,
-    );
-    (width, wrapped.row_count() as i32)
+    // Wrapping at or above the natural width cannot break any row, so the
+    // natural layout already answers the row count. Only a narrower offer
+    // needs a second shaping pass, which is what keeps an unconstrained leaf
+    // to one shape instead of two per frame.
+    let offered = offered_width.unwrap_or(natural_width.max(1)).max(1) as usize;
+    let rows = if natural_width <= 0 || offered >= natural_width as usize {
+        natural.row_count()
+    } else {
+        layout(text, offered, inherited, merging).row_count()
+    };
+    (width, rows as i32)
 }
 
 fn editor_measure(
