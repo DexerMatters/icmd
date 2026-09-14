@@ -148,6 +148,7 @@ fn shape_text<S>(
 where
     S: Clone,
 {
+    crate::runtime::metrics::note_text_shaping();
     let mut normalized = String::new();
     let mut shaped = Vec::new();
     // Source offsets are global to the whole `Text`, so a multi-span value has

@@ -394,6 +394,7 @@ impl EventDispatcher {
     }
 
     pub fn dispatch(&self, event: Event) -> DispatchOutcome {
+        super::metrics::note_event_dispatched();
         match event {
             Event::Mouse(event) => self.dispatch_mouse(event),
             Event::Key(event) => self.dispatch_key(KeyboardEvent { key: event }),

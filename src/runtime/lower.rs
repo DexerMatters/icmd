@@ -503,6 +503,7 @@ impl Lower {
             NodeKind::Fragment(_) => (FiberKind::Fragment, None, ContextValues::default()),
         };
         self.live_nodes = self.live_nodes.saturating_add(1);
+        super::metrics::note_node_lowered();
         let fiber = self.fibers.insert(Fiber {
             parent: Some(parent),
             depth: self.fibers[parent].depth.saturating_add(1),

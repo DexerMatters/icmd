@@ -744,3 +744,47 @@ fn a_tree_at_the_default_depth_limit_renders_without_overflow() {
     drop(input);
     let _ = runtime.shutdown(ShutdownPolicy::default());
 }
+
+// Phase 0 observability: the runtime counters record the work an operation
+// actually performed, and are readable after the worker has finished.
+#[test]
+fn runtime_counters_record_shaping_lowering_output_and_frames() {
+    use icmd::advanced::{Lower, Renderer, Runtime, ShutdownPolicy, runtime_metrics};
+    use std::time::Duration;
+
+    let before = runtime_metrics();
+    let viewport = Size::new(24, 6);
+    let (commit, _) = Commit::new(viewport);
+    let runtime = Runtime::new(Lower::with_limits(ResourceLimits::default()))
+        .then(commit)
+        .then(Renderer::new(viewport).unwrap())
+        .start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+    let node = icmd::fragment((0..8).map(|index| icmd::text(format!("row {index}"))));
+    input.send(node).unwrap();
+    let frame = output
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    drop(input);
+    let _ = runtime.shutdown(ShutdownPolicy::default());
+
+    let delta = runtime_metrics().since(before);
+    assert!(
+        delta.nodes_lowered >= 9,
+        "one fragment plus eight text nodes must be counted: {delta:?}"
+    );
+    assert!(
+        delta.text_shaping_calls >= 1,
+        "the text runs must be shaped at least once: {delta:?}"
+    );
+    assert!(
+        delta.output_bytes >= frame.len() as u64,
+        "emitted bytes must cover the frame: {delta:?}"
+    );
+    assert!(
+        delta.frames_presented >= 1,
+        "a non-empty frame must be counted: {delta:?}"
+    );
+}

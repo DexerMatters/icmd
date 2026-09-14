@@ -1375,6 +1375,7 @@ impl Renderer {
             .as_ref()
             .map_or(0usize, String::len)
             .saturating_add(native.len());
+        super::metrics::note_output_bytes(total);
         if total > self.limits.max_output_bytes_per_frame {
             // Pending damage is deliberately retained so a later attempt with a
             // larger budget (or smaller scene) can re-encode it. Only the
@@ -1398,7 +1399,7 @@ impl Renderer {
         } else if needs_native_tiles {
             self.raster_scene_dirty = false;
         }
-        Ok(match (ansi, native) {
+        let output = match (ansi, native) {
             (None, native) if native.is_empty() => None,
             (Some(cells), native) if native.is_empty() => Some(cells),
             (Some(mut cells), native) => {
@@ -1406,7 +1407,11 @@ impl Renderer {
                 Some(cells)
             }
             (None, native) => Some(native),
-        })
+        };
+        if output.is_some() {
+            super::metrics::note_frame_presented();
+        }
+        Ok(output)
     }
 
     fn native_output(&mut self, tiles: Vec<NativeTile>, replay: bool) -> String {

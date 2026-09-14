@@ -122,8 +122,8 @@ pub mod advanced {
         ChannelRenderer, Commit, CommitConfig, ConfigError, DispatchOutcome, EventDispatcher,
         FocusError, FocusOutcome, FrameError, ImageMetrics, ImageResource, LayoutInstrument,
         LimitError, Lower, LowerError, PipelineComponent, Renderer, RendererConfig,
-        RendererConfigError, ResourceLimits, Runtime, RuntimeError, RuntimeHandle, ShutdownPolicy,
-        Stage, SurfaceKind, ViewportSetter, live_worker_count,
+        RendererConfigError, ResourceLimits, Runtime, RuntimeError, RuntimeHandle, RuntimeMetrics,
+        ShutdownPolicy, Stage, SurfaceKind, ViewportSetter, live_worker_count, runtime_metrics,
     };
 
     // The terminal-cell surface keeps its historical `Image` name at the root
