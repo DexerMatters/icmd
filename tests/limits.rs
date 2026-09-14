@@ -351,6 +351,10 @@ fn image_byte_budget_is_concurrency_safe() {
     assert!(metrics.job_queue_capacity > 0);
     assert!(metrics.result_queue_capacity > 0);
     assert_eq!(metrics.result_backlog, 0);
+    // Phase 0 observability: the queue high-water marks are reported and cannot
+    // exceed the capacity they measure.
+    assert!(metrics.job_queue_high_water <= metrics.job_queue_capacity);
+    assert!(metrics.result_queue_high_water <= metrics.result_queue_capacity);
     // SAF-09: the cache budget is named as an eviction target, and any excess
     // caused by active/pinned entries is reported rather than hidden.
     assert!(metrics.evictable_cache_target_bytes > 0);

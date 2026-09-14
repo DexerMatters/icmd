@@ -53,6 +53,10 @@ pub struct ImageMetrics {
     pub job_queue_capacity: usize,
     pub result_queue_capacity: usize,
     pub result_backlog: usize,
+    // Peak observed depths. A high-water mark equal to the capacity is the
+    // signal that the queue saturated at least once.
+    pub job_queue_high_water: usize,
+    pub result_queue_high_water: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,6 +466,8 @@ impl Renderer {
             job_queue_capacity: self.image_manager.job_capacity(),
             result_queue_capacity: self.image_manager.result_capacity(),
             result_backlog: self.image_manager.result_backlog(),
+            job_queue_high_water: self.image_manager.job_queue_high_water(),
+            result_queue_high_water: self.image_manager.result_queue_high_water(),
         }
     }
 

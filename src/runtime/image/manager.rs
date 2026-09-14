@@ -30,6 +30,7 @@ enum ScheduleResult {
 struct ImageLoader {
     jobs: Sender<ImageSource>,
     results: Receiver<LoadResult>,
+    high_water: Arc<QueueHighWater>,
 }
 
 impl ImageLoader {
@@ -39,6 +40,7 @@ impl ImageLoader {
         limits: ResourceLimits,
         budget: Arc<ByteBudget>,
     ) -> Self {
+        let high_water = Arc::new(QueueHighWater::default());
         let (jobs, job_rx) = crossbeam_channel::bounded::<ImageSource>(JOB_QUEUE_CAPACITY);
         // Bounded results: decoded pixels cannot accumulate without limit while
         // the renderer is busy. Workers block once the queue is full, which is
@@ -48,6 +50,7 @@ impl ImageLoader {
             let job_rx = job_rx.clone();
             let result_tx = result_tx.clone();
             let gate = gate.clone();
+            let high_water = high_water.clone();
             let budget = budget.clone();
             thread::Builder::new()
                 .name("icmd-image-loader".to_string())
@@ -66,6 +69,9 @@ impl ImageLoader {
                             .map(|image| image.rgba8().len())
                             .unwrap_or(0);
                         let _reservation = budget.reserve(bytes).ok();
+                        // Sampled before the send, which is the deepest this
+                        // worker can observe the result queue.
+                        high_water.observe_results(result_tx.len().saturating_add(1));
                         if result_tx.send((source, result)).is_err() {
                             break;
                         }
@@ -73,15 +79,51 @@ impl ImageLoader {
                 })
                 .expect("failed to spawn image loader");
         }
-        Self { jobs, results }
+        Self {
+            jobs,
+            results,
+            high_water,
+        }
     }
 
     fn schedule(&self, source: ImageSource) -> ScheduleResult {
+        // The depth after a successful send is the queue's high-water candidate.
+        self.high_water
+            .observe_jobs(self.jobs.len().saturating_add(1));
         match self.jobs.try_send(source) {
             Ok(()) => ScheduleResult::Queued,
             Err(crossbeam_channel::TrySendError::Full(_)) => ScheduleResult::Backpressured,
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => ScheduleResult::Closed,
         }
+    }
+}
+
+// Peak observed queue depths. The plan asks for high-water marks rather than
+// instantaneous depth, because a transient saturation is the signal that a
+// capacity is too small.
+#[derive(Debug, Default)]
+pub(crate) struct QueueHighWater {
+    job: std::sync::atomic::AtomicUsize,
+    result: std::sync::atomic::AtomicUsize,
+}
+
+impl QueueHighWater {
+    pub(crate) fn observe_jobs(&self, depth: usize) {
+        self.job
+            .fetch_max(depth, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn observe_results(&self, depth: usize) {
+        self.result
+            .fetch_max(depth, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn jobs(&self) -> usize {
+        self.job.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn results(&self) -> usize {
+        self.result.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -370,6 +412,14 @@ impl ImageManager {
 
     pub(crate) fn result_capacity(&self) -> usize {
         RESULT_QUEUE_CAPACITY
+    }
+
+    pub(crate) fn job_queue_high_water(&self) -> usize {
+        self.loader.high_water.jobs()
+    }
+
+    pub(crate) fn result_queue_high_water(&self) -> usize {
+        self.loader.high_water.results()
     }
 
     pub(crate) fn result_backlog(&self) -> usize {
