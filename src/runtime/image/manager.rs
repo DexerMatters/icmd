@@ -27,14 +27,14 @@ enum ScheduleResult {
 }
 
 #[derive(Debug)]
-struct ImageLoader {
+pub struct ImageLoader {
     jobs: Sender<ImageSource>,
     results: Receiver<LoadResult>,
     high_water: Arc<QueueHighWater>,
 }
 
 impl ImageLoader {
-    fn with_workers(
+    pub fn with_workers(
         workers: usize,
         gate: Option<Receiver<()>>,
         limits: ResourceLimits,
@@ -131,13 +131,13 @@ impl QueueHighWater {
 // is RAII: capacity returns to the pool when the decoded buffer is dropped, on
 // both the success and failure paths.
 #[derive(Debug)]
-pub(crate) struct ByteBudget {
+pub struct ByteBudget {
     limit: usize,
     used: std::sync::atomic::AtomicUsize,
 }
 
 impl ByteBudget {
-    pub(crate) fn new(limit: usize) -> Self {
+    pub fn new(limit: usize) -> Self {
         Self {
             limit,
             used: std::sync::atomic::AtomicUsize::new(0),
@@ -191,21 +191,21 @@ impl Drop for ByteReservation {
 }
 
 #[derive(Debug)]
-struct SourceCacheEntry {
-    state: SourceState,
+pub struct SourceCacheEntry {
+    pub state: SourceState,
     bytes: usize,
     used: u64,
 }
 
 #[derive(Debug)]
-enum SourceState {
+pub enum SourceState {
     Loading,
     Ready(RasterImage),
     Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SourceRequest {
+pub enum SourceRequest {
     AlreadyAvailable,
     Queued,
     // The worker queue is momentarily full. The request is retained and retried;
@@ -217,14 +217,14 @@ pub(crate) enum SourceRequest {
 }
 
 #[derive(Debug)]
-pub(crate) struct ImageManager {
+pub struct ImageManager {
     loader: ImageLoader,
     budget: Arc<ByteBudget>,
     // Keyed by cache identity, so two spellings of the same opened file share
     // one load and one entry.
-    source_cache: HashMap<ImageSourceKey, SourceCacheEntry>,
+    pub source_cache: HashMap<ImageSourceKey, SourceCacheEntry>,
     source_cache_bytes: usize,
-    loading: HashSet<ImageSourceKey>,
+    pub loading: HashSet<ImageSourceKey>,
     // Deduplicated queue of sources that could not be handed to a worker yet.
     // The source travels with its key so a retry can still load it.
     pending: VecDeque<(ImageSourceKey, ImageSource)>,
@@ -239,7 +239,7 @@ impl ImageManager {
         Self::with_loader(loader, budget)
     }
 
-    fn with_loader(loader: ImageLoader, budget: Arc<ByteBudget>) -> Self {
+    pub fn with_loader(loader: ImageLoader, budget: Arc<ByteBudget>) -> Self {
         Self {
             loader,
             budget,
@@ -260,7 +260,7 @@ impl ImageManager {
         self.pending_loads.push_back(result);
     }
 
-    pub(crate) fn take_results(&mut self) -> Vec<LoadResult> {
+    pub fn take_results(&mut self) -> Vec<LoadResult> {
         let mut results = Vec::new();
         while let Some(result) = self
             .pending_loads
@@ -275,7 +275,7 @@ impl ImageManager {
         results
     }
 
-    pub(crate) fn source_image(&self, source: &ImageSource) -> Option<RasterImage> {
+    pub fn source_image(&self, source: &ImageSource) -> Option<RasterImage> {
         match source {
             ImageSource::Loaded(image) => Some(image.clone()),
             ImageSource::File(_) => {
@@ -306,7 +306,7 @@ impl ImageManager {
         placeholder(raster.width, raster.height, symbol)
     }
 
-    pub(crate) fn request(&mut self, source: &ImageSource) -> SourceRequest {
+    pub fn request(&mut self, source: &ImageSource) -> SourceRequest {
         let key = source.cache_key();
         if source.loaded_image().is_some() || self.source_cache.contains_key(&key) {
             if let Some(entry) = self.source_cache.get_mut(&key) {
@@ -369,7 +369,7 @@ impl ImageManager {
         }
     }
 
-    pub(crate) fn store_result(
+    pub fn store_result(
         &mut self,
         source: ImageSource,
         result: Result<RasterImage, RasterImageError>,
@@ -429,7 +429,7 @@ impl ImageManager {
             .saturating_add(self.pending_loads.len())
     }
 
-    pub(crate) fn pending_count(&self) -> usize {
+    pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
 
@@ -467,77 +467,4 @@ pub(crate) fn placeholder(width: u16, height: u16, symbol: &str) -> Option<Image
         .patch_cells(&[crate::CellEdit { position, cell }])
         .ok()?;
     Some(image)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn source(name: &str) -> ImageSource {
-        ImageSource::file(format!("/nonexistent/icmd-test/{name}.png"))
-    }
-
-    #[test]
-    fn a_full_queue_is_backpressure_not_failure() {
-        // Two workers, both stalled; the 32-slot job queue then fills up.
-        let (gate_tx, gate_rx) = crossbeam_channel::bounded(0);
-        let limits = ResourceLimits::default();
-        let budget = Arc::new(ByteBudget::new(limits.max_in_flight_image_bytes));
-        let loader = ImageLoader::with_workers(2, Some(gate_rx), limits, budget.clone());
-        let mut manager = ImageManager::with_loader(loader, budget);
-        let mut backpressured = None;
-        for index in 0..64 {
-            let outcome = manager.request(&source(&index.to_string()));
-            if outcome == SourceRequest::Backpressured {
-                backpressured = Some(index);
-                break;
-            }
-        }
-        let index = backpressured.expect("filling the worker queue must backpressure");
-        assert!(index > 30, "backpressure started too early at {index}");
-        assert!(manager.pending_count() >= 1);
-
-        // The deferred source is still retryable: it must not be cached as a
-        // permanent failure, so no caller sees the "×" fallback for it.
-        let deferred = source(&index.to_string());
-        assert!(manager.source_image(&deferred).is_none());
-        assert!(
-            !manager
-                .source_cache
-                .get(&deferred.cache_key())
-                .is_some_and(|entry| matches!(entry.state, SourceState::Failed)),
-            "backpressure must not poison the cache with a failure"
-        );
-
-        // Releasing the workers lets every referenced source settle: each file
-        // does not exist, so each ends in a real (decode/io) failure, not a
-        // synthetic one caused by the full queue.
-        drop(gate_tx);
-        for _ in 0..200 {
-            let results = manager.take_results();
-            for (source, result) in results {
-                manager.store_result(source, result);
-            }
-            if manager.pending_count() == 0 && manager.loading.is_empty() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert_eq!(manager.pending_count(), 0, "deferred work must drain");
-        assert!(manager.loading.is_empty(), "every request must settle");
-    }
-
-    #[test]
-    fn a_disconnected_queue_reports_closed() {
-        // Zero workers drop the job receiver immediately, so scheduling has no
-        // destination at all.
-        let limits = ResourceLimits::default();
-        let budget = Arc::new(ByteBudget::new(limits.max_in_flight_image_bytes));
-        let loader = ImageLoader::with_workers(0, None, limits, budget.clone());
-        let mut manager = ImageManager::with_loader(loader, budget);
-        assert_eq!(manager.request(&source("closed")), SourceRequest::Closed);
-        // A closed queue is not a decode failure and must not be cached as one.
-        assert!(manager.source_image(&source("closed")).is_none());
-        assert!(manager.source_cache.is_empty());
-    }
 }

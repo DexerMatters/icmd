@@ -1,6 +1,6 @@
 mod kitty;
 mod lifecycle;
-mod manager;
+pub(crate) mod manager;
 pub(in crate::runtime) mod passthrough;
 mod types;
 

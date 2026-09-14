@@ -1,6 +1,6 @@
 pub(crate) mod commit;
 mod event;
-mod image;
+pub(crate) mod image;
 pub(crate) mod limits;
 pub(crate) mod lower;
 pub(crate) mod metrics;

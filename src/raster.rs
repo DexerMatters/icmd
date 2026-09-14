@@ -252,7 +252,7 @@ pub enum ImageSource {
 // Cache identity, derived separately from the caller-visible source so that two
 // spellings of the same opened file share one entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum ImageSourceKey {
+pub enum ImageSourceKey {
     Loaded(u64),
     File(PathBuf),
 }
@@ -278,7 +278,7 @@ impl ImageSource {
     // Identity used for caching. Canonicalization is best-effort: a sandboxed or
     // since-deleted path can still be a perfectly valid handle, so failure falls
     // back to the caller-visible path instead of rejecting the source.
-    pub(crate) fn cache_key(&self) -> ImageSourceKey {
+    pub fn cache_key(&self) -> ImageSourceKey {
         match self {
             Self::Loaded(image) => ImageSourceKey::Loaded(image.id()),
             Self::File(path) => ImageSourceKey::File(
