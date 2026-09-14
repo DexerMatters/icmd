@@ -80,12 +80,12 @@ pub enum RenderError {
     Io(io::Error),
     Frame(FrameError),
     RuntimeClosed,
-    /// An application event listener panicked or re-entered itself. The runtime
-    /// stops instead of continuing in an unknown partially-mutated state.
+    // An application event listener panicked or re-entered itself. The runtime
+    // stops instead of continuing in an unknown partially-mutated state.
     ApplicationCallback(&'static str),
-    /// A pipeline stage failed or was not joined; the typed cause is preserved.
+    // A pipeline stage failed or was not joined; the typed cause is preserved.
     Stage(RuntimeError),
-    /// The configuration could not produce a valid runtime.
+    // The configuration could not produce a valid runtime.
     Config(ConfigError),
 }
 

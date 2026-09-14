@@ -135,3 +135,45 @@ fn security_policy_is_present_and_actionable() {
         "the policy must tell reporters not to file a public issue"
     );
 }
+
+// The user's direction for this release: rustdoc is removed from the crate
+// source, while `//` maintenance comments are preserved. This gate keeps the
+// decision from being silently reverted by a future doc comment.
+#[test]
+fn crate_source_carries_maintenance_comments_but_no_rustdoc() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = 0;
+    let mut comments = 0;
+    let mut stack = vec![root];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).expect("src is readable") {
+            let path = entry.expect("readable entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("source is readable");
+            for (number, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                assert!(
+                    !trimmed.starts_with("///") && !trimmed.starts_with("//!"),
+                    "{}:{} carries rustdoc, which this release removes: {line}",
+                    path.display(),
+                    number + 1
+                );
+                if trimmed.starts_with("//") {
+                    comments += 1;
+                }
+            }
+            files += 1;
+        }
+    }
+    assert!(files > 0, "the crate source must have been inspected");
+    assert!(
+        comments > 500,
+        "maintenance comments must be preserved, found only {comments}"
+    );
+}
