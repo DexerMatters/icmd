@@ -29,7 +29,7 @@ fn unreliable_advancement(cell: &Cell, merging: EmojiMerging) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn encode_diff(
+pub fn encode_diff(
     old: &[CellSlot],
     desired: &[CellSlot],
     viewport: Size,

@@ -1,8 +1,12 @@
+// Renderer composition and encoding tests. The damage encoder and its cell
+// slot type are crate-internal, so they are reached through the hidden module.
+#![allow(clippy::single_range_in_vec_init)] // Damage rows are spans by design.
+use icmd::__private::{CellSlot, Surface, encode_diff};
+use icmd::advanced::{Frame, ImageId, Operation, Renderer, RendererConfig};
+use icmd::{Cell, EmojiMerging, Image, ImageProtocol, ScreenPosition, Size};
+
 // Renderer composition and encoding tests. They live beside the renderer
 // module so the production file stays focused on the implementation.
-#![allow(clippy::single_range_in_vec_init)] // Damage rows are spans by design.
-
-use super::*;
 
 fn slot(symbol: &str) -> CellSlot {
     CellSlot::Lead(Cell::plain(symbol).unwrap())

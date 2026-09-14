@@ -153,10 +153,11 @@ pub mod __private {
     };
     // Raster decode and transform entry points. The widget drives them from
     // inside the crate, so their budgets are verified from outside through here.
+    pub use crate::data::CellSlot;
     pub use crate::raster::{ImageSourceKey, render_rgba_with_cell_size};
+    pub use crate::runtime::renderer::{Surface, encode_diff};
     // Canonical glyph policy. The public wrappers (Cell, Fill, ScrollbarGlyph)
     // delegate to it, and the characterization table drives it directly.
-    pub use crate::data::CellSlot;
     pub use crate::glyph::{
         AllowedGlyphWidth, GlyphError, ValidatedTerminalGlyph, validate_terminal_glyph,
     };

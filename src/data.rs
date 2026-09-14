@@ -303,7 +303,7 @@ impl Cell {
     pub fn attributes(&self) -> Attributes {
         self.attributes
     }
-    pub(crate) fn as_blank(&self) -> Self {
+    pub fn as_blank(&self) -> Self {
         Self {
             foreground: self.foreground,
             background: self.background,

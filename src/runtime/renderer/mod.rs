@@ -179,20 +179,20 @@ struct ValidatedSurface {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum Surface {
+pub enum Surface {
     Cells(Image),
     Raster(RasterPlacement),
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ImageNode {
-    pub(super) surface: Surface,
-    pub(super) fallback: Option<Image>,
-    pub(super) position: ScreenPosition,
-    pub(super) raster_clip: Option<Rect>,
-    pub(super) level: i32,
-    pub(super) order: u64,
-    pub(super) mutation: u64,
+pub struct ImageNode {
+    pub surface: Surface,
+    pub fallback: Option<Image>,
+    pub position: ScreenPosition,
+    pub raster_clip: Option<Rect>,
+    pub level: i32,
+    pub order: u64,
+    pub mutation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -291,10 +291,10 @@ pub struct Renderer {
     pub(super) viewport: Size,
     // Retained scene nodes remain protocol-independent; image-specific state
     // lives in the manager/backend fields below.
-    pub(super) images: HashMap<ImageId, ImageNode>,
+    pub images: HashMap<ImageId, ImageNode>,
     next_order: u64,
     next_mutation: u64,
-    last: Vec<CellSlot>,
+    pub last: Vec<CellSlot>,
     scratch: Vec<CellSlot>,
     dirty: Vec<bool>,
     // Which cells `dirty` currently marks, so it can be cleared in O(damage)
@@ -310,7 +310,7 @@ pub struct Renderer {
     // It makes wide-glyph validation constant-time without another scene walk.
     damage_rows: Vec<Vec<Range<usize>>>,
     owners: Vec<usize>,
-    layers: Vec<ImageId>,
+    pub layers: Vec<ImageId>,
     layers_dirty: bool,
     full_redraw: bool,
     pub(super) protocol: ImageProtocol,
@@ -1439,7 +1439,4 @@ mod cache;
 mod compose;
 mod native;
 mod scene;
-use ansi::encode_diff;
-
-#[cfg(test)]
-mod tests;
+pub use ansi::encode_diff;

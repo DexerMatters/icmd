@@ -5,7 +5,7 @@ pub(crate) mod limits;
 pub(crate) mod lower;
 pub(crate) mod metrics;
 mod pipeline;
-mod renderer;
+pub(crate) mod renderer;
 
 pub use commit::{Commit, CommitConfig, LayoutInstrument, ViewportSetter};
 pub use event::{DispatchOutcome, EventDispatcher, FocusError, FocusOutcome};
