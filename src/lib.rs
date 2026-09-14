@@ -10,10 +10,6 @@ pub mod theme;
 mod ui;
 
 pub use app::{RenderError, RuntimeConfig, render};
-#[doc(hidden)]
-pub use basic::{TextLayoutForTest, indexed_layout_for_test};
-#[doc(hidden)]
-pub use elements::normalize_for_test;
 pub use theme::{ThemeBuilder, ThemeProviderProps, theme_context, theme_provider};
 
 pub use elements::{
@@ -26,9 +22,9 @@ pub use elements::{
     raw_input, row, scroll_area, section, skeleton, spacer, spinner, switch, textarea,
 };
 
-// Canonical raster widget constructor. The historical `image` spelling is kept
-// as a deprecated alias below for one transition release, because it collided
-// with both the `image` facade module and the decoded-pixel `RasterImage` type.
+// Canonical raster widget constructor. The historical `image` spelling was
+// removed because it collided with both the `image` facade module and the
+// decoded-pixel `RasterImage` type. Use `widgets::raster_image`.
 pub use elements::image::image as raster_image;
 
 pub use basic::{
@@ -135,9 +131,12 @@ pub mod advanced {
 // nothing here is a stable interface.
 #[doc(hidden)]
 pub mod __private {
-    // Macro expansion helpers. Reachable only through this hidden module so
-    // they never pollute the crate root.
-    pub use crate::basic::{__ui_apply, __ui_events, __ui_tag_names_equal};
+    // Macro expansion helpers and test-only layout access. Reachable only
+    // through this hidden module so they never pollute the crate root.
+    pub use crate::basic::{
+        __ui_apply, __ui_events, __ui_tag_names_equal, TextLayoutForTest, indexed_layout_for_test,
+    };
+    pub use crate::elements::normalize_for_test;
 }
 
 // High-level alias for the common entry point.

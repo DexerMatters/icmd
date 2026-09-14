@@ -351,7 +351,7 @@ mod text_indexes {
                 .collect();
             for multiline in [false, true] {
                 let expected = reference_normalize(&input, multiline);
-                let actual = icmd::normalize_for_test(&input, multiline);
+                let actual = icmd::__private::normalize_for_test(&input, multiline);
                 assert_eq!(
                     actual, expected,
                     "normalization disagreed for {input:?} (multiline={multiline})"
@@ -376,7 +376,7 @@ mod text_indexes {
                 text.push(' ');
             }
             let width = 1 + (rng() % 10) as usize;
-            let layout = icmd::indexed_layout_for_test(&text, width);
+            let layout = icmd::__private::indexed_layout_for_test(&text, width);
             for source in 0..=text.len() {
                 let expected = reference_row_of_source(&layout, source, text.len());
                 let actual = layout.row_of_source(source);
@@ -389,7 +389,7 @@ mod text_indexes {
     }
 
     fn reference_row_of_source(
-        layout: &icmd::TextLayoutForTest,
+        layout: &icmd::__private::TextLayoutForTest,
         source: usize,
         source_len: usize,
     ) -> usize {
