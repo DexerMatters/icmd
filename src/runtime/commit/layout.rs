@@ -129,7 +129,7 @@ impl Commit {
         match node {
             DomNode::Image { image, .. } => (image.width() as i32, image.height() as i32),
             DomNode::Raster { raster, .. } => (raster.width as i32, raster.height as i32),
-            DomNode::Text { text, .. } => {
+            DomNode::Text { id, text, .. } => {
                 let style = ComputedStyle::resolve(&text.layout_style, inherited);
                 if style.visibility == Visibility::Hidden {
                     return (0, 0);
@@ -146,6 +146,8 @@ impl Commit {
                     .map(|value| value.saturating_sub(insets.left as i32 + insets.right as i32))
                     .or(offered_content_width);
                 let (intrinsic_width, intrinsic_height) = text_measure(
+                    Some(*id),
+                    Some(&self.natural_cache),
                     text,
                     text_width,
                     offered_height,

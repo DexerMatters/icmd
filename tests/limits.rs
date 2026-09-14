@@ -1062,13 +1062,12 @@ fn the_transform_budget_binds_independently_of_the_source_budget() {
     assert!(limits.check_transform_pixels(16).is_ok());
 }
 
-// PERF residual: a wrapping leaf offered less than its natural width still
-// shapes twice per frame, because intrinsic width needs the unwrapped layout and
-// the wrapped row count needs a second one. The plan's target is one shape per
-// leaf; closing it needs the frame-local natural-layout cache described at
-// `commit::text::layout`. This test measures the residual so it cannot worsen.
+// PERF gate: "measure-plus-paint shapes each unchanged text leaf once". The
+// natural (unwrapped) layout is width-independent and cached per node, so a
+// wrapping leaf in a narrow container shapes once per frame for the wrapped
+// pass instead of twice.
 #[test]
-fn a_narrow_wrapping_leaf_shapes_at_most_twice_per_frame() {
+fn a_narrow_wrapping_leaf_is_shaped_once_per_frame() {
     let _guard = METRIC_READERS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -1101,10 +1100,56 @@ fn a_narrow_wrapping_leaf_shapes_at_most_twice_per_frame() {
     let second = runtime_metrics().since(first);
 
     assert!(
-        second.text_shaping_calls <= 2 * LEAVES as u64 + 8,
-        "a narrow wrapping leaf must stay at the known two-shape ceiling: \
-         second frame shaped {} for {LEAVES} leaves",
+        second.text_shaping_calls <= LEAVES as u64 + 8,
+        "a wrapping leaf must be shaped once per frame, not once natural plus \
+         once wrapped: second frame shaped {} for {LEAVES} leaves",
         second.text_shaping_calls
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(ShutdownPolicy::default());
+}
+
+// The natural-layout cache is validated by value, so editing a leaf's text must
+// invalidate it. This is the correctness guard for the shaping optimization: a
+// stale hit would render the previous content.
+#[test]
+fn editing_a_leaf_invalidates_its_cached_natural_layout() {
+    use icmd::advanced::{Commit, Lower, Renderer, Runtime, ShutdownPolicy};
+    use std::time::Duration;
+
+    let viewport = Size::new(20, 4);
+    let (commit, _) = Commit::new(viewport);
+    let runtime = Runtime::new(Lower::with_limits(ResourceLimits::default()))
+        .then(commit)
+        .then(Renderer::new(viewport).unwrap())
+        .start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    let leaf = |value: &str| -> Node { Node::from(icmd::Text::new(value)) };
+
+    input.send(leaf("first")).unwrap();
+    let first = output
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert!(first.contains("first"), "the first frame renders its text");
+
+    // The same structure, so the node keeps its identity and the cache is
+    // consulted; only the content differs.
+    input.send(leaf("second")).unwrap();
+    let second = output
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert!(
+        second.contains("second"),
+        "the edited leaf must render its new text, not a stale layout: {second:?}"
+    );
+    assert!(
+        !second.contains("first"),
+        "the previous content must be gone: {second:?}"
     );
 
     drop(input);

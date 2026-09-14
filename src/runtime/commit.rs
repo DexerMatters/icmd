@@ -79,6 +79,10 @@ pub struct Commit {
     // Shared with a doc-hidden instrument handle so tests can read the layout
     // budget without owning the worker's `Commit`.
     instrument: Arc<LayoutInstrument>,
+    // Natural (unwrapped) shaping results, keyed by node and validated by value.
+    // They are width-independent, so an unchanged leaf reuses its measurement
+    // instead of shaping twice per frame.
+    natural_cache: crate::runtime::commit::text::NaturalCache,
 }
 
 impl Commit {
@@ -123,6 +127,7 @@ impl Commit {
             text_cache_tick: 0,
             text_seen: HashSet::new(),
             instrument: Arc::new(LayoutInstrument::default()),
+            natural_cache: crate::runtime::commit::text::NaturalCache::default(),
             emoji_merging: config.emoji_merging,
         };
         (commit, setter, event_dispatcher)

@@ -2,7 +2,9 @@ use crossterm::style::Color;
 
 use crate::basic::editor_surface::{CommittedLayout, EditorSurface};
 use crate::basic::text_layout::{self, ItemKind, TextLayout};
-use crate::{Cell, EmojiMerging, Image, Text, TextAlign, TextOverflow, TextWrap};
+use std::sync::Arc;
+
+use crate::{Cell, DomId, EmojiMerging, Image, Text, TextAlign, TextOverflow, TextWrap};
 
 use super::geometry::RectI;
 use super::style::slot;
@@ -35,20 +37,75 @@ pub(super) fn layout(
     text_layout::layout_text(text, width, base, merging, merge_text, |computed| *computed)
 }
 
+// The natural (unwrapped) layout is width-independent, so it is worth keeping
+// between frames. An entry is validated by comparing the inputs that determine
+// it, which is why no hash is involved and a stale hit is impossible.
+#[derive(Clone)]
+pub(super) struct CachedNatural {
+    pub(super) text: Box<Text>,
+    pub(super) inherited: ComputedText,
+    pub(super) merging: EmojiMerging,
+    pub(super) layout: Arc<TextLayout>,
+}
+
+pub(super) type NaturalCache = std::cell::RefCell<std::collections::HashMap<DomId, CachedNatural>>;
+
+// Two texts produce the same natural layout when the fields the layout reads are
+// equal. The editor surface and test probe do not participate.
+fn same_layout_inputs(left: &Text, right: &Text) -> bool {
+    left.spans == right.spans
+        && left.style == right.style
+        && left.wrap == right.wrap
+        && left.align == right.align
+        && left.overflow == right.overflow
+}
+
 pub(super) fn text_measure(
+    id: Option<DomId>,
+    cache: Option<&NaturalCache>,
     text: &Text,
     offered_width: Option<i32>,
     offered_height: Option<i32>,
     inherited: ComputedText,
     merging: EmojiMerging,
 ) -> (i32, i32) {
+    // The natural layout is width-independent and reused across frames when the
+    // inputs are unchanged; validation is by value, so a stale hit is
+    // impossible. Falling back to a fresh layout keeps every caller correct.
+    let (natural, cached): (Arc<TextLayout>, bool) = match (id, cache) {
+        (Some(id), Some(cache)) => {
+            if let Some(entry) = cache.borrow().get(&id)
+                && entry.inherited == inherited
+                && entry.merging == merging
+                && same_layout_inputs(&entry.text, text)
+            {
+                (entry.layout.clone(), true)
+            } else {
+                let layout = Arc::new(layout(text, usize::MAX / 4, inherited, merging));
+                cache.borrow_mut().insert(
+                    id,
+                    CachedNatural {
+                        text: Box::new(text.clone()),
+                        inherited,
+                        merging,
+                        layout: layout.clone(),
+                    },
+                );
+                (layout, true)
+            }
+        }
+        _ => (
+            Arc::new(layout(text, usize::MAX / 4, inherited, merging)),
+            false,
+        ),
+    };
+    let _ = cached;
     if let Some(surface) = &text.editor {
         return editor_measure(surface, offered_width, offered_height, text.wrap, merging);
     }
     // The intrinsic width is the widest unwrapped logical line. `NoWrap` at a
     // large width breaks only at explicit newlines, so its widest row is
     // exactly that intrinsic width.
-    let natural = layout(text, usize::MAX / 4, inherited, merging);
     let natural_width = natural.max_row_width() as i32;
     let width = offered_width.map_or(natural_width, |value| natural_width.min(value.max(0)));
     // Wrapping at or above the natural width cannot break any row, so the
@@ -783,6 +840,8 @@ mod tests {
     #[test]
     fn measure_uses_the_widest_unwrapped_line() {
         let (width, height) = text_measure(
+            None,
+            None,
             &Text::new("ab\ncdef"),
             None,
             None,
@@ -793,6 +852,8 @@ mod tests {
         // Without a wrap policy the text stays one row and is clipped to the
         // offered width; with soft wrapping it grows to two rows.
         let (width, height) = text_measure(
+            None,
+            None,
             &Text::new("abcdef"),
             Some(3),
             None,
@@ -801,6 +862,8 @@ mod tests {
         );
         assert_eq!((width, height), (3, 1));
         let (width, height) = text_measure(
+            None,
+            None,
             &Text::new("abcdef").wrap(crate::TextWrap::Soft),
             Some(3),
             None,
@@ -815,6 +878,8 @@ mod tests {
         let value = "e\u{301}x";
         assert_eq!(value.graphemes(true).count(), 2);
         let (width, height) = text_measure(
+            None,
+            None,
             &Text::new(value),
             None,
             None,
@@ -833,6 +898,8 @@ mod tests {
             ("❤\u{FE0F}", 2, 1),
         ] {
             let (width, height) = text_measure(
+                None,
+                None,
                 &Text::new(value),
                 None,
                 None,
@@ -841,6 +908,8 @@ mod tests {
             );
             assert_eq!((width, height), (merged, 1), "{value:?} merged");
             let (width, height) = text_measure(
+                None,
+                None,
                 &Text::new(value),
                 None,
                 None,
