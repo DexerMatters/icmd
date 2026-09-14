@@ -160,27 +160,56 @@ impl TerminalSession {
     }
 }
 
+// Terminal teardown, written against `impl Write` so the exact command order is
+// testable without a real terminal. Raw mode is restored last: every escape
+// sequence above it must reach the terminal while it is still in raw mode.
+//
+// SAF-08 requires terminal cleanup to be acknowledged and ordered, so the
+// sequence is a named function rather than a `Drop` body over `Stdout`.
+fn teardown(config: &RuntimeConfig, out: &mut impl io::Write) -> io::Result<()> {
+    execute!(out, Show, ResetColor, SetAttribute(Attribute::Reset))?;
+    if config.mouse_capture {
+        execute!(out, DisableMouseCapture)?;
+    }
+    if config.bracketed_paste {
+        execute!(out, DisableBracketedPaste)?;
+    }
+    if config.focus_change {
+        execute!(out, DisableFocusChange)?;
+    }
+    if config.alternate_screen {
+        // The alternate screen is left only after every capture and attribute
+        // is released, so nothing is written into the user's normal screen.
+        execute!(out, LeaveAlternateScreen)?;
+    }
+    out.flush()
+}
+
+// The ordered teardown commands, as text, for tests and diagnostics. `Drop`
+// writes them through `teardown`; this form makes the order assertable.
+#[cfg(test)]
+fn teardown_commands(config: &RuntimeConfig) -> Vec<&'static str> {
+    let mut commands = vec!["Show", "ResetColor", "SetAttribute(Reset)"];
+    if config.mouse_capture {
+        commands.push("DisableMouseCapture");
+    }
+    if config.bracketed_paste {
+        commands.push("DisableBracketedPaste");
+    }
+    if config.focus_change {
+        commands.push("DisableFocusChange");
+    }
+    if config.alternate_screen {
+        commands.push("LeaveAlternateScreen");
+    }
+    commands.push("disable_raw_mode");
+    commands
+}
+
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = execute!(
-            self.stdout,
-            Show,
-            ResetColor,
-            SetAttribute(Attribute::Reset)
-        );
-        if self.config.mouse_capture {
-            let _ = execute!(self.stdout, DisableMouseCapture);
-        }
-        if self.config.bracketed_paste {
-            let _ = execute!(self.stdout, DisableBracketedPaste);
-        }
-        if self.config.focus_change {
-            let _ = execute!(self.stdout, DisableFocusChange);
-        }
-        if self.config.alternate_screen {
-            let _ = execute!(self.stdout, LeaveAlternateScreen);
-        }
-        let _ = self.stdout.flush();
+        let _ = teardown(&self.config, &mut self.stdout);
+        // Raw mode is process-global, so it is restored after the writes above.
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -356,5 +385,78 @@ pub fn render(node: impl Into<Node>, config: RuntimeConfig) -> Result<(), Render
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(RenderError::Stage(error)),
         (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // SAF-08 / PR 3.5: terminal teardown must be ordered and complete. Every
+    // capture and attribute is released before the alternate screen is left,
+    // and raw mode is restored last, so nothing leaks into the user's screen.
+    #[test]
+    fn teardown_order_releases_capture_before_the_alternate_screen() {
+        let config = RuntimeConfig::default();
+        let commands = teardown_commands(&config);
+        let position = |name: &str| {
+            commands
+                .iter()
+                .position(|command| *command == name)
+                .unwrap_or_else(|| panic!("{name} missing from teardown: {commands:?}"))
+        };
+        assert!(
+            position("DisableMouseCapture") < position("LeaveAlternateScreen"),
+            "mouse capture must be released before leaving the alternate screen: {commands:?}"
+        );
+        assert!(
+            position("DisableBracketedPaste") < position("LeaveAlternateScreen"),
+            "bracketed paste must be released before leaving the alternate screen"
+        );
+        assert!(
+            position("DisableFocusChange") < position("LeaveAlternateScreen"),
+            "focus reporting must be released before leaving the alternate screen"
+        );
+        assert_eq!(
+            commands.last(),
+            Some(&"disable_raw_mode"),
+            "raw mode must be restored after every write: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn teardown_writes_every_command_to_the_stream() {
+        let mut buffer: Vec<u8> = Vec::new();
+        teardown(&RuntimeConfig::default(), &mut buffer).expect("teardown writes");
+        let text = String::from_utf8_lossy(&buffer);
+        // The alternate-screen leave is the CSI sequence crossterm emits; the
+        // mouse-capture disable is the DEC private mode reset pair.
+        assert!(
+            text.contains("\u{1b}[?1049l"),
+            "alternate screen not left: {text:?}"
+        );
+        assert!(text.contains("\u{1b}[?1000l") || text.contains("\u{1b}[?1006l"));
+        assert!(!buffer.is_empty());
+    }
+
+    #[test]
+    fn a_minimal_configuration_skips_the_optional_commands() {
+        let config = RuntimeConfig {
+            alternate_screen: false,
+            mouse_capture: false,
+            bracketed_paste: false,
+            focus_change: false,
+            ..RuntimeConfig::default()
+        };
+        let commands = teardown_commands(&config);
+        assert_eq!(
+            commands,
+            vec![
+                "Show",
+                "ResetColor",
+                "SetAttribute(Reset)",
+                "disable_raw_mode"
+            ]
+        );
     }
 }
