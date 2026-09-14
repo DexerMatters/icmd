@@ -11,7 +11,9 @@ impl EventDispatcher {
             Event::Mouse(event) => self.dispatch_mouse(event),
             Event::Key(event) => self.dispatch_key(KeyboardEvent { key: event }),
             Event::Paste(value) => {
-                DispatchOutcome::from_delivered(self.dispatch_paste(PasteEvent { text: value }))
+                DispatchOutcome::from_delivered(self.dispatch_paste(PasteEvent {
+                    text: std::sync::Arc::from(value),
+                }))
             }
             Event::Resize(width, height) => {
                 DispatchOutcome::from_delivered(self.dispatch_resize(ResizeEvent {

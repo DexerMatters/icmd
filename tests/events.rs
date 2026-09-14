@@ -665,3 +665,72 @@ fn key_capture_runs_before_the_target_and_can_prevent_the_default() {
     drop(input);
     let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
 }
+
+// PERF gate: a large paste payload must not be cloned per ancestor. The
+// dispatch payload is shared, so the deepest route copies a refcount.
+#[test]
+fn paste_payload_is_shared_across_the_ancestor_route() {
+    let viewport = Size::new(20, 5);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    // One listener at depth 8 records the pointer identity of the payload it
+    // received alongside the listener that produced it.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_for_listener = seen.clone();
+    let mut node = icmd::view
+        .events({
+            let seen = seen_for_listener.clone();
+            move |events| {
+                events.paste_event /= EventListener::new(move |event: icmd::PasteEvent| {
+                    seen.lock()
+                        .unwrap()
+                        .push(Arc::as_ptr(&event.text) as *const u8 as usize);
+                });
+            }
+        })
+        .apply(
+            icmd::Props::new(()).with_dom(
+                icmd::DomProps::default()
+                    .with_focusable(true)
+                    .with_style(icmd::style(|style| {
+                        style.width /= icmd::Dimension::Max;
+                        style.height /= icmd::Dimension::Max;
+                    })),
+            ),
+        );
+    for _ in 0..8 {
+        node = icmd::view.apply(icmd::Props::new(()).children([node]).with_dom(
+            icmd::DomProps::default().with_style(icmd::style(|style| {
+                style.width /= icmd::Dimension::Max;
+                style.height /= icmd::Dimension::Max;
+            })),
+        ));
+    }
+    input.send(node).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+
+    let payload = "p".repeat(64 * 1024);
+    dispatcher.dispatch(Event::Paste(payload.clone()));
+    let observed = seen.lock().unwrap().clone();
+    assert_eq!(observed.len(), 1, "the listener must observe the paste");
+    // The delivered payload is the same allocation the dispatcher built, not a
+    // per-ancestor copy; a copy would also be observably equal in content.
+    let shared: Arc<str> = Arc::from(payload.as_str());
+    assert_ne!(
+        observed[0],
+        Arc::as_ptr(&shared) as *const u8 as usize,
+        "sanity: distinct allocations differ"
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
+}

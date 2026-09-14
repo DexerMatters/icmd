@@ -382,9 +382,10 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 }
                 let (changed, value_event) = {
                     let mut state = state_ref.lock().expect("input state poisoned");
+                    // The model needs owned text; the event itself is shared.
                     let outcome = state
                         .model
-                        .reduce(EditAction::Paste(event.text.clone()), policy);
+                        .reduce(EditAction::Paste(event.text.to_string()), policy);
                     if outcome.changed {
                         state.reveal_caret = true;
                     }

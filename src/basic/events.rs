@@ -372,7 +372,9 @@ pub struct ResizeEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PasteEvent {
-    pub text: String,
+    // Shared, so routing the event to every ancestor on the focused target's
+    // route copies a refcount rather than the whole pasted payload.
+    pub text: Arc<str>,
 }
 
 // Which pass of DOM-style event propagation a listener is running in.
