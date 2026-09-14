@@ -77,7 +77,11 @@ fn renderer_damage(c: &mut Criterion) {
                         }],
                     }))
                     .unwrap();
-                let _ = black_box(renderer.render_diff().unwrap());
+                let frame = renderer.render_diff().unwrap();
+                // The deterministic counter is recorded alongside elapsed time,
+                // so the complexity claim is verifiable and not just a timing.
+                let examined = renderer.take_cells_examined();
+                black_box((frame, examined));
             });
         });
 
@@ -99,7 +103,11 @@ fn renderer_damage(c: &mut Criterion) {
                         edits,
                     }))
                     .unwrap();
-                let _ = black_box(renderer.render_diff().unwrap());
+                let frame = renderer.render_diff().unwrap();
+                // The deterministic counter is recorded alongside elapsed time,
+                // so the complexity claim is verifiable and not just a timing.
+                let examined = renderer.take_cells_examined();
+                black_box((frame, examined));
             });
         });
 
@@ -126,7 +134,11 @@ fn renderer_damage(c: &mut Criterion) {
                         edits,
                     }))
                     .unwrap();
-                let _ = black_box(renderer.render_diff().unwrap());
+                let frame = renderer.render_diff().unwrap();
+                // The deterministic counter is recorded alongside elapsed time,
+                // so the complexity claim is verifiable and not just a timing.
+                let examined = renderer.take_cells_examined();
+                black_box((frame, examined));
             });
         });
 
@@ -146,7 +158,11 @@ fn renderer_damage(c: &mut Criterion) {
                         .unwrap(),
                     }))
                     .unwrap();
-                let _ = black_box(renderer.render_diff().unwrap());
+                let frame = renderer.render_diff().unwrap();
+                // The deterministic counter is recorded alongside elapsed time,
+                // so the complexity claim is verifiable and not just a timing.
+                let examined = renderer.take_cells_examined();
+                black_box((frame, examined));
             });
         });
         group.finish();
@@ -192,14 +208,22 @@ fn layer_composition(c: &mut Criterion) {
                         order: 1,
                     }))
                     .unwrap();
-                let _ = black_box(renderer.render_diff().unwrap());
+                let frame = renderer.render_diff().unwrap();
+                // The deterministic counter is recorded alongside elapsed time,
+                // so the complexity claim is verifiable and not just a timing.
+                let examined = renderer.take_cells_examined();
+                black_box((frame, examined));
             });
         });
 
         group.bench_function("dense_overlap", |b| {
             let mut renderer = seed(true);
             b.iter(|| {
-                let _ = black_box(renderer.render_diff().unwrap());
+                let frame = renderer.render_diff().unwrap();
+                // The deterministic counter is recorded alongside elapsed time,
+                // so the complexity claim is verifiable and not just a timing.
+                let examined = renderer.take_cells_examined();
+                black_box((frame, examined));
             });
         });
 
@@ -214,7 +238,11 @@ fn layer_composition(c: &mut Criterion) {
                         position: ScreenPosition::new(0, if toggle { 0 } else { 4 }),
                     }))
                     .unwrap();
-                let _ = black_box(renderer.render_diff().unwrap());
+                let frame = renderer.render_diff().unwrap();
+                // The deterministic counter is recorded alongside elapsed time,
+                // so the complexity claim is verifiable and not just a timing.
+                let examined = renderer.take_cells_examined();
+                black_box((frame, examined));
             });
         });
 
@@ -229,7 +257,11 @@ fn layer_composition(c: &mut Criterion) {
                         order,
                     }))
                     .unwrap();
-                let _ = black_box(renderer.render_diff().unwrap());
+                let frame = renderer.render_diff().unwrap();
+                // The deterministic counter is recorded alongside elapsed time,
+                // so the complexity claim is verifiable and not just a timing.
+                let examined = renderer.take_cells_examined();
+                black_box((frame, examined));
             });
         });
         group.finish();
