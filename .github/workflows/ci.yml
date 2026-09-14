@@ -46,6 +46,8 @@ jobs:
         run: pkg-config --modversion chafa
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+      - name: Downstream advanced fixture (native features)
+        run: cargo build -p icmd-advanced-fixture
 
   msrv:
     name: minimum supported Rust version

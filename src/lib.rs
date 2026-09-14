@@ -114,6 +114,11 @@ pub mod advanced {
     pub use crate::data::{
         Cell, CellEdit, CellError, Frame, ImageId, Operation, Rect, ScreenPosition, Size,
     };
+    // Typed frame construction belongs to the advanced tier: a high-level
+    // application never builds a frame by hand.
+    pub use crate::frame_builder::{
+        BuildError, CellSurfaceHandle, FrameBuilder, RasterSurfaceHandle, SurfaceHandle,
+    };
     pub use crate::runtime::{
         ChannelRenderer, Commit, CommitConfig, ConfigError, DispatchOutcome, EventDispatcher,
         FocusError, FocusOutcome, FrameError, ImageMetrics, ImageResource, LayoutInstrument,

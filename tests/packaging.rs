@@ -62,6 +62,44 @@ fn ci_covers_the_release_gates() {
     );
 }
 
+// API acceptance checklist: the fixture set covers every documented tier and
+// feature combination, and each is a real workspace member.
+#[test]
+fn downstream_fixtures_cover_high_level_and_advanced_tiers() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml exists");
+    for member in ["fixtures/high-level", "fixtures/advanced"] {
+        assert!(
+            workspace.contains(member),
+            "the workspace must include the `{member}` fixture"
+        );
+    }
+    let high = std::fs::read_to_string(root.join("fixtures/high-level/src/main.rs"))
+        .expect("the high-level fixture exists");
+    assert!(
+        high.contains("icmd::ui!"),
+        "the high-level fixture must exercise macro expansion"
+    );
+    let high_manifest =
+        std::fs::read_to_string(root.join("fixtures/high-level/Cargo.toml")).expect("manifest");
+    assert!(
+        high_manifest.contains("default-features = false"),
+        "the high-level fixture must cover the feature-off build"
+    );
+    let advanced = std::fs::read_to_string(root.join("fixtures/advanced/src/main.rs"))
+        .expect("the advanced fixture exists");
+    assert!(
+        advanced.contains("icmd::advanced::"),
+        "the advanced fixture must exercise the advanced tier"
+    );
+    let advanced_manifest =
+        std::fs::read_to_string(root.join("fixtures/advanced/Cargo.toml")).expect("manifest");
+    assert!(
+        !advanced_manifest.contains("default-features = false"),
+        "the advanced fixture must cover the native-feature build"
+    );
+}
+
 #[test]
 fn license_files_are_present() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

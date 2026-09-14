@@ -22,7 +22,7 @@ exclude = [
 # The downstream fixture is a real dependent crate: it compiles against the
 # published high-level surface and fails if an internal item leaks into it.
 [workspace]
-members = ["fixtures/high-level"]
+members = ["fixtures/high-level", "fixtures/advanced"]
 
 [features]
 default = ["native-raster"]

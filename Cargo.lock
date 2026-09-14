@@ -466,6 +466,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "icmd-advanced-fixture"
+version = "0.0.0"
+dependencies = [
+ "icmd",
+]
+
+[[package]]
 name = "icmd-high-level-fixture"
 version = "0.0.0"
 dependencies = [
