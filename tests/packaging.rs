@@ -72,3 +72,28 @@ fn license_files_are_present() {
         );
     }
 }
+
+// Product-safe condition #9: a security contact and process must be published.
+#[test]
+fn security_policy_is_present_and_actionable() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let policy = std::fs::read_to_string(root.join("SECURITY.md"))
+        .expect("a security policy must be published");
+    for required in [
+        "Reporting a vulnerability",
+        "Supported versions",
+        "Scope",
+        "acknowledgement",
+    ] {
+        assert!(
+            policy.contains(required),
+            "the security policy must document `{required}`"
+        );
+    }
+    // Reporting must be private: publishing a vulnerability in an issue is the
+    // failure mode this section exists to prevent.
+    assert!(
+        policy.contains("Do not open a public issue"),
+        "the policy must tell reporters not to file a public issue"
+    );
+}

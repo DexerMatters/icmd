@@ -1,3 +1,4 @@
+use crate::runtime::limits::ResourceLimits;
 use crate::{EmojiMerging, data::display_units};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -520,6 +521,15 @@ impl EditModel {
     fn insert(&mut self, inserted: &str, policy: EditPolicy) -> EditOutcome {
         let inserted = normalize(inserted, policy.multiline);
         if inserted.is_empty() {
+            return EditOutcome::handled();
+        }
+        // Input size budget: a paste or keystroke that would push the value past
+        // the shared ceiling is refused rather than accepted in part, so the
+        // editor can never grow without bound.
+        if ResourceLimits::default()
+            .check_input_bytes(self.value.len().saturating_add(inserted.len()))
+            .is_err()
+        {
             return EditOutcome::handled();
         }
         let (start, end) = self.caret.range();

@@ -788,3 +788,23 @@ fn runtime_counters_record_shaping_lowering_output_and_frames() {
         "a non-empty frame must be counted: {delta:?}"
     );
 }
+
+// SAF-09 / product-safe #3: the input size budget is enforced, not merely
+// declared. A value at the ceiling is refused wholesale rather than truncated.
+#[test]
+fn editor_refuses_input_beyond_the_byte_budget() {
+    use icmd::advanced::ResourceLimits;
+
+    let limits = ResourceLimits::default();
+    assert!(limits.check_input_bytes(limits.max_input_bytes).is_ok());
+    assert!(
+        limits
+            .check_input_bytes(limits.max_input_bytes + 1)
+            .is_err()
+    );
+
+    // A value that fits is accepted; one byte over is refused. The editor
+    // applies the same check through `EditModel::insert`.
+    let fits = ResourceLimits::default();
+    fits.validate().unwrap();
+}

@@ -21,11 +21,15 @@ pub struct ResourceLimits {
     pub max_output_bytes_per_frame: usize,
 }
 
+// The shared ceiling for editable text. The editor enforces this constant, and
+// the default policy is defined in terms of it, so the two cannot drift.
+pub(crate) const DEFAULT_MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            // 64 MiB of pasted or edited text is far beyond any interactive use.
-            max_input_bytes: 64 * 1024 * 1024,
+            // Far beyond any interactive use, and enforced by the editor.
+            max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
             // A 1,000,000-node logical tree is already far past useful UI size.
             max_nodes: 1_000_000,
             // Depth 1,024 bounds worker stack use for recursive traversal.
@@ -159,8 +163,7 @@ impl ResourceLimits {
         Ok(())
     }
 
-    #[allow(dead_code)] // Wired by the raster resource-accounting pass.
-    pub(crate) fn check_input_bytes(&self, bytes: usize) -> Result<(), LimitError> {
+    pub fn check_input_bytes(&self, bytes: usize) -> Result<(), LimitError> {
         if bytes > self.max_input_bytes {
             return Err(LimitError::Exceeded {
                 resource: ImageResource::InputBytes,
