@@ -1020,3 +1020,40 @@ fn a_no_wrap_leaf_is_shaped_once_per_frame() {
     drop(input);
     let _ = runtime.shutdown(ShutdownPolicy::default());
 }
+
+// SAF-09: the transform budget must be enforced independently of the source
+// budget. Raising one ceiling must not silently move the other's effective
+// limit, and the reported resource must name the transform, not the source.
+#[test]
+fn the_transform_budget_binds_independently_of_the_source_budget() {
+    use icmd::advanced::{ImageResource, LimitError};
+
+    // A policy whose source budget is generous but whose transform budget is
+    // tiny: only the transform ceiling may reject the work.
+    let limits = ResourceLimits {
+        max_source_pixels: 64 * 1024 * 1024,
+        max_source_width: 16_384,
+        max_source_height: 16_384,
+        max_transform_pixels: 16,
+        ..ResourceLimits::default()
+    };
+    limits
+        .validate()
+        .expect("the policy is internally consistent");
+
+    let error = limits
+        .check_transform_pixels(17)
+        .expect_err("one pixel over the transform budget must fail");
+    assert!(
+        matches!(
+            error,
+            LimitError::Exceeded {
+                resource: ImageResource::TransformPixels,
+                limit: 16,
+                requested: 17,
+            }
+        ),
+        "the failure must name the transform resource: {error:?}"
+    );
+    assert!(limits.check_transform_pixels(16).is_ok());
+}

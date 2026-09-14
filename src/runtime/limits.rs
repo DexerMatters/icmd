@@ -93,15 +93,13 @@ impl ResourceLimits {
     // Fallible product used everywhere a dimension pair turns into a byte or
     // pixel count. Saturation is deliberately not used: saturation followed by
     // an allocation converts an invalid request into a huge one.
-    #[allow(dead_code)] // Wired by the raster resource-accounting pass.
-    pub(crate) fn checked_area(width: u32, height: u32) -> Result<u64, LimitError> {
+    pub fn checked_area(width: u32, height: u32) -> Result<u64, LimitError> {
         (width as u64)
             .checked_mul(height as u64)
             .ok_or(LimitError::Overflow { what: "pixel area" })
     }
 
-    #[allow(dead_code)] // Wired by the raster resource-accounting pass.
-    pub(crate) fn check_source_size(&self, width: u32, height: u32) -> Result<u64, LimitError> {
+    pub fn check_source_size(&self, width: u32, height: u32) -> Result<u64, LimitError> {
         if width > self.max_source_width {
             return Err(LimitError::Exceeded {
                 resource: ImageResource::SourceWidth,
@@ -127,8 +125,7 @@ impl ResourceLimits {
         Ok(pixels)
     }
 
-    #[allow(dead_code)] // Wired by the raster resource-accounting pass.
-    pub(crate) fn check_transform_pixels(&self, pixels: u64) -> Result<(), LimitError> {
+    pub fn check_transform_pixels(&self, pixels: u64) -> Result<(), LimitError> {
         if pixels > self.max_transform_pixels {
             return Err(LimitError::Exceeded {
                 resource: ImageResource::TransformPixels,
@@ -139,8 +136,7 @@ impl ResourceLimits {
         Ok(())
     }
 
-    #[allow(dead_code)] // Wired by the raster resource-accounting pass.
-    pub(crate) fn check_decoded_bytes(&self, bytes: usize) -> Result<(), LimitError> {
+    pub fn check_decoded_bytes(&self, bytes: usize) -> Result<(), LimitError> {
         if bytes as u64 > self.max_decoded_image_bytes as u64 {
             return Err(LimitError::Exceeded {
                 resource: ImageResource::DecodedBytes,
@@ -151,8 +147,7 @@ impl ResourceLimits {
         Ok(())
     }
 
-    #[allow(dead_code)] // Wired by the raster resource-accounting pass.
-    pub(crate) fn check_encoded_bytes(&self, bytes: u64) -> Result<(), LimitError> {
+    pub fn check_encoded_bytes(&self, bytes: u64) -> Result<(), LimitError> {
         if bytes > self.max_encoded_image_bytes as u64 {
             return Err(LimitError::Exceeded {
                 resource: ImageResource::EncodedBytes,

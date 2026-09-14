@@ -673,14 +673,18 @@ pub(crate) fn render_rgba_with_cell_size(
     let height_u64 = (u64::from(full_height) * cell_height).max(1);
     let width = u32::try_from(width_u64).unwrap_or(u32::MAX);
     let height = u32::try_from(height_u64).unwrap_or(u32::MAX);
+    // The *source* limits bound the decoded image; the transformed target has
+    // its own budget. Checking the transform against the source cap made the
+    // transform budget unenforceable, since raising one ceiling changed the
+    // other's effective behavior.
+    let pixels = ResourceLimits::checked_area(width, height).map_err(RasterImageError::limit)?;
     limits
-        .check_source_size(width, height)
+        .check_transform_pixels(pixels)
         .map_err(RasterImageError::limit)?;
-    let bytes = ResourceLimits::checked_area(width, height)
-        .and_then(|pixels| {
-            pixels.checked_mul(4).ok_or(LimitError::Overflow {
-                what: "RGBA byte length",
-            })
+    let bytes = pixels
+        .checked_mul(4)
+        .ok_or(LimitError::Overflow {
+            what: "RGBA byte length",
         })
         .map_err(RasterImageError::limit)?;
     let bytes = usize::try_from(bytes).map_err(|_| {
