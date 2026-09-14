@@ -143,6 +143,9 @@ pub mod __private {
         __ui_apply, __ui_events, __ui_tag_names_equal, TextLayoutForTest, indexed_layout_for_test,
     };
     pub use crate::elements::normalize_for_test;
+    // Event-loop mechanics. The loop runs inside the crate, so its coalescing
+    // rule and terminal teardown order are verified from outside through here.
+    pub use crate::app::{MAX_RENDER_WAIT, coalesce_event, teardown};
     // Canonical glyph policy. The public wrappers (Cell, Fill, ScrollbarGlyph)
     // delegate to it, and the characterization table drives it directly.
     pub use crate::data::CellSlot;

@@ -1,7 +1,6 @@
 // Cell and cell-surface tests. The surface geometry helpers are crate-internal,
 // so they are reached through the hidden module rather than the public API.
-use icmd::__private::CellSlot;
-use icmd::{Cell, CellError, Image, ImageError, Rect};
+use icmd::{Cell, Image, Rect};
 
 mod tests {
     use super::*;
