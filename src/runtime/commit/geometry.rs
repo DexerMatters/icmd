@@ -1,7 +1,7 @@
 use crate::{AxisPosition, Dimension, Edges, Justify, Percent, PercentBasis};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct RectI {
+pub struct RectI {
     pub line: i32,
     pub column: i32,
     pub width: i32,
@@ -9,7 +9,7 @@ pub(super) struct RectI {
 }
 
 impl RectI {
-    pub(super) fn new(line: i32, column: i32, width: i32, height: i32) -> Self {
+    pub fn new(line: i32, column: i32, width: i32, height: i32) -> Self {
         Self {
             line,
             column,

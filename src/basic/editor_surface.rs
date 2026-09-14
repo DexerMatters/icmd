@@ -4,33 +4,33 @@ use crate::basic::text_layout::TextLayout;
 use crate::{TextStyle, TextWrap};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EditorSurface {
-    pub(crate) value: String,
-    pub(crate) selection: Option<(usize, usize)>,
-    pub(crate) caret: usize,
-    pub(crate) focused: bool,
-    pub(crate) placeholder: String,
-    pub(crate) wrap: TextWrap,
-    pub(crate) placeholder_style: TextStyle,
-    pub(crate) selection_style: TextStyle,
-    pub(crate) selection_inactive_style: TextStyle,
-    pub(crate) caret_style: TextStyle,
-    pub(crate) scroll_x: usize,
-    pub(crate) scroll_y: usize,
+pub struct EditorSurface {
+    pub value: String,
+    pub selection: Option<(usize, usize)>,
+    pub caret: usize,
+    pub focused: bool,
+    pub placeholder: String,
+    pub wrap: TextWrap,
+    pub placeholder_style: TextStyle,
+    pub selection_style: TextStyle,
+    pub selection_inactive_style: TextStyle,
+    pub caret_style: TextStyle,
+    pub scroll_x: usize,
+    pub scroll_y: usize,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CommittedLayout {
-    pub(crate) layout: Arc<TextLayout>,
-    pub(crate) viewport_width: usize,
-    pub(crate) viewport_height: usize,
-    pub(crate) applied_x: usize,
-    pub(crate) applied_y: usize,
-    pub(crate) emoji_merging: crate::EmojiMerging,
+pub struct CommittedLayout {
+    pub layout: Arc<TextLayout>,
+    pub viewport_width: usize,
+    pub viewport_height: usize,
+    pub applied_x: usize,
+    pub applied_y: usize,
+    pub emoji_merging: crate::EmojiMerging,
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct LayoutProbe(Arc<Mutex<Option<CommittedLayout>>>);
+pub struct LayoutProbe(Arc<Mutex<Option<CommittedLayout>>>);
 
 impl std::fmt::Debug for LayoutProbe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -47,19 +47,19 @@ impl PartialEq for LayoutProbe {
 impl Eq for LayoutProbe {}
 
 impl LayoutProbe {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn publish(&self, committed: CommittedLayout) {
+    pub fn publish(&self, committed: CommittedLayout) {
         *self.0.lock().expect("layout probe poisoned") = Some(committed);
     }
 
-    pub(crate) fn committed(&self) -> Option<CommittedLayout> {
+    pub fn committed(&self) -> Option<CommittedLayout> {
         self.0.lock().expect("layout probe poisoned").clone()
     }
 
-    pub(crate) fn emoji_merging(&self) -> crate::EmojiMerging {
+    pub fn emoji_merging(&self) -> crate::EmojiMerging {
         self.committed()
             .map_or(crate::EmojiMerging::Merge, |committed| {
                 committed.emoji_merging

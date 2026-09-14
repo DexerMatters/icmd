@@ -10,24 +10,24 @@ use crate::{EmojiMerging, MAX_GLYPH_BYTES};
 use super::props::TextStyle;
 use super::text::{Text, TextWrap};
 
-pub(crate) const TAB_WIDTH: usize = 4;
+pub const TAB_WIDTH: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum HitBias {
+pub enum HitBias {
     #[default]
     Leading,
     Trailing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum ItemKind {
+pub enum ItemKind {
     Glyph,
     Separator,
     Newline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ComputedText {
+pub struct ComputedText {
     pub foreground: crossterm::style::Color,
     pub background: Option<crossterm::style::Color>,
     pub attributes: crossterm::style::Attributes,
@@ -45,46 +45,46 @@ impl Default for ComputedText {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // `text`/`cell`/`row` are the layout's public geometry surface.
-pub(crate) struct Item {
-    pub(crate) source: Range<usize>,
+pub struct Item {
+    pub source: Range<usize>,
     // Byte range into the layout's normalized text. The glyph's rendered symbol
     // is resolved from here rather than stored per item, which removed a heap
     // allocation and a copy per glyph.
-    pub(crate) text: Range<usize>,
-    pub(crate) cell: usize,
-    pub(crate) width: usize,
-    pub(crate) kind: ItemKind,
-    pub(crate) row: usize,
-    pub(crate) style: ComputedText,
+    pub text: Range<usize>,
+    pub cell: usize,
+    pub width: usize,
+    pub kind: ItemKind,
+    pub row: usize,
+    pub style: ComputedText,
 }
 
 impl Item {
     // The symbol this item paints within `text`. Empty for a separator, which
     // occupies cells but is deliberately not drawn.
-    pub(crate) fn symbol<'a>(&self, text: &'a str) -> &'a str {
+    pub fn symbol<'a>(&self, text: &'a str) -> &'a str {
         text.get(self.text.clone()).unwrap_or("")
     }
 
-    pub(crate) fn is_empty_symbol(&self, text: &str) -> bool {
+    pub fn is_empty_symbol(&self, text: &str) -> bool {
         self.symbol(text).is_empty()
     }
 
     #[allow(dead_code)] // Used by the rasterization paths and their tests.
-    pub(crate) fn is_tab(&self, text: &str) -> bool {
+    pub fn is_tab(&self, text: &str) -> bool {
         self.symbol(text) == "\t"
     }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Row {
-    pub(crate) first_item: usize,
-    pub(crate) len: usize,
-    pub(crate) source_start: usize,
-    pub(crate) source_end: usize,
+pub struct Row {
+    pub first_item: usize,
+    pub len: usize,
+    pub source_start: usize,
+    pub source_end: usize,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ShapedGlyph<S> {
+pub struct ShapedGlyph<S> {
     pub source: Range<usize>,
     // Byte range into the shared normalized text built during shaping. Glyphs
     // refer to ranges instead of owning a `String`, so shaping performs one
@@ -97,7 +97,7 @@ pub(crate) struct ShapedGlyph<S> {
 
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)] // Operations are the API; storage stays private.
-pub(crate) struct TextLayout {
+pub struct TextLayout {
     text: String,
     items: Vec<Item>,
     rows: Vec<Row>,
@@ -111,7 +111,7 @@ pub(crate) struct TextLayout {
     source_len: usize,
 }
 
-pub(crate) fn layout_text<S>(
+pub fn layout_text<S>(
     text: &Text,
     width: usize,
     inherited: ComputedText,
@@ -133,7 +133,7 @@ where
 }
 
 impl TextLayout {
-    pub(crate) fn layout<S>(
+    pub fn layout<S>(
         text: String,
         shaped: Vec<ShapedGlyph<S>>,
         wrap: TextWrap,
@@ -331,43 +331,43 @@ impl TextLayout {
     }
 
     #[allow(dead_code)] // Exercised only by the crate's own layout tests.
-    pub(crate) fn row_count(&self) -> usize {
+    pub fn row_count(&self) -> usize {
         self.rows.len()
     }
 
-    pub(crate) fn width(&self) -> usize {
+    pub fn width(&self) -> usize {
         self.width
     }
 
     #[allow(dead_code)] // Exercised only by the crate's own layout tests.
-    pub(crate) fn source_len(&self) -> usize {
+    pub fn source_len(&self) -> usize {
         self.source_len
     }
 
     #[allow(dead_code)]
-    pub(crate) fn text(&self) -> &str {
+    pub fn text(&self) -> &str {
         &self.text
     }
 
     #[allow(dead_code)] // Exercised only by the crate's own layout tests.
-    pub(crate) fn items(&self) -> &[Item] {
+    pub fn items(&self) -> &[Item] {
         &self.items
     }
 
-    pub(crate) fn row_items(&self, index: usize) -> &[Item] {
+    pub fn row_items(&self, index: usize) -> &[Item] {
         self.rows.get(index).map_or(&[], |row| {
             &self.items[row.first_item..row.first_item + row.len]
         })
     }
 
-    pub(crate) fn row_start(&self, index: usize) -> usize {
+    pub fn row_start(&self, index: usize) -> usize {
         self.rows
             .get(index)
             .map_or(self.source_len, |row| row.source_start)
     }
 
     #[allow(dead_code)]
-    pub(crate) fn row_end(&self, index: usize) -> usize {
+    pub fn row_end(&self, index: usize) -> usize {
         self.row_items(index)
             .iter()
             .rfind(|item| item.kind == ItemKind::Glyph && !item.is_empty_symbol(&self.text))
@@ -375,7 +375,7 @@ impl TextLayout {
     }
 
     #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
-    pub(crate) fn row_source_end(&self, index: usize) -> usize {
+    pub fn row_source_end(&self, index: usize) -> usize {
         self.rows
             .get(index)
             .map_or(self.source_len, |row| row.source_end)
@@ -383,15 +383,15 @@ impl TextLayout {
 
     // A separator is deliberately not painted, so it contributes no cells even
     // though it owns source bytes. The width is cached at construction.
-    pub(crate) fn row_width(&self, index: usize) -> usize {
+    pub fn row_width(&self, index: usize) -> usize {
         self.row_widths.get(index).copied().unwrap_or(0)
     }
 
-    pub(crate) fn max_row_width(&self) -> usize {
+    pub fn max_row_width(&self) -> usize {
         self.max_row_width
     }
 
-    pub(crate) fn row_of_source(&self, source: usize) -> usize {
+    pub fn row_of_source(&self, source: usize) -> usize {
         if self.rows.is_empty() {
             return 0;
         }
@@ -404,7 +404,7 @@ impl TextLayout {
         }
     }
 
-    pub(crate) fn clamp(&self, source: usize) -> usize {
+    pub fn clamp(&self, source: usize) -> usize {
         if self.boundaries.is_empty() {
             return 0;
         }
@@ -432,7 +432,7 @@ impl TextLayout {
     }
 
     #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
-    pub(crate) fn previous_boundary(&self, source: usize) -> usize {
+    pub fn previous_boundary(&self, source: usize) -> usize {
         let source = self.clamp(source);
         match self.boundaries.binary_search(&source) {
             Ok(0) => 0,
@@ -443,7 +443,7 @@ impl TextLayout {
     }
 
     #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
-    pub(crate) fn next_boundary(&self, source: usize) -> usize {
+    pub fn next_boundary(&self, source: usize) -> usize {
         let clamped = self.clamp(source);
         // A position that clamped forward is already the next boundary.
         if clamped > source {
@@ -455,7 +455,7 @@ impl TextLayout {
         }
     }
 
-    pub(crate) fn caret(&self, source: usize) -> (usize, usize, usize) {
+    pub fn caret(&self, source: usize) -> (usize, usize, usize) {
         if self.rows.is_empty() {
             return (0, 0, 1);
         }
@@ -492,7 +492,7 @@ impl TextLayout {
         (row, cell, 1)
     }
 
-    pub(crate) fn hit(&self, row: usize, cell: usize, bias: HitBias) -> usize {
+    pub fn hit(&self, row: usize, cell: usize, bias: HitBias) -> usize {
         let row = row.min(self.rows.len().saturating_sub(1));
         let mut offset = 0usize;
         for item in self.row_items(row) {
@@ -538,13 +538,13 @@ impl TextLayout {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn column(&self, source: usize) -> usize {
+    pub fn column(&self, source: usize) -> usize {
         let (_, cell, _) = self.caret(source);
         cell
     }
 
     #[allow(dead_code)]
-    pub(crate) fn vertical(
+    pub fn vertical(
         &self,
         source: usize,
         direction: i32,
@@ -784,7 +784,7 @@ fn sum_widths(widths: &[usize], start: usize, end: usize) -> usize {
 }
 
 #[doc(hidden)]
-pub struct TextLayoutForTest(pub(crate) TextLayout);
+pub struct TextLayoutForTest(pub TextLayout);
 
 impl TextLayoutForTest {
     pub fn row_count(&self) -> usize {

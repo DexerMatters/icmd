@@ -14,7 +14,7 @@ use layout::collect_scroll_ids;
 use style::terminal_text;
 use types::{Clip, ComputedText, PaintFragment, PaintKey, make_frame};
 
-mod geometry;
+pub(crate) mod geometry;
 pub(crate) mod layout;
 mod paint;
 mod scene;
