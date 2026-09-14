@@ -39,6 +39,40 @@ jobs:
       - name: Image pipeline stress
         run: cargo test --release --all-features --test raster
 
+  baseline:
+    name: attributable performance baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Record runner, toolchain, and revision
+        run: |
+          mkdir -p baseline
+          {
+            echo "revision=$(git rev-parse HEAD)"
+            echo "describe=$(git describe --always --dirty)"
+            echo "uname=$(uname -a)"
+            echo "cpu=$(nproc) cpus"
+            grep -m1 'model name' /proc/cpuinfo || true
+            echo "rustc=$(rustc -V)"
+            echo "cargo=$(cargo -V)"
+          } | tee baseline/environment.txt
+      - name: Run the workload matrix
+        run: |
+          # A bounded smoke run: enough samples to record a machine-readable
+          # baseline, short enough to stay inside a scheduled job.
+          cargo bench --bench matrix -- --warm-up-time 0.5 --measurement-time 1 --sample-size 20
+      - name: Publish the baseline artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-baseline
+          path: |
+            baseline/
+            target/criterion/
+          retention-days: 30
+
   miri:
     name: Miri on the unsafe-free core
     runs-on: ubuntu-latest
