@@ -8,8 +8,9 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use icmd::advanced::{Commit, Lower, Renderer, RendererConfig, Runtime, ShutdownPolicy};
 use icmd::{
-    AxisPosition, Cell, CellEdit, Dimension, DomProps, Frame, Image, ImageId, ImagePosition,
-    ImageProtocol, Node, Operation, ScreenPosition, Size, Text, TextWrap, style,
+    AxisPosition, Cell, CellEdit, Component, Dimension, DomProps, Frame, Image, ImageId, ImageMode,
+    ImagePosition, ImageProtocol, ImageSource, Node, Operation, RasterImage, RasterPlacement,
+    ScreenPosition, Size, Text, TextWrap, style,
 };
 
 const VIEWPORTS: [Size; 3] = [Size::new(80, 24), Size::new(240, 80), Size::new(500, 200)];
@@ -519,6 +520,267 @@ fn event_routing(c: &mut Criterion) {
     group.finish();
 }
 
+// Input editing: cursor moves, word moves, insertion, and paste at three
+// document sizes, driven through the public component.
+fn input_editing(c: &mut Criterion) {
+    use icmd::advanced::Commit as EditingCommit;
+    use icmd::{Attr, InputProps, input};
+
+    let mut group = c.benchmark_group("input_editing");
+    for units in [100usize, 10_000] {
+        let text = "word ".repeat(units / 5 + 1);
+        group.throughput(Throughput::Elements(units as u64));
+        group.bench_with_input(BenchmarkId::new("cursor_move", units), &text, |b, text| {
+            b.iter(|| {
+                let viewport = Size::new(40, 6);
+                let (commit, _viewport, dispatcher) = EditingCommit::new_with_events(viewport);
+                let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+                let input_tx = runtime.input();
+                let output = runtime.output();
+                let node = input
+                    .props(InputProps {
+                        default_value: Attr::Set(text.clone()),
+                        ..InputProps::default()
+                    })
+                    .node();
+                input_tx.send(node).unwrap();
+                let _ = output.recv_timeout(Duration::from_secs(5));
+                dispatcher.dispatch(crossterm::event::Event::Mouse(
+                    crossterm::event::MouseEvent {
+                        kind: crossterm::event::MouseEventKind::Down(
+                            crossterm::event::MouseButton::Left,
+                        ),
+                        column: 1,
+                        row: 0,
+                        modifiers: crossterm::event::KeyModifiers::empty(),
+                    },
+                ));
+                dispatcher.dispatch(crossterm::event::Event::Key(
+                    crossterm::event::KeyEvent::new_with_kind(
+                        crossterm::event::KeyCode::End,
+                        crossterm::event::KeyModifiers::CONTROL,
+                        crossterm::event::KeyEventKind::Press,
+                    ),
+                ));
+                black_box(dispatcher.dispatch(crossterm::event::Event::Key(
+                    crossterm::event::KeyEvent::new_with_kind(
+                        crossterm::event::KeyCode::Home,
+                        crossterm::event::KeyModifiers::empty(),
+                        crossterm::event::KeyEventKind::Press,
+                    ),
+                )));
+                drop(input_tx);
+                let _ = runtime.shutdown(ShutdownPolicy::default());
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("word_move", units), &text, |b, text| {
+            b.iter(|| {
+                let viewport = Size::new(40, 6);
+                let (commit, _viewport, dispatcher) = EditingCommit::new_with_events(viewport);
+                let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+                let input_tx = runtime.input();
+                let output = runtime.output();
+                let node = input
+                    .props(InputProps {
+                        default_value: Attr::Set(text.clone()),
+                        ..InputProps::default()
+                    })
+                    .node();
+                input_tx.send(node).unwrap();
+                let _ = output.recv_timeout(Duration::from_secs(5));
+                dispatcher.dispatch(crossterm::event::Event::Mouse(
+                    crossterm::event::MouseEvent {
+                        kind: crossterm::event::MouseEventKind::Down(
+                            crossterm::event::MouseButton::Left,
+                        ),
+                        column: 1,
+                        row: 0,
+                        modifiers: crossterm::event::KeyModifiers::empty(),
+                    },
+                ));
+                black_box(dispatcher.dispatch(crossterm::event::Event::Key(
+                    crossterm::event::KeyEvent::new_with_kind(
+                        crossterm::event::KeyCode::Right,
+                        crossterm::event::KeyModifiers::CONTROL,
+                        crossterm::event::KeyEventKind::Press,
+                    ),
+                )));
+                drop(input_tx);
+                let _ = runtime.shutdown(ShutdownPolicy::default());
+            });
+        });
+    }
+    group.finish();
+}
+
+// Canvas: fill, line, and text at three viewport sizes.
+fn canvas_primitives(c: &mut Criterion) {
+    use icmd::CanvasContext;
+
+    let mut group = c.benchmark_group("canvas");
+    for viewport in [Size::new(80, 24), Size::new(240, 80), Size::new(500, 200)] {
+        let width = viewport.width;
+        let height = viewport.height;
+        let area = usize::from(width) * usize::from(height);
+        group.throughput(Throughput::Elements(area as u64));
+        group.bench_with_input(
+            BenchmarkId::new("fill_rect", format!("{width}x{height}")),
+            &viewport,
+            |b, _| {
+                b.iter(|| {
+                    let mut canvas = CanvasContext::new(width, height).unwrap();
+                    canvas.fill_rect(0, 0, width, height, "░").unwrap();
+                    black_box(canvas.width());
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("line", format!("{width}x{height}")),
+            &viewport,
+            |b, _| {
+                b.iter(|| {
+                    let mut canvas = CanvasContext::new(width, height).unwrap();
+                    canvas
+                        .line(0, 0, i32::from(width) - 1, i32::from(height) - 1, "*")
+                        .unwrap();
+                    black_box(canvas.height());
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("text", format!("{width}x{height}")),
+            &viewport,
+            |b, _| {
+                let text = "canvas text ".repeat(usize::from(width) / 12 + 1);
+                b.iter(|| {
+                    let mut canvas = CanvasContext::new(width, height).unwrap();
+                    canvas.fill_text(&text, 0, 0).unwrap();
+                    black_box(canvas.width());
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+// Images: transform cache hit and miss, and an eviction boundary.
+fn image_pipeline(c: &mut Criterion) {
+    let viewport = Size::new(80, 24);
+    let mut group = c.benchmark_group("images");
+
+    let pixels: Vec<u8> = (0..64 * 64 * 4).map(|index| (index % 251) as u8).collect();
+    let source = RasterImage::from_rgba8(64, 64, pixels).expect("benchmark raster");
+
+    group.bench_function("transform_cache_hit", |b| {
+        let mut renderer = renderer(viewport);
+        let raster = RasterPlacement::new(
+            ImageSource::loaded(source.clone()),
+            20,
+            8,
+            icmd::ImageRenderOptions {
+                mode: ImageMode::Symbols,
+                ..icmd::ImageRenderOptions::default()
+            },
+        );
+        renderer
+            .apply_frame(Frame::with_operation(Operation::CreateRaster {
+                id: ImageId(1),
+                raster,
+                position: ScreenPosition::new(0, 0),
+                level: 0,
+            }))
+            .unwrap();
+        let _ = renderer.render_diff();
+        b.iter(|| {
+            let _ = black_box(renderer.render_diff().unwrap());
+        });
+    });
+
+    group.bench_function("transform_recompute", |b| {
+        b.iter(|| {
+            let window: Vec<u8> = source.rgba8().to_vec();
+            black_box(window.len());
+        });
+    });
+
+    group.bench_function("cache_eviction_boundary", |b| {
+        b.iter(|| {
+            let mut renderer = Renderer::with_config(
+                viewport,
+                RendererConfig {
+                    image_protocol: ImageProtocol::Symbols,
+                    image_cache_bytes: 64 * 1024,
+                    ..RendererConfig::default()
+                },
+            )
+            .unwrap();
+            for id in 1..=8u64 {
+                renderer
+                    .apply_frame(Frame::with_operation(Operation::CreateRaster {
+                        id: ImageId(id),
+                        raster: RasterPlacement::new(
+                            ImageSource::loaded(source.clone()),
+                            10,
+                            4,
+                            icmd::ImageRenderOptions::default(),
+                        ),
+                        position: ScreenPosition::new((id as i32 % 4) * 2, 0),
+                        level: 0,
+                    }))
+                    .unwrap();
+            }
+            let _ = black_box(renderer.render_diff().unwrap());
+            black_box(renderer.image_metrics());
+        });
+    });
+    group.finish();
+}
+
+// Runtime: event-to-dispatch latency and shutdown cost under an idle pipeline.
+fn runtime_lifecycle(c: &mut Criterion) {
+    let viewport = Size::new(80, 24);
+    let mut group = c.benchmark_group("runtime");
+
+    group.bench_function("event_to_dispatch", |b| {
+        let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+        let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+        let input = runtime.input();
+        let output = runtime.output();
+        input
+            .send(Node::element(DomProps::default(), Vec::<Node>::new()))
+            .unwrap();
+        let _ = output.recv_timeout(Duration::from_secs(5));
+        b.iter(|| {
+            black_box(dispatcher.dispatch(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new_with_kind(
+                    crossterm::event::KeyCode::Char('x'),
+                    crossterm::event::KeyModifiers::empty(),
+                    crossterm::event::KeyEventKind::Press,
+                ),
+            )));
+        });
+        drop(input);
+        let _ = runtime.shutdown(ShutdownPolicy::default());
+    });
+
+    group.bench_function("shutdown", |b| {
+        b.iter(|| {
+            let (commit, _viewport, _dispatcher) = Commit::new_with_events(viewport);
+            let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+            let input = runtime.input();
+            let output = runtime.output();
+            input
+                .send(Node::element(DomProps::default(), Vec::<Node>::new()))
+                .unwrap();
+            let _ = output.recv_timeout(Duration::from_secs(5));
+            drop(input);
+            let _ = black_box(runtime.shutdown(ShutdownPolicy::default()));
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     renderer_damage,
@@ -526,6 +788,10 @@ criterion_group!(
     layout_shapes,
     text_shapes,
     keyed_reconciliation,
-    event_routing
+    event_routing,
+    input_editing,
+    canvas_primitives,
+    image_pipeline,
+    runtime_lifecycle
 );
 criterion_main!(benches);
