@@ -154,6 +154,13 @@ pub mod __private {
     // Raster decode and transform entry points. The widget drives them from
     // inside the crate, so their budgets are verified from outside through here.
     pub use crate::basic::editor_surface::{CommittedLayout, EditorSurface};
+    // Editor model. The input component owns it, so its editing rules are
+    // verified from outside through here.
+    pub use crate::elements::input::model::{
+        Caret, EditAction, EditIntent, EditModel, EditOutcome, EditPolicy, Outcome, ValueOwnership,
+        normalize,
+    };
+    // Text layout internals: the shared shaping and measurement surface.
     pub use crate::basic::text_layout::{
         ComputedText, HitBias, Item, ItemKind, Row, ShapedGlyph, TAB_WIDTH, TextLayout, layout_text,
     };
