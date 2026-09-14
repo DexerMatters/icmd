@@ -734,3 +734,142 @@ fn paste_payload_is_shared_across_the_ancestor_route() {
     drop(input);
     let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
 }
+
+// API acceptance checklist: "Focus ownership, terminal focus, and
+// application-global keyboard paths use distinct types." Terminal activation
+// must not move DOM focus, a global shortcut must work with no focus, and a
+// widget key handler must not, and DOM focus must never exceed one owner.
+#[test]
+fn focus_ownership_terminal_focus_and_global_keys_stay_distinct() {
+    let viewport = Size::new(24, 6);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(viewport);
+    let runtime = Runtime::new(Lower::default()).then(commit).start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    let widget_keys = Arc::new(AtomicUsize::new(0));
+    let global_keys = Arc::new(AtomicUsize::new(0));
+    let terminal_events = Arc::new(Mutex::new(Vec::new()));
+    let widget_for_listener = widget_keys.clone();
+    let global_for_listener = global_keys.clone();
+    let terminal_for_listener = terminal_events.clone();
+
+    // Two focusable widgets, so "at most one focused owner" is meaningful.
+    let widget = || {
+        icmd::view.apply(
+            icmd::Props::new(()).with_dom(
+                icmd::DomProps::default()
+                    .with_focusable(true)
+                    .with_style(icmd::style(|style| {
+                        style.width /= icmd::Dimension::Cells(10);
+                        style.height /= icmd::Dimension::Cells(2);
+                    })),
+            ),
+        )
+    };
+    let node = icmd::view
+        .events({
+            let widget = widget_for_listener.clone();
+            let global = global_for_listener.clone();
+            let terminal = terminal_for_listener.clone();
+            move |events| {
+                events.key_down /= EventListener::new(move |_event: icmd::KeyboardEvent| {
+                    widget.fetch_add(1, Ordering::SeqCst);
+                });
+                // A global shortcut is registered separately from the widget key.
+                events.app_key /= EventListener::new(move |_event: icmd::KeyboardEvent| {
+                    global.fetch_add(1, Ordering::SeqCst);
+                });
+                // Terminal activation uses its own event type, separate from
+                // the `FocusEvent` a widget receives when it gains DOM focus.
+                events.terminal_focus /=
+                    EventListener::new(move |event: icmd::TerminalFocusEvent| {
+                        terminal.lock().unwrap().push(event);
+                    });
+            }
+        })
+        .apply(
+            icmd::Props::new(())
+                .children([widget(), widget()])
+                .with_dom(icmd::DomProps::default().with_style(icmd::style(|style| {
+                    style.width /= icmd::Dimension::Max;
+                    style.height /= icmd::Dimension::Max;
+                }))),
+        );
+    input.send(node).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // A terminal activation reaches only the terminal-focus path. It must not
+    // create, move, or clear DOM focus.
+    assert!(
+        dispatcher.focused().is_none(),
+        "nothing is focused initially"
+    );
+    dispatcher.dispatch(Event::FocusGained);
+    dispatcher.dispatch(Event::FocusLost);
+    assert_eq!(
+        terminal_events.lock().unwrap().len(),
+        2,
+        "terminal activation must reach the terminal-focus listener"
+    );
+    assert!(
+        dispatcher.focused().is_none(),
+        "terminal activation must not own DOM focus"
+    );
+
+    // Focus one widget by pointer; a widget key handler now receives keys.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    let first = dispatcher.focused().expect("the pressed widget owns focus");
+    dispatcher.dispatch(Event::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('a'),
+        KeyModifiers::empty(),
+        KeyEventKind::Press,
+    )));
+    assert_eq!(
+        widget_keys.load(Ordering::SeqCst),
+        1,
+        "the focused widget hears keys"
+    );
+    // The global shortcut runs regardless of focus ownership.
+    assert_eq!(
+        global_keys.load(Ordering::SeqCst),
+        1,
+        "the global shortcut hears keys"
+    );
+
+    // Focus the second widget; exactly one owner remains, and it is the new one.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        // The two focusable children stack vertically, each two rows tall.
+        row: 3,
+        modifiers: KeyModifiers::empty(),
+    }));
+    let second = dispatcher.focused().expect("the second widget owns focus");
+    assert_ne!(first, second, "focus moved to the newly pressed widget");
+    // Ownership is single-valued, so re-targeting focus transfers it rather than
+    // adding a second owner.
+    assert!(
+        dispatcher.focus(first),
+        "focus can be re-targeted explicitly"
+    );
+    assert_eq!(dispatcher.focused(), Some(first));
+    assert!(dispatcher.focus(second), "and moved back");
+    assert_eq!(dispatcher.focused(), Some(second));
+
+    // Losing terminal activation does not drop widget focus either.
+    dispatcher.dispatch(Event::FocusLost);
+    assert_eq!(
+        dispatcher.focused(),
+        Some(second),
+        "terminal deactivation must not clear DOM focus"
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
+}
