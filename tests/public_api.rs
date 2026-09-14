@@ -344,3 +344,24 @@ fn root_does_not_reexport_the_advanced_tier() {
         "macro helpers must not pollute the crate root"
     );
 }
+
+// API-01 gate: the high-level fixture must build from the curated tiers alone.
+// A comment may mention `advanced`; an import may not.
+#[test]
+fn high_level_fixture_does_not_import_the_advanced_tier() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/high-level/src/main.rs"),
+    )
+    .expect("the downstream fixture must exist");
+    for line in source.lines() {
+        let code = line.split("//").next().unwrap_or("").trim();
+        assert!(
+            !code.contains("icmd::advanced") && !code.contains("use icmd::advanced"),
+            "the high-level fixture must not import the advanced tier: {line}"
+        );
+        assert!(
+            !code.contains("__ui_"),
+            "the high-level fixture must not name a macro helper: {line}"
+        );
+    }
+}
