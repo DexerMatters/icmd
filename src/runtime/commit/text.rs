@@ -16,13 +16,15 @@ pub(super) fn merge_text(parent: ComputedText, style: &crate::TextStyle) -> Comp
     }
 }
 
-// Shaping cost: a leaf whose offer cannot break a row is shaped once per frame,
-// because `text_measure` below reuses its natural layout instead of wrapping a
-// second time. A leaf offered less than its natural width still shapes twice
-// (once natural, once wrapped); removing that needs a frame-local shaping cache
-// keyed by content, width, wrap, merging, and computed style.
-// `text_shaping_per_frame_is_bounded_by_the_leaf_count` in `tests/limits.rs`
-// pins the achieved per-leaf bound.
+// Shaping cost: `text_measure` below shapes a leaf once per frame unless the
+// offer is narrower than the natural width of wrapping text, where it needs a
+// second pass to learn the wrapped row count. `NoWrap` text and any offer at or
+// above the natural width reuse the natural layout, so they stay at one shape.
+// Removing the remaining second pass needs a frame-local shaping cache keyed by
+// content, width, wrap, merging, and computed style — note that the natural
+// layout is width-independent, so caching just that pass would suffice.
+// `text_shaping_per_frame_is_bounded_by_the_leaf_count` and
+// `a_no_wrap_leaf_is_shaped_once_per_frame` in `tests/limits.rs` pin the bounds.
 pub(super) fn layout(
     text: &Text,
     width: usize,
