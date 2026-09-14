@@ -92,7 +92,6 @@ pub(super) enum PaintRole {
     ScrollbarCorner,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Clip {
     Unbounded,

@@ -330,7 +330,7 @@ impl TextLayout {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Exercised only by the crate's own layout tests.
     pub(crate) fn row_count(&self) -> usize {
         self.rows.len()
     }
@@ -339,7 +339,7 @@ impl TextLayout {
         self.width
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Exercised only by the crate's own layout tests.
     pub(crate) fn source_len(&self) -> usize {
         self.source_len
     }
@@ -349,7 +349,7 @@ impl TextLayout {
         &self.text
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Exercised only by the crate's own layout tests.
     pub(crate) fn items(&self) -> &[Item] {
         &self.items
     }
