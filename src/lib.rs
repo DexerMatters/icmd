@@ -146,6 +146,9 @@ pub mod __private {
     // Event-loop mechanics. The loop runs inside the crate, so its coalescing
     // rule and terminal teardown order are verified from outside through here.
     pub use crate::app::{MAX_RENDER_WAIT, coalesce_event, teardown};
+    // Raster decode and transform entry points. The widget drives them from
+    // inside the crate, so their budgets are verified from outside through here.
+    pub use crate::raster::render_rgba_with_cell_size;
     // Canonical glyph policy. The public wrappers (Cell, Fill, ScrollbarGlyph)
     // delegate to it, and the characterization table drives it directly.
     pub use crate::data::CellSlot;
