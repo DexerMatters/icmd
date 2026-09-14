@@ -1057,3 +1057,52 @@ fn the_transform_budget_binds_independently_of_the_source_budget() {
     );
     assert!(limits.check_transform_pixels(16).is_ok());
 }
+
+// PERF residual: a wrapping leaf offered less than its natural width still
+// shapes twice per frame, because intrinsic width needs the unwrapped layout and
+// the wrapped row count needs a second one. The plan's target is one shape per
+// leaf; closing it needs the frame-local natural-layout cache described at
+// `commit::text::layout`. This test measures the residual so it cannot worsen.
+#[test]
+fn a_narrow_wrapping_leaf_shapes_at_most_twice_per_frame() {
+    let _guard = METRIC_READERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    use icmd::advanced::{Commit, Lower, Runtime, ShutdownPolicy, runtime_metrics};
+    use std::time::Duration;
+
+    const LEAVES: usize = 16;
+    let viewport = Size::new(12, 12);
+    let (commit, _) = Commit::new(viewport);
+    let runtime = Runtime::new(Lower::with_limits(ResourceLimits::default()))
+        .then(commit)
+        .start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    let tree = || -> Node {
+        icmd::fragment((0..LEAVES).map(|index| {
+            Node::from(
+                icmd::Text::new(format!("wrapping leaf number {index} with several words"))
+                    .wrap(icmd::TextWrap::Soft),
+            )
+        }))
+    };
+    input.send(tree()).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+    let first = runtime_metrics();
+
+    input.send(tree()).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+    let second = runtime_metrics().since(first);
+
+    assert!(
+        second.text_shaping_calls <= 2 * LEAVES as u64 + 8,
+        "a narrow wrapping leaf must stay at the known two-shape ceiling: \
+         second frame shaped {} for {LEAVES} leaves",
+        second.text_shaping_calls
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(ShutdownPolicy::default());
+}
