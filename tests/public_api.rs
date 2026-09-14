@@ -398,3 +398,48 @@ fn the_context_tier_does_not_depend_on_the_runtime_tier() {
     }
     assert!(checked > 0, "the context tier must have been inspected");
 }
+
+// API acceptance checklist: "Public errors retain sources, IDs/paths, operation
+// indexes, and configured/observed limits." A rejected resource policy keeps its
+// typed error reachable through `Error::source` instead of being flattened into
+// a message string.
+#[test]
+fn a_rejected_renderer_policy_keeps_its_typed_source() {
+    use icmd::ImageProtocol;
+    use icmd::advanced::{ConfigError, FrameError, Renderer, RendererConfig, ResourceLimits};
+    use std::error::Error;
+
+    let mut config = RendererConfig {
+        image_protocol: ImageProtocol::Symbols,
+        ..RendererConfig::default()
+    };
+    config.limits = ResourceLimits {
+        max_tree_depth: 0,
+        ..ResourceLimits::default()
+    };
+    let error = Renderer::with_config(icmd::Size::new(20, 6), config)
+        .err()
+        .expect("an invalid policy must be rejected");
+    assert!(matches!(error, FrameError::Config { .. }), "{error:?}");
+    let source = error
+        .source()
+        .expect("the typed policy error must be retained");
+    assert!(
+        source.downcast_ref::<ConfigError>().is_some(),
+        "the source must be the typed ConfigError, not a formatted string"
+    );
+
+    // A configuration rejected for a reason unrelated to the policy still
+    // reports a message and simply has no source.
+    let mut config = RendererConfig {
+        image_protocol: ImageProtocol::Symbols,
+        ..RendererConfig::default()
+    };
+    config.cell_pixel_size = Some(icmd::Size::new(0, 16));
+    let error = Renderer::with_config(icmd::Size::new(20, 6), config)
+        .err()
+        .expect("a zero cell pixel width must be rejected");
+    assert!(matches!(error, FrameError::Config { .. }), "{error:?}");
+    assert!(error.source().is_none());
+    assert!(error.to_string().contains("cell pixel width"));
+}

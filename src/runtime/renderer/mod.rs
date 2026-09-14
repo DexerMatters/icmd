@@ -8,7 +8,7 @@ use crate::data::{
     Cell, CellSlot, EmojiMerging, Frame, Image, ImageError, ImageId, MAX_SURFACE_CELLS, Operation,
     Rect, ScreenPosition, Size,
 };
-use crate::runtime::limits::ResourceLimits;
+use crate::runtime::limits::{ConfigError, ResourceLimits};
 use crate::{
     ImageMode, ImageProtocol, ImageSource, ImageUpdatePolicy, RasterImage, RasterPlacement,
     raster::{RasterPixels, render_rgba_with_cell_size, symbols_from_pixels},
@@ -100,6 +100,10 @@ pub enum FrameError {
     // The renderer configuration was rejected before resource creation.
     Config {
         detail: Box<str>,
+        // Present when the rejection came from the typed resource policy, so
+        // the original error stays reachable through `Error::source` instead of
+        // being flattened into a message.
+        source: Option<ConfigError>,
     },
     // One frame's assembled terminal payload exceeded the configured output
     // budget. Nothing was written and the previously presented frame stands.
@@ -144,7 +148,7 @@ impl fmt::Display for FrameError {
                 f,
                 "image protocol {protocol:?} requires the `native-raster` feature"
             ),
-            Self::Config { detail } => write!(f, "invalid renderer configuration: {detail}"),
+            Self::Config { detail, .. } => write!(f, "invalid renderer configuration: {detail}"),
             Self::OutputTooLarge { limit, requested } => write!(
                 f,
                 "frame output of {requested} bytes exceeds the {limit}-byte budget"
@@ -152,7 +156,17 @@ impl fmt::Display for FrameError {
         }
     }
 }
-impl Error for FrameError {}
+impl Error for FrameError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Config {
+                source: Some(error),
+                ..
+            } => Some(error),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct ValidatedSurface {
@@ -332,16 +346,19 @@ impl Renderer {
             .validate()
             .map_err(|error| FrameError::Config {
                 detail: error.to_string().into(),
+                source: Some(error),
             })?;
         if let Some(size) = config.cell_pixel_size {
             if size.width == 0 {
                 return Err(FrameError::Config {
                     detail: "cell pixel width must be nonzero".into(),
+                    source: None,
                 });
             }
             if size.height == 0 {
                 return Err(FrameError::Config {
                     detail: "cell pixel height must be nonzero".into(),
+                    source: None,
                 });
             }
             // The renderer must be able to transform a raster that fills the
@@ -356,6 +373,7 @@ impl Renderer {
                 return Err(FrameError::Config {
                     detail: "renderer cell pixel size cannot satisfy the transform pixel budget"
                         .into(),
+                    source: None,
                 });
             }
         }
