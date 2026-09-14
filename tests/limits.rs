@@ -351,6 +351,10 @@ fn image_byte_budget_is_concurrency_safe() {
     assert!(metrics.job_queue_capacity > 0);
     assert!(metrics.result_queue_capacity > 0);
     assert_eq!(metrics.result_backlog, 0);
+    // SAF-09: the cache budget is named as an eviction target, and any excess
+    // caused by active/pinned entries is reported rather than hidden.
+    assert!(metrics.evictable_cache_target_bytes > 0);
+    assert!(metrics.cache_total_bytes >= metrics.cache_over_target_bytes);
 }
 
 #[test]
@@ -848,4 +852,64 @@ fn an_unchanged_text_leaf_is_not_reshaped() {
 
     drop(input);
     let _ = runtime.shutdown(ShutdownPolicy::default());
+}
+
+// SAF-09: active/pinned cache entries may keep the total above the eviction
+// target. The plan forbids that from happening *silently*, so the excess must
+// be reported. This drives many distinct visible rasters through a deliberately
+// tiny target and asserts the metric surfaces the overshoot.
+#[test]
+fn cache_excess_from_active_entries_is_reported_not_hidden() {
+    use icmd::advanced::{Renderer, RendererConfig};
+    use icmd::{ImageProtocol, ScreenPosition};
+
+    let viewport = Size::new(64, 16);
+    let mut config = RendererConfig {
+        image_protocol: ImageProtocol::Symbols,
+        cell_pixel_size: Some(Size::new(8, 16)),
+        ..RendererConfig::default()
+    };
+    // A target far smaller than the working set, so eviction cannot stay under
+    // it while the entries are still referenced by the frame.
+    config.limits.max_cache_bytes = 4096;
+    config.image_cache_bytes = 4096;
+    let mut renderer = Renderer::with_config(viewport, config).unwrap();
+
+    let pixels: Vec<u8> = (0..32 * 32 * 4).map(|index| (index % 251) as u8).collect();
+    let source = icmd::RasterImage::from_rgba8(32, 32, pixels).unwrap();
+    let mut operations = Vec::new();
+    for id in 0..8u64 {
+        operations.push(icmd::Operation::CreateRaster {
+            id: icmd::ImageId(id + 1),
+            raster: icmd::RasterPlacement::new(
+                icmd::ImageSource::loaded(source.clone()),
+                16,
+                2,
+                icmd::ImageRenderOptions::default(),
+            ),
+            position: ScreenPosition::new((id as i32 % 4) * 4, 0),
+            level: 0,
+        });
+    }
+    renderer
+        .apply_frame(icmd::Frame::new(operations))
+        .expect("distinct visible rasters are accepted");
+    let _ = renderer.render_diff().unwrap();
+
+    let metrics = renderer.image_metrics();
+    assert_eq!(
+        metrics.evictable_cache_target_bytes, 4096,
+        "the runtime policy ceiling must be the enforced target: {metrics:?}"
+    );
+    // With eight live rasters and a 4 KiB target the total must exceed it, and
+    // that overshoot has to be visible in the metrics.
+    assert!(
+        metrics.cache_total_bytes > metrics.evictable_cache_target_bytes,
+        "the working set should exceed the tiny target: {metrics:?}"
+    );
+    assert_eq!(
+        metrics.cache_over_target_bytes,
+        metrics.cache_total_bytes - metrics.evictable_cache_target_bytes,
+        "the reported excess must equal total minus target: {metrics:?}"
+    );
 }

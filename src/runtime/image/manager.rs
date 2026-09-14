@@ -177,7 +177,6 @@ pub(crate) enum SourceRequest {
 #[derive(Debug)]
 pub(crate) struct ImageManager {
     loader: ImageLoader,
-    limits: ResourceLimits,
     budget: Arc<ByteBudget>,
     // Keyed by cache identity, so two spellings of the same opened file share
     // one load and one entry.
@@ -195,13 +194,12 @@ impl ImageManager {
     pub(crate) fn with_limits(limits: ResourceLimits) -> Self {
         let budget = Arc::new(ByteBudget::new(limits.max_in_flight_image_bytes));
         let loader = ImageLoader::with_workers(2, None, limits, budget.clone());
-        Self::with_loader(loader, limits, budget)
+        Self::with_loader(loader, budget)
     }
 
-    fn with_loader(loader: ImageLoader, limits: ResourceLimits, budget: Arc<ByteBudget>) -> Self {
+    fn with_loader(loader: ImageLoader, budget: Arc<ByteBudget>) -> Self {
         Self {
             loader,
-            limits,
             budget,
             source_cache: HashMap::new(),
             source_cache_bytes: 0,
@@ -381,10 +379,6 @@ impl ImageManager {
             .saturating_add(self.pending_loads.len())
     }
 
-    pub(crate) fn limits(&self) -> &ResourceLimits {
-        &self.limits
-    }
-
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -440,7 +434,7 @@ mod tests {
         let limits = ResourceLimits::default();
         let budget = Arc::new(ByteBudget::new(limits.max_in_flight_image_bytes));
         let loader = ImageLoader::with_workers(2, Some(gate_rx), limits, budget.clone());
-        let mut manager = ImageManager::with_loader(loader, limits, budget);
+        let mut manager = ImageManager::with_loader(loader, budget);
         let mut backpressured = None;
         for index in 0..64 {
             let outcome = manager.request(&source(&index.to_string()));
@@ -490,7 +484,7 @@ mod tests {
         let limits = ResourceLimits::default();
         let budget = Arc::new(ByteBudget::new(limits.max_in_flight_image_bytes));
         let loader = ImageLoader::with_workers(0, None, limits, budget.clone());
-        let mut manager = ImageManager::with_loader(loader, limits, budget);
+        let mut manager = ImageManager::with_loader(loader, budget);
         assert_eq!(manager.request(&source("closed")), SourceRequest::Closed);
         // A closed queue is not a decode failure and must not be cached as one.
         assert!(manager.source_image(&source("closed")).is_none());

@@ -42,7 +42,12 @@ pub struct ImageMetrics {
     pub native_cache_bytes: usize,
     pub pending_sources: usize,
     pub max_in_flight_bytes: usize,
-    pub max_cache_bytes: usize,
+    // The enforced eviction target. Active/pinned entries may legitimately keep
+    // the total above it, so it is named as a target rather than a hard cap;
+    // `cache_over_target_bytes` makes any such excess explicit.
+    pub evictable_cache_target_bytes: usize,
+    pub cache_total_bytes: usize,
+    pub cache_over_target_bytes: usize,
     // Bounded queue capacities and the current undelivered result backlog, so
     // queue pressure is visible without inspecting internals.
     pub job_queue_capacity: usize,
@@ -393,7 +398,10 @@ impl Renderer {
             image_manager: ImageManager::with_limits(config.limits),
             native_cache: HashMap::new(),
             native_cache_bytes: 0,
-            native_cache_limit: config.image_cache_bytes,
+            // The runtime policy may lower the renderer's own cache wish; the
+            // effective target is the stricter of the two, so the configured
+            // ceiling is actually enforced rather than merely reported.
+            native_cache_limit: config.image_cache_bytes.min(config.limits.max_cache_bytes),
             prepared: HashMap::new(),
             prepared_bytes: 0,
             cache_tick: 0,
@@ -430,7 +438,9 @@ impl Renderer {
             native_cache_bytes: self.native_cache_bytes,
             pending_sources: self.image_manager.pending_count(),
             max_in_flight_bytes: self.limits.max_in_flight_image_bytes,
-            max_cache_bytes: self.image_manager.limits().max_cache_bytes,
+            evictable_cache_target_bytes: self.native_cache_limit,
+            cache_total_bytes: self.cache_bytes(),
+            cache_over_target_bytes: self.cache_bytes().saturating_sub(self.native_cache_limit),
             job_queue_capacity: self.image_manager.job_capacity(),
             result_queue_capacity: self.image_manager.result_capacity(),
             result_backlog: self.image_manager.result_backlog(),
