@@ -823,6 +823,3 @@ pub fn indexed_layout_for_test(text: &str, width: usize) -> TextLayoutForTest {
 
 mod shape;
 use shape::shape_text;
-
-#[cfg(test)]
-mod tests;

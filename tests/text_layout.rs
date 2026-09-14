@@ -1,11 +1,12 @@
-// Text-layout behavior, parity, property, and mode-agreement tests. They
-// live beside the layout module so the production file stays focused on
-// the layout itself.
+// Text-layout behavior, parity, property, and mode-agreement tests. The
+// layout internals are reached through the hidden module.
 #![allow(unused_imports)]
 
-use super::*;
+use icmd::__private::*;
+use std::ops::Range;
 
-#[cfg(test)]
+use icmd::{EmojiMerging, Span, Text, TextAlign, TextOverflow, TextWrap};
+
 pub(crate) fn layout_for_test(value: &str, wrap: TextWrap, width: usize) -> TextLayout {
     layout_text(
         &Text::new(value).wrap(wrap),
@@ -17,7 +18,6 @@ pub(crate) fn layout_for_test(value: &str, wrap: TextWrap, width: usize) -> Text
     )
 }
 
-#[cfg(test)]
 pub(crate) fn layout_for_test_with(
     value: &str,
     wrap: TextWrap,
@@ -37,7 +37,6 @@ pub(crate) fn layout_for_test_with(
 // Test-only surface for the layout's index queries. The layout itself is
 // crate-private, so integration tests need a narrow, documented view.
 
-#[cfg(test)]
 // Behavior tests for the layout's rows, wrapping, and queries.
 mod behavior {
     use super::*;
@@ -283,7 +282,6 @@ mod behavior {
     }
 }
 
-#[cfg(test)]
 mod parity {
     pub(crate) fn normalized(value: &str) -> String {
         value
@@ -295,11 +293,9 @@ mod parity {
     }
 }
 
-#[cfg(test)]
 mod property_tests {
     use super::parity::normalized;
     use super::*;
-    use crate::Span;
     #[allow(unused_imports)]
     use crate::TextWrap as W;
 
@@ -902,7 +898,6 @@ mod property_tests {
     }
 }
 
-#[cfg(test)]
 mod mode_agreement_tests {
     use super::*;
 
