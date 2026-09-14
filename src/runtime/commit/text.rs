@@ -16,6 +16,14 @@ pub(super) fn merge_text(parent: ComputedText, style: &crate::TextStyle) -> Comp
     }
 }
 
+// TODO(perf): measure and paint each shape this text independently, so an
+// unchanged leaf is shaped twice per frame. The performance plan's gate is
+// "measure-plus-paint shapes each unchanged text leaf once". Closing it needs a
+// frame-local shaping cache keyed by content, width, wrap, merging, and computed
+// style, shared by `layout` here and the `natural` layout in `text_measure`
+// below. `text_shaping_per_frame_is_bounded_by_the_leaf_count` in
+// `tests/limits.rs` pins the current per-leaf bound so the regression cannot
+// get worse in the meantime.
 pub(super) fn layout(
     text: &Text,
     width: usize,
