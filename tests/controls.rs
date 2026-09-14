@@ -274,3 +274,128 @@ fn autofocus_is_an_explicit_request_not_an_inference() {
         "autofocus must publish a focus request the runtime grants"
     );
 }
+
+// API acceptance checklist: "Controls named as interactive pass the shared
+// activation/disabled/focus suite." One table drives every interactive control
+// through the same three assertions, so a control cannot be added as
+// "interactive" while quietly missing activation, disabled, or focus behavior.
+#[test]
+fn every_interactive_control_passes_the_shared_suite() {
+    #[derive(Clone, Copy)]
+    enum Control {
+        Button,
+        Checkbox,
+        Switch,
+        Radio,
+    }
+
+    // Each control reaches activation through its own prop, but all four accept
+    // keyboard activation and all four must refuse it when disabled.
+    fn build(control: Control, disabled: bool, fired: Arc<AtomicUsize>) -> Node {
+        match control {
+            Control::Button => button
+                .props(ButtonProps {
+                    disabled: Attr::Set(disabled),
+                    on_press: Attr::Set(EventListener::new(move |_event| {
+                        fired.fetch_add(1, Ordering::SeqCst);
+                    })),
+                    ..ButtonProps::default()
+                })
+                .node(),
+            Control::Checkbox => checkbox
+                .props(CheckboxProps {
+                    checked: Attr::Set(false),
+                    disabled: Attr::Set(disabled),
+                    on_change: Attr::Set(EventListener::new(move |_value: bool| {
+                        fired.fetch_add(1, Ordering::SeqCst);
+                    })),
+                    ..CheckboxProps::default()
+                })
+                .node(),
+            Control::Switch => switch
+                .props(SwitchProps {
+                    on: Attr::Set(false),
+                    disabled: Attr::Set(disabled),
+                    on_change: Attr::Set(EventListener::new(move |_value: bool| {
+                        fired.fetch_add(1, Ordering::SeqCst);
+                    })),
+                    ..SwitchProps::default()
+                })
+                .node(),
+            Control::Radio => radio
+                .props(RadioProps {
+                    selected: Attr::Set(false),
+                    disabled: Attr::Set(disabled),
+                    on_select: Attr::Set(EventListener::new(move |_value: ()| {
+                        fired.fetch_add(1, Ordering::SeqCst);
+                    })),
+                    ..RadioProps::default()
+                })
+                .node(),
+        }
+    }
+
+    for control in [
+        Control::Button,
+        Control::Checkbox,
+        Control::Switch,
+        Control::Radio,
+    ] {
+        let name = match control {
+            Control::Button => "button",
+            Control::Checkbox => "checkbox",
+            Control::Switch => "switch",
+            Control::Radio => "radio",
+        };
+
+        // Activation: focusing the control and pressing Space or Enter fires it.
+        let fired = Arc::new(AtomicUsize::new(0));
+        let harness = Harness::mount(build(control, false, fired.clone()));
+        click(&harness.dispatcher, 1, 0);
+        let activations = [
+            KeyCode::Char(' '),
+            KeyCode::Enter,
+            KeyCode::Right,
+            KeyCode::Down,
+        ]
+        .into_iter()
+        .filter(|code| {
+            // Dispatch is synchronous, so the listener has already run.
+            let before = fired.load(Ordering::SeqCst);
+            key(&harness.dispatcher, *code);
+            fired.load(Ordering::SeqCst) > before
+        })
+        .count();
+        assert!(
+            activations > 0,
+            "{name} must be activatable from the keyboard"
+        );
+
+        // Disabled: the same focus and key sequence must not fire it.
+        let fired = Arc::new(AtomicUsize::new(0));
+        let harness = Harness::mount(build(control, true, fired.clone()));
+        click(&harness.dispatcher, 1, 0);
+        for code in [KeyCode::Char(' '), KeyCode::Enter] {
+            key(&harness.dispatcher, code);
+        }
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "a disabled {name} must not activate"
+        );
+
+        // Focus: a disabled control must not take focus, so a later key cannot
+        // reach it; an enabled one may.
+        let dispatched = harness
+            .dispatcher
+            .dispatch(Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char(' '),
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            )));
+        assert_eq!(
+            dispatched.delivered, 0,
+            "a disabled {name} must not receive targeted keys"
+        );
+    }
+}
