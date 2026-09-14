@@ -9,7 +9,7 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded};
 use slotmap::SlotMap;
 
-use super::limits::ResourceLimits;
+use super::limits::{ConfigError, ResourceLimits};
 use super::pipeline::RuntimeError;
 use crate::basic::hooks::{FiberId, HookSlot, UpdateQueue};
 use crate::basic::{
@@ -38,6 +38,12 @@ pub enum LowerError {
     DuplicateKey {
         key: String,
     },
+    // The configured resource policy was rejected. Reporting it as a typed
+    // stage error means an invalid limit cannot be applied silently or panic
+    // the worker.
+    Config {
+        detail: String,
+    },
 }
 
 impl fmt::Display for LowerError {
@@ -56,6 +62,9 @@ impl fmt::Display for LowerError {
             ),
             Self::DuplicateKey { key } => {
                 write!(f, "duplicate sibling key {key:?}")
+            }
+            Self::Config { detail } => {
+                write!(f, "invalid resource policy: {detail}")
             }
         }
     }
@@ -204,7 +213,19 @@ impl Lower {
         lower
     }
 
+    // Construction that rejects an invalid policy up front, for callers that
+    // would rather handle the error than have it surface on the first frame.
+    pub fn try_with_limits(limits: ResourceLimits) -> Result<Self, ConfigError> {
+        limits.validate()?;
+        Ok(Self::with_limits(limits))
+    }
+
     fn lower(&mut self, node: Node) -> Result<DomNode, LowerError> {
+        // A policy that never validated is refused here, so an out-of-range
+        // limit is a typed error rather than a silently unusable bound.
+        self.limits.validate().map_err(|error| LowerError::Config {
+            detail: error.to_string(),
+        })?;
         let _ = self.apply_updates();
         // Validate the incoming root iteratively, before any recursive
         // traversal, so an over-deep tree cannot reach the recursive code.

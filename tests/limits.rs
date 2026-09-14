@@ -935,3 +935,40 @@ fn cache_excess_from_active_entries_is_reported_not_hidden() {
         "the reported excess must equal total minus target: {metrics:?}"
     );
 }
+
+// API acceptance checklist: a public struct with cross-field invariants must be
+// validated, and an invalid policy must surface as a typed error rather than a
+// silently unusable bound.
+#[test]
+fn an_invalid_resource_policy_is_rejected_through_the_typed_path() {
+    let invalid = ResourceLimits {
+        max_tree_depth: 0,
+        ..ResourceLimits::default()
+    };
+    assert!(invalid.validate().is_err());
+    assert!(Lower::try_with_limits(invalid).is_err());
+    assert!(Lower::try_with_limits(ResourceLimits::default()).is_ok());
+
+    // A lowerer built with an unvalidated policy reports the failure per frame
+    // instead of applying a bound that can never be satisfied.
+    let viewport = Size::new(20, 6);
+    let (commit, _) = Commit::new(viewport);
+    let runtime = Runtime::new(Lower::with_limits(invalid))
+        .then(commit)
+        .start_handle();
+    let input = runtime.input();
+    let errors = runtime.errors();
+    input.send(icmd::text("x")).unwrap();
+    let error = errors
+        .recv_timeout(Duration::from_secs(2))
+        .expect("an invalid policy must be reported");
+    assert!(
+        matches!(
+            error,
+            RuntimeError::Lower(icmd::advanced::LowerError::Config { .. })
+        ),
+        "expected a typed invalid-policy error, got {error:?}"
+    );
+    drop(input);
+    let _ = runtime.shutdown(ShutdownPolicy::default());
+}
