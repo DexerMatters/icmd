@@ -700,3 +700,47 @@ fn layout_visits_stay_linear_in_node_count() {
         }
     }
 }
+
+// SAF-10: a tree at the configured depth limit must render on a worker stack
+// sized for it. A stack overflow aborts the process, so this test guards the
+// worker stack budget as well as the limit itself.
+#[test]
+fn a_tree_at_the_default_depth_limit_renders_without_overflow() {
+    use icmd::advanced::{Lower, Renderer, Runtime, ShutdownPolicy};
+    use icmd::{DomProps, Node};
+    use std::time::Duration;
+
+    let depth = ResourceLimits::default().max_tree_depth;
+    let mut node = Node::element(DomProps::default(), Vec::<Node>::new());
+    for _ in 0..depth.saturating_sub(1) {
+        node = Node::element(DomProps::default(), vec![node]);
+    }
+
+    let viewport = Size::new(20, 6);
+    let (commit, _) = Commit::new(viewport);
+    let runtime = Runtime::new(Lower::with_limits(ResourceLimits::default()))
+        .then(commit)
+        .then(Renderer::new(viewport).unwrap())
+        .start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+    let errors = runtime.errors();
+    input.send(node).unwrap();
+
+    let outcome = select! {
+        recv(errors) -> error => Err(error.unwrap_or(RuntimeError::StageClosed { stage: Stage::Lower })),
+        recv(output) -> frame => match frame {
+            Ok(Ok(frame)) => Ok(frame),
+            Ok(Err(error)) => Err(RuntimeError::Frame(error)),
+            Err(_) => Err(RuntimeError::StageClosed { stage: Stage::Renderer }),
+        },
+        default(Duration::from_secs(20)) => Err(RuntimeError::StageClosed { stage: Stage::Renderer }),
+    };
+    assert!(
+        outcome.is_ok(),
+        "a tree at the configured depth limit must render, got {outcome:?}"
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(ShutdownPolicy::default());
+}

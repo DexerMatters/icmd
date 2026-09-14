@@ -49,3 +49,9 @@ trybuild = "1.0"
 [[bench]]
 name = "rendering"
 harness = false
+
+# The parameterized workload matrix from the performance plan. It records
+# workload size and structural counters alongside elapsed time.
+[[bench]]
+name = "matrix"
+harness = false

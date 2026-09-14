@@ -11,6 +11,9 @@ use super::limits::RendererConfigError;
 use super::lower::LowerError;
 use super::renderer::FrameError;
 
+// Must cover `ResourceLimits::max_tree_depth` recursive frames with margin.
+const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stage {
     Lower,
@@ -196,8 +199,13 @@ fn spawn_worker<C>(
     let error_tx = errors.clone();
     let stage_error_tx = errors.clone();
     let name = format!("icmd-{}", stage.as_str());
+    // Lowering, layout, and paint are recursive over the logical tree, so the
+    // worker stack must comfortably cover the configured depth limit. The
+    // default thread stack is not enough for a tree at the default depth, whose
+    // overflow would abort the process rather than return a typed error.
     let handle = thread::Builder::new()
         .name(name)
+        .stack_size(WORKER_STACK_BYTES)
         .spawn(move || {
             let _live = WorkerGuard::enter();
             // A panicking stage is reported by name instead of looking like an
