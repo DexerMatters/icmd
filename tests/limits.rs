@@ -972,3 +972,51 @@ fn an_invalid_resource_policy_is_rejected_through_the_typed_path() {
     drop(input);
     let _ = runtime.shutdown(ShutdownPolicy::default());
 }
+
+// PERF gate: a `NoWrap` leaf cannot be broken by an offer, so it must be shaped
+// once per frame however narrow the container is.
+#[test]
+fn a_no_wrap_leaf_is_shaped_once_per_frame() {
+    let _guard = METRIC_READERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    use icmd::advanced::{Commit, Lower, Runtime, ShutdownPolicy, runtime_metrics};
+    use std::time::Duration;
+
+    const LEAVES: usize = 16;
+    let viewport = Size::new(8, 8);
+    let (commit, _) = Commit::new(viewport);
+    let runtime = Runtime::new(Lower::with_limits(ResourceLimits::default()))
+        .then(commit)
+        .start_handle();
+    let input = runtime.input();
+    let output = runtime.output();
+
+    // Each leaf is far wider than the 8-cell viewport, so a wrapping leaf would
+    // be measured twice. `NoWrap` must not be.
+    let tree = || -> Node {
+        icmd::fragment((0..LEAVES).map(|index| {
+            Node::from(
+                icmd::Text::new(format!("a very wide leaf number {index} that cannot fit"))
+                    .wrap(icmd::TextWrap::NoWrap),
+            )
+        }))
+    };
+    input.send(tree()).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+    let first = runtime_metrics();
+
+    input.send(tree()).unwrap();
+    output.recv_timeout(Duration::from_secs(2)).unwrap();
+    let second = runtime_metrics().since(first);
+
+    assert!(
+        second.text_shaping_calls <= LEAVES as u64 + 8,
+        "a NoWrap leaf must be shaped once per frame regardless of the offer: \
+         second frame shaped {} for {LEAVES} leaves",
+        second.text_shaping_calls
+    );
+
+    drop(input);
+    let _ = runtime.shutdown(ShutdownPolicy::default());
+}

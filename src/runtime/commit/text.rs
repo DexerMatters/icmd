@@ -54,7 +54,13 @@ pub(super) fn text_measure(
     // needs a second shaping pass, which is what keeps an unconstrained leaf
     // to one shape instead of two per frame.
     let offered = offered_width.unwrap_or(natural_width.max(1)).max(1) as usize;
-    let rows = if natural_width <= 0 || offered >= natural_width as usize {
+    // `NoWrap` breaks rows only at explicit newlines, so no offer can change the
+    // row count and the second pass is never needed. Otherwise only an offer
+    // narrower than the natural width can introduce a break.
+    let rows = if matches!(text.wrap, TextWrap::NoWrap)
+        || natural_width <= 0
+        || offered >= natural_width as usize
+    {
         natural.row_count()
     } else {
         layout(text, offered, inherited, merging).row_count()
