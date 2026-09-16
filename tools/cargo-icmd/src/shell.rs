@@ -1385,7 +1385,7 @@ mod tests {
 
     #[test]
     fn the_guide_prefers_a_detected_native_image_protocol() {
-        // The tool requires the native-raster build but never forces a protocol:
+        // The tool enables the opt-in native-raster feature but never forces a protocol:
         // Auto prefers Kitty, Sixel, or iTerm2 where the terminal supports one
         // and falls back to symbol rendering everywhere else.
         assert_eq!(

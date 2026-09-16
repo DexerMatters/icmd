@@ -1,6 +1,6 @@
 [package]
 name = "icmd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A Rust framework for crafting polished, component-driven terminal apps with reliable rendering and rich visual output."
@@ -26,10 +26,11 @@ exclude = [
 members = ["fixtures/high-level", "fixtures/advanced", "tools/cargo-icmd"]
 
 [features]
-default = ["native-raster"]
+# The default build is pure Rust: cell output only, no native toolchain.
+default = []
 # Native Chafa-backed raster encoding (Kitty/Sixel/iTerm2 payloads and symbol
-# rendering). Requires pkg-config, the Chafa development package, and libclang
-# at build time. Disable it for a pure-Rust build that only emits cell output.
+# rendering). Opt in when an application needs real terminal images; it requires
+# pkg-config, the Chafa development package, and libclang at build time.
 native-raster = ["dep:chafa-sys"]
 # Markdown parsing and rendering. This stays opt-in because it adds a parser
 # dependency and a larger widget surface to the high-level facade.

@@ -637,6 +637,7 @@ pub(super) fn scroll_selection_media(
             {docs::body("ImageLoading chooses when a file source is decoded. Lazy waits until the surface first needs pixels, which keeps an off-screen image cheap. Eager decodes as soon as the surface is created, which is what you want when the image is about to be shown. ResourceLimits bounds every path: encoded bytes, source dimensions, source pixels, decoded bytes, and bytes in flight.")}
             {docs::specimen(&theme, "loaded, file-backed, and refused sources", ui! { {sources_specimen.apply(())} })}
             {docs::callout(&theme, CalloutKind::Warning, "A file-backed source with only one explicit dimension is refused, not guessed. The widget has no pixels to measure, so it cannot infer the other axis, and it paints the invalid-source placeholder instead.")}
+            {docs::callout(&theme, CalloutKind::Info, "Native raster output is an opt-in feature, not a default one. `icmd` builds pure Rust unless you add `native-raster`, so a cell-only build never links Chafa, pkg-config, or libclang; without that feature an image still occupies its reserved box and paints as text cells.")}
             {docs::api_strip(&theme, &[
                 ApiRow { name: "raster_image", purpose: "place a raster source in a cell box", defaults: "Lazy, Contain, Center, Auto", events: "none" },
                 ApiRow { name: "ImageProps", purpose: "src, width, height, loading, fit, alignment, mode, alt", defaults: "width and height 0, so a loaded source derives them", events: "none" },
@@ -660,7 +661,7 @@ pub(super) fn scroll_selection_media(
             {docs::body("Mode decides what is drawn. Auto negotiates with the terminal: Kitty, Sixel, or iTerm2 is used natively when the terminal supports it, and symbols are the fallback. Native asks for a graphics protocol only. Symbols always emits text cells, which is the one mode every terminal can show.")}
             {docs::specimen(&theme, "fits, alignments, and modes over one image", ui! { {fit_specimen.apply(())} })}
             {docs::source_block(&theme, "the same image through every fit and mode, and a labelled placeholder", snippets::IMAGE_GALLERY)}
-            {docs::notice(&theme, "ImageProtocol names a preferred protocol explicitly when Auto is not the choice you want; ImageProtocol::Symbols is equivalent to forcing symbol output. The renderer decides the protocol once per session, so a resize or a repaint never changes modes mid-frame.")}
+            {docs::notice(&theme, "ImageProtocol names a preferred protocol explicitly when Auto is not the choice you want; ImageProtocol::Symbols is equivalent to forcing symbol output. The renderer decides the protocol once per session, so a resize or a repaint never changes modes mid-frame. The native protocols are compiled in only by the opt-in `native-raster` feature; a default build always renders symbols, and this guide enables the feature because it demonstrates real terminals.")}
             {docs::api_strip(&theme, &[
                 ApiRow { name: "ImageFit", purpose: "Contain, Cover, Stretch", defaults: "Contain", events: "none" },
                 ApiRow { name: "ImageAlign", purpose: "Start, Center, End on each axis", defaults: "Center", events: "none" },

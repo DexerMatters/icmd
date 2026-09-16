@@ -1,6 +1,6 @@
 [package]
 name = "cargo-icmd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Interactive terminal documentation for the icmd UI framework."
@@ -16,4 +16,4 @@ path = "src/main.rs"
 
 [dependencies]
 crossterm = "0.29.0"
-icmd = { path = "../..", version = "=0.1.0", default-features = false, features = ["markdown", "native-raster"] }
+icmd = { path = "../..", version = "=0.2.0", default-features = false, features = ["markdown", "native-raster"] }

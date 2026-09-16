@@ -1,11 +1,12 @@
-# Downstream compile fixture for the advanced tier. It depends on icmd with its
-# default features, so this build also covers the native-raster path, and it
-# exercises typed frame construction rather than raw operation lists.
+# Downstream compile fixture for the advanced tier. It enables icmd's
+# native-raster feature, which is opt-in rather than default, so this build
+# covers the native path; it also exercises typed frame construction rather than
+# raw operation lists.
 [package]
 name = "icmd-advanced-fixture"
-version = "0.0.0"
+version = "0.2.0"
 edition = "2024"
 publish = false
 
 [dependencies]
-icmd = { path = "../.." }
+icmd = { path = "../..", features = ["native-raster"] }

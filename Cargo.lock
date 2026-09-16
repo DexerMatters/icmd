@@ -90,7 +90,7 @@ checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "cargo-icmd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "icmd",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "icmd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chafa-sys",
  "criterion",
@@ -483,14 +483,14 @@ dependencies = [
 
 [[package]]
 name = "icmd-advanced-fixture"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "icmd",
 ]
 
 [[package]]
 name = "icmd-high-level-fixture"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "icmd",
 ]

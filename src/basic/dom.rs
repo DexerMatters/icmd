@@ -44,6 +44,11 @@ impl std::fmt::Display for DomId {
 
 /// One node in the render tree: an element carrying props and children, or a
 /// leaf holding text, an image, or a raster placement.
+///
+/// The element variant is deliberately the largest one. Props stay inline so
+/// walking, cloning, and repainting the tree never pays an indirection for the
+/// common case; boxing them would add an allocation per element instead.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DomNode {
     /// An element node with layout props and child nodes.

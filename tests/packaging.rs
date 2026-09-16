@@ -42,6 +42,7 @@ fn ci_covers_the_release_gates() {
     let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
         .expect("the CI workflow must exist");
     for gate in [
+        "cargo check -p icmd --all-targets",
         "cargo test --no-default-features",
         "cargo test --no-default-features --features markdown",
         "cargo test --all-features",
@@ -64,10 +65,14 @@ fn ci_covers_the_release_gates() {
         .split("native-raster:")
         .nth(1)
         .expect("the native raster job must exist");
-    assert!(
-        native_job.contains("libchafa-dev pkg-config clang"),
-        "the documentation tool's native prerequisites must be installed"
-    );
+    // Checked one package at a time: glib is needed because `chafa.pc` requires
+    // it, and an exact substring match would break every time a package is added.
+    for package in ["libchafa-dev", "libglib2.0-dev", "pkg-config", "clang"] {
+        assert!(
+            native_job.contains(package),
+            "the native raster job must install `{package}`"
+        );
+    }
     let stress = std::fs::read_to_string(root.join(".github/workflows/stress.yml"))
         .expect("the scheduled stress workflow must exist");
     assert!(
@@ -251,5 +256,34 @@ fn crate_source_documents_its_public_api_with_rustdoc() {
     assert!(
         rustdoc > 200,
         "the public API must be documented with `///` and `//!`, found only {rustdoc} lines"
+    );
+}
+
+// The raster feature is opt-in. A plain `cargo add icmd` must produce a
+// pure-Rust build that needs no Chafa, pkg-config, or libclang, and only the
+// documentation tool - which demonstrates images - opts in.
+#[test]
+fn native_raster_is_not_a_default_feature() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("manifest");
+    assert!(
+        manifest.contains("default = []"),
+        "the default feature set must stay empty (pure Rust)"
+    );
+    assert!(
+        !manifest.contains("default = [\"native-raster\"]"),
+        "native raster must not be a default feature"
+    );
+    let tool = std::fs::read_to_string(root.join("tools/cargo-icmd/Cargo.toml"))
+        .expect("the documentation tool manifest");
+    assert!(
+        tool.contains("\"native-raster\""),
+        "the documentation tool must opt into native raster explicitly"
+    );
+    let fixture = std::fs::read_to_string(root.join("fixtures/advanced/Cargo.toml"))
+        .expect("the advanced fixture manifest");
+    assert!(
+        fixture.contains("\"native-raster\""),
+        "the advanced fixture must keep covering the native path explicitly"
     );
 }

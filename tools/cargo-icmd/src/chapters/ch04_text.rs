@@ -265,7 +265,7 @@ fn selection_demo(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
 /// One rich Markdown sample that exercises every block the parser supports.
 const MARKDOWN_SAMPLE: &str = r#"# Release checklist
 
-Ship **icmd 0.1.0** only when every gate below is _green_.
+Ship **icmd 0.2.0** only when every gate below is _green_.
 
 > [!NOTE]
 > Alert syntax rides on the same GFM extension set your repository already renders.

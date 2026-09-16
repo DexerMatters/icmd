@@ -20,6 +20,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
+      # The default feature set must stay pure Rust: this job has no Chafa,
+      # pkg-config, or libclang, so a native default would fail right here.
+      - name: Default features (pure Rust)
+        run: cargo check -p icmd --all-targets
       - run: cargo clippy --all-targets --no-default-features -- -D warnings
       - run: cargo test --no-default-features
       - name: Markdown parser (pure Rust)
@@ -42,8 +46,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # `chafa.pc` declares glib-2.0 as a requirement, and the runner image does
+      # not pull the glib development files in with `libchafa-dev`, so
+      # `pkg-config chafa` fails without installing them explicitly.
       - name: Install Chafa
-        run: sudo apt-get update && sudo apt-get install -y libchafa-dev pkg-config clang
+        run: sudo apt-get update && sudo apt-get install -y libchafa-dev libglib2.0-dev pkg-config clang
       - name: Report the discovered ABI
         run: pkg-config --modversion chafa
       - run: cargo clippy --all-targets --all-features -- -D warnings
@@ -90,8 +97,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # The framework's package verification builds the default (pure-Rust)
+      # feature set, so it needs no Chafa; the tool's package contents are only
+      # listed, not built. Chafa is installed anyway so this job can verify a
+      # tool package that demonstrates images.
       - name: Install Chafa
-        run: sudo apt-get update && sudo apt-get install -y libchafa-dev pkg-config clang
+        run: sudo apt-get update && sudo apt-get install -y libchafa-dev libglib2.0-dev pkg-config clang
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - run: cargo audit
@@ -100,8 +111,11 @@ jobs:
       - name: Packaged crate builds standalone
         run: |
           cd target/package
-          tar xzf icmd-*.crate
-          cd icmd-*/
+          # Newest crate wins: a stale tarball from an earlier run must not join
+          # the glob and make tar treat it as an archive member.
+          crate=$(ls -1t icmd-*.crate | head -1)
+          tar xzf "$crate"
+          cd "${crate%.crate}"
           cargo build --no-default-features
       # The documentation tool ships its own raster asset and displayed
       # snippets, so its package contents are validated explicitly rather than

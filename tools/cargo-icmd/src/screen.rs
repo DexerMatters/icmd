@@ -1603,4 +1603,19 @@ mod tests {
             screen.text()
         );
     }
+
+    /// The guide shows the version it ships with.
+    ///
+    /// The framework and this documentation tool are versioned together, so the
+    /// tool's package version is the one the release card has to paint.
+    #[test]
+    fn the_guide_shows_the_crate_version() {
+        let screen = render_section(0, 0, Size::new(110, 44));
+        let expected = concat!("icmd ", env!("CARGO_PKG_VERSION"));
+        assert!(
+            screen.contains(expected),
+            "the release card must show `{expected}`:\n{}",
+            screen.text()
+        );
+    }
 }

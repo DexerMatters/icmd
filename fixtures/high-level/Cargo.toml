@@ -3,7 +3,7 @@
 # `advanced` item or a macro helper fails this build.
 [package]
 name = "icmd-high-level-fixture"
-version = "0.0.0"
+version = "0.2.0"
 edition = "2024"
 publish = false
 

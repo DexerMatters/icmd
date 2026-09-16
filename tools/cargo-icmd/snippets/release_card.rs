@@ -15,7 +15,7 @@ pub fn release_card(_cx: &mut ComponentContext, _props: &Props<()>) -> Node {
                 style.justify /= Justify::SpaceBetween;
                 style.gap /= 1;
             }}>
-                <heading>"icmd 0.1.0"</heading>
+                <heading>"icmd 0.2.0"</heading>
                 <badge text={"STABLE"} variant={BadgeVariant::Secondary} />
             </row>
             <paragraph>"A retained, terminal-native UI framework with cell-aware layout and Unicode text."</paragraph>

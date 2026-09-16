@@ -12,8 +12,9 @@ API.
 ## Prerequisites
 
 `cargo-icmd` enables `icmd`'s `native-raster` feature so the guide can
-demonstrate real terminal image protocols. Building it therefore needs the same
-native prerequisites as the framework's default build:
+demonstrate real terminal image protocols. That feature is opt-in and *not* part
+of the framework's default build, so building this tool needs native
+prerequisites that a plain `icmd` application does not:
 
 - **Chafa development library** — provides `libchafa` and its `pkg-config` file.
   - Debian/Ubuntu: `sudo apt-get install -y libchafa-dev`
@@ -85,13 +86,14 @@ Selection works inside the document: drag with the pointer, extend with
 
 | Concern | `icmd` | `cargo-icmd` |
 | --- | --- | --- |
-| Default features | `native-raster` | requires `native-raster` |
+| Default features | none, pure Rust | enables `native-raster` and `markdown` |
 | Markdown | opt-in behind `markdown` | enables `markdown` |
 | Terminal image protocol | application's choice | `ImageProtocol::Auto` at runtime |
 | Assets | none | one small bundled PNG, decoded once |
 
-The distinction matters when vendoring: an application can build `icmd` with no
-native dependencies at all, while this tool intentionally does not.
+The distinction matters when vendoring: an application builds `icmd` with no
+native dependencies at all by default and opts in only if it wants terminal
+images, while this tool intentionally does not.
 
 ## Package contents
 

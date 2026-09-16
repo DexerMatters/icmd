@@ -88,7 +88,7 @@ pub(crate) const CHAPTERS: &[ChapterMeta] = &[
                 number: "1.2",
                 title: "Install the framework",
                 kicker: "SETUP",
-                summary: "Default install, a pure-Rust build, Markdown opt-in, and the native raster prerequisites.",
+                summary: "A pure-Rust default, the two opt-in features, and the native raster prerequisites.",
                 keywords: &[
                     "cargo add",
                     "features",

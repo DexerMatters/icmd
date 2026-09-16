@@ -80,6 +80,12 @@ pub struct Node {
     key: Option<Key>,
 }
 
+/// The element variant is deliberately the largest one: props are stored inline
+/// so building, cloning, and matching a node never pays an indirection, and an
+/// element is the common case. Boxing them would trade that for an allocation on
+/// every node and every clone, which is the wrong trade for a retained tree this
+/// shallow.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub(crate) enum NodeKind {
     Component {

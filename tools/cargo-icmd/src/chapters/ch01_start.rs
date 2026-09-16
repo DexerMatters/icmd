@@ -24,7 +24,7 @@ fn release_card_demo(_cx: &mut ComponentContext, _props: &Props<()>) -> Node {
                 style.justify /= Justify::SpaceBetween;
                 style.gap /= 1;
             }}>
-                <heading>"icmd 0.1.0"</heading>
+                <heading>"icmd 0.2.0"</heading>
                 <badge text={"STABLE"} variant={BadgeVariant::Secondary} />
             </row>
             <paragraph>"A retained, terminal-native UI framework with cell-aware layout and Unicode text."</paragraph>
@@ -130,20 +130,20 @@ pub(super) fn start_here(cx: &mut ComponentContext, props: &Props<ChapterProps>)
         1,
         &sections[1],
         ui! {
-            {docs::body("Add the crate with its defaults when you want native raster support, or disable defaults for a pure-Rust build that only ever emits text cells. Markdown stays opt-in so a small tool does not carry a parser it never uses.")}
+            {docs::body("The default build is pure Rust: it emits text cells and needs no native toolchain, so nothing has to be installed beyond the crate. Two features are opt-in, and an application only pays for the ones it selects.")}
             {docs::two_column(
                 &theme,
                 data.wide(),
                 ui! {
-                    {docs::feature_row(&theme, "native-raster (default)", "Chafa-backed Kitty, Sixel, and iTerm2 payloads plus symbol rendering. Requires pkg-config, the Chafa development package, and libclang at build time.")}
+                    {docs::feature_row(&theme, "default (pure Rust)", "Cell and text output only, with no native or parser dependency. The right choice for constrained build environments and for vendored builds.")}
+                    {docs::feature_row(&theme, "native-raster (opt-in)", "Adds Chafa-backed Kitty, Sixel, and iTerm2 payloads plus symbol rendering. Requires pkg-config, the Chafa development package, and libclang at build time. Without it, an unsupported protocol is a typed error and images fall back to text cells.")}
                     {docs::feature_row(&theme, "markdown (opt-in)", "Turns CommonMark into ordinary, selectable components: headings, lists, tables, task lists, alerts, and footnotes.")}
-                    {docs::feature_row(&theme, "no default features", "Cell output only, with no native or parser dependency. Ideal for constrained build environments.")}
                 },
                 ui! {
-                    {docs::source_block(&theme, "Cargo.toml", "[dependencies]\n# Default features: native raster support.\nicmd = \"0.1\"\n\n# Pure-Rust build: cell output only.\nicmd = { version = \"0.1\", default-features = false }\n\n# Documents, with native raster left on.\nicmd = { version = \"0.1\", features = [\"markdown\"] }")}
+                    {docs::source_block(&theme, "Cargo.toml", "[dependencies]\n# Default: pure Rust, cell output only.\nicmd = \"0.2\"\n\n# Terminal images and documents.\nicmd = { version = \"0.2\", features = [\"native-raster\", \"markdown\"] }\n\n# Documents only, still pure Rust.\nicmd = { version = \"0.2\", features = [\"markdown\"] }")}
                 },
             )}
-            {docs::callout(&theme, CalloutKind::Production, "The documentation browser itself enables both markdown and native-raster, because it demonstrates documents and images. Your application only pays for the features it selects.")}
+            {docs::callout(&theme, CalloutKind::Production, "The documentation browser itself enables native-raster and markdown, because it demonstrates images and documents. Your application only pays for the features it selects.")}
             {docs::api_strip(&theme, &[
                 ApiRow { name: "RuntimeConfig", purpose: "session behavior and terminal modes", defaults: "Ctrl+C exit, alternate screen, mouse and paste capture on", events: "none" },
                 ApiRow { name: "ImageProtocol", purpose: "which graphics protocol is preferred", defaults: "ImageProtocol::Auto", events: "none" },
