@@ -344,6 +344,13 @@ where
         }
     }
 
+    /// Returns a stable ref to a concrete host element's latest committed
+    /// geometry and resolved properties.
+    pub fn use_element_ref(&mut self) -> super::element_ref::ElementRef {
+        let cell = self.use_ref(super::element_ref::ElementRef::new);
+        cell.lock().expect("element ref hook poisoned").clone()
+    }
+
     /// Returns a `StateRef` sharing the same allocation as `use_ref`.
     pub fn use_state_ref<T: Send + 'static>(&mut self, initial: impl FnOnce() -> T) -> StateRef<T> {
         StateRef::from_ref(self.use_ref(initial))

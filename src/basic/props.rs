@@ -13,7 +13,12 @@ use crossterm::style::{Attribute, Attributes as CrosstermAttributes, Color};
 
 use crate::{Node, data::MAX_GLYPH_BYTES};
 
-use super::{common::Attr, events::EventHandlers, text::Text};
+use super::{
+    common::Attr,
+    element_ref::{ElementRef, ElementSnapshot},
+    events::{EventHandlers, EventListener},
+    text::Text,
+};
 
 /// What a percentage value is measured against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
@@ -843,8 +848,18 @@ pub struct DomProps {
     pub events: EventHandlers,
     /// Whether the node can take focus; tri-state so an explicit `false` overrides a default `true`.
     pub focusable: Attr<bool>,
-    /// Requests focus after publication when nothing else already owns focus.
+    /// Requests focus after publication.
+    ///
+    /// The request is granted when nothing else owns focus, and also when this
+    /// node is painted above the region that does. Paint order decides: an
+    /// overlay, dialog, or later sibling can take focus from the view behind it,
+    /// while a region that merely scrolled into view cannot take it back.
     pub autofocus: bool,
+    /// Stable handle populated with this host element's latest committed
+    /// geometry and resolved properties.
+    pub element_ref: Attr<ElementRef>,
+    /// Listener invoked after this host's committed snapshot changes.
+    pub element_change: Attr<EventListener<Option<ElementSnapshot>>>,
     pub(crate) scroll: Option<Box<ScrollConfig>>,
     /// Present only on a selectable region's host node; the paint pass carries it
     /// down the subtree, so the text leaves below become selectable.
@@ -890,6 +905,29 @@ impl DomProps {
         self
     }
 
+    /// Attaches a stable element ref to this host.
+    pub fn with_element_ref(mut self, element_ref: ElementRef) -> Self {
+        self.element_ref = Attr::Set(element_ref);
+        self
+    }
+
+    /// Registers a listener for committed element snapshot changes.
+    pub fn with_element_change(
+        mut self,
+        listener: impl FnMut(Option<ElementSnapshot>) + Send + 'static,
+    ) -> Self {
+        self.element_change = Attr::Set(EventListener::new(listener));
+        self
+    }
+
+    /// Alias for [`Self::with_element_change`].
+    pub fn with_on_element_change(
+        self,
+        listener: impl FnMut(Option<ElementSnapshot>) + Send + 'static,
+    ) -> Self {
+        self.with_element_change(listener)
+    }
+
     /// Attaches a region's live selection; `with_overrides` leaves it untouched so
     /// a caller cannot detach or replace a host's selection.
     pub(crate) fn with_selection_host(
@@ -906,6 +944,8 @@ impl DomProps {
         self.events.merge(&overrides.events);
         self.focusable.overlay(&overrides.focusable);
         self.autofocus |= overrides.autofocus;
+        self.element_ref.overlay(&overrides.element_ref);
+        self.element_change.overlay(&overrides.element_change);
         if overrides.scroll.is_some() {
             self.scroll = overrides.scroll.clone();
         }

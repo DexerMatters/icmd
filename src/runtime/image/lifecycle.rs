@@ -7,6 +7,26 @@ use crate::runtime::renderer::{ImageNode, Renderer, Surface};
 use crate::{ImageMode, ImageProtocol, ImageSource, RasterImage, RasterPlacement, Rect};
 
 use super::manager::{SourceRequest, placeholder as placeholder_image};
+
+/// Which placeholder a source change installs.
+#[derive(Debug, Clone, Copy)]
+enum Placeholder {
+    /// The source is on its way, so the box shows `…`.
+    Loading,
+    /// The source cannot be shown, so the box shows the placement's alternative
+    /// text, or `×` when it has none.
+    Unavailable,
+}
+
+impl Placeholder {
+    /// The text this placeholder paints in `raster`'s box.
+    fn text(self, raster: &RasterPlacement) -> String {
+        match self {
+            Self::Loading => String::from("…"),
+            Self::Unavailable => raster.unavailable_text().to_string(),
+        }
+    }
+}
 use super::types::TransformKey;
 
 impl Renderer {
@@ -42,14 +62,14 @@ impl Renderer {
 
     fn request_source(&mut self, source: &ImageSource) {
         match self.image_manager.request(source) {
-            SourceRequest::Queued => self.set_source_fallback(source, "…"),
+            SourceRequest::Queued => self.set_source_fallback(source, Placeholder::Loading),
             SourceRequest::Backpressured => {}
-            SourceRequest::Closed => self.set_source_fallback(source, "×"),
+            SourceRequest::Closed => self.set_source_fallback(source, Placeholder::Unavailable),
             SourceRequest::AlreadyAvailable => {}
         }
     }
 
-    fn set_source_fallback(&mut self, source: &ImageSource, symbol: &str) {
+    fn set_source_fallback(&mut self, source: &ImageSource, placeholder: Placeholder) {
         let ids: Vec<_> = self
             .images
             .iter()
@@ -61,7 +81,8 @@ impl Renderer {
         for id in ids {
             let damage = if let Some(node) = self.images.get_mut(&id) {
                 if let Surface::Raster(raster) = &node.surface {
-                    node.fallback = placeholder_image(raster.width, raster.height, symbol);
+                    let text = placeholder.text(raster);
+                    node.fallback = placeholder_image(raster.width, raster.height, &text);
                     Some(Self::node_damage_for(node))
                 } else {
                     None
@@ -112,8 +133,9 @@ impl Renderer {
             for id in ids {
                 let damage = if let Some(node) = self.images.get_mut(&id) {
                     if let Surface::Raster(raster) = &node.surface {
+                        let text = raster.unavailable_text().to_string();
                         node.fallback = (!ready)
-                            .then(|| placeholder_image(raster.width, raster.height, "×"))
+                            .then(|| placeholder_image(raster.width, raster.height, &text))
                             .flatten();
                     }
                     Some(Self::node_damage_for(node))

@@ -914,3 +914,85 @@ fn an_invalid_batch_leaves_the_previous_frame_intact() {
     assert!(frame.contains('C'), "the re-created surface must render");
     let _ = raster;
 }
+
+#[test]
+fn an_alternative_label_replaces_the_missing_image_placeholder() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("does-not-exist-alt.jpg");
+    let mut renderer = Renderer::with_config(
+        Size::new(12, 1),
+        RendererConfig {
+            image_protocol: ImageProtocol::Symbols,
+            ..RendererConfig::default()
+        },
+    )
+    .unwrap();
+    renderer
+        .apply_frame(Frame::new(vec![Operation::CreateRaster {
+            id: icmd::ImageId(1),
+            raster: RasterPlacement::new(ImageSource::file(path), 12, 1, Default::default())
+                .with_alt("cover.png"),
+            position: Default::default(),
+            level: 0,
+        }]))
+        .unwrap();
+    // The label a reader can act on replaces the generic error glyph once the
+    // source is known to be unavailable.
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(10));
+        if let Some(frame) = renderer.render_diff().unwrap()
+            && frame.contains("cover.png")
+        {
+            return;
+        }
+    }
+    panic!("an unavailable source did not paint its alternative label");
+}
+
+#[test]
+fn an_alternative_label_replaces_the_element_error_placeholder() {
+    let path = asset_path();
+    let node = ui! { <raster_image src={ImageSource::file(path)} width={6} alt="icon" /> };
+    let frame = render(node);
+    assert!(frame.contains("icon"), "{frame:?}");
+    assert!(!frame.contains('×'), "{frame:?}");
+}
+
+#[test]
+fn the_element_forwards_its_alternative_label() {
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("does-not-exist-element.jpg");
+    // An explicit box means the element builds a placement, so the label has to
+    // travel through the raster rather than being painted by the element.
+    let node = ui! {
+        <raster_image
+            src={ImageSource::file(path)}
+            width={12}
+            height={1}
+            alt={"element.png"}
+            mode={ImageMode::Symbols} />
+    };
+    let (commit, _) = icmd::advanced::Commit::new(Size::new(12, 1));
+    let (input, output) = Runtime::new(icmd::advanced::Lower::default())
+        .then(commit)
+        .then(
+            Renderer::with_config(
+                Size::new(12, 1),
+                RendererConfig {
+                    image_protocol: ImageProtocol::Symbols,
+                    ..RendererConfig::default()
+                },
+            )
+            .unwrap(),
+        )
+        .start();
+    input.send(node).unwrap();
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(10));
+        while let Ok(Ok(frame)) = output.recv_timeout(Duration::from_millis(10)) {
+            if frame.contains("element.png") {
+                return;
+            }
+        }
+    }
+    panic!("the element did not forward its alternative label");
+}

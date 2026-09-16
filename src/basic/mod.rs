@@ -8,6 +8,7 @@ pub(crate) mod common;
 pub(crate) mod context;
 mod dom;
 pub(crate) mod editor_surface;
+pub(crate) mod element_ref;
 pub(crate) mod events;
 pub(crate) mod hooks;
 pub(crate) mod lifetime;
@@ -25,6 +26,10 @@ pub use context::{
     create_context,
 };
 pub use dom::{DomId, DomNode};
+pub use element_ref::{
+    ElementRect, ElementRef, ElementScrollState, ElementSnapshot, ResolvedBorderStyle,
+    ResolvedElementStyle, ResolvedTextStyle,
+};
 pub use events::{
     EventHandlers, EventListener, EventPhase, FocusEvent, KeyboardEvent, PasteEvent, PointerButton,
     PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent, ScrollEvent,

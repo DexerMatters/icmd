@@ -8,6 +8,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::raster::ImageSourceKey;
 use crate::runtime::limits::ResourceLimits;
@@ -285,18 +286,18 @@ impl ImageManager {
 
     pub(crate) fn initial_fallback(&self, raster: &RasterPlacement) -> Option<Image> {
         if raster.invalid_source {
-            return placeholder(raster.width, raster.height, "×");
+            return placeholder(raster.width, raster.height, raster.unavailable_text());
         }
         if raster.source.loaded_image().is_some() {
             return None;
         }
         let key = raster.source.cache_key();
-        let symbol = match self.source_cache.get(&key).map(|entry| &entry.state) {
+        let text = match self.source_cache.get(&key).map(|entry| &entry.state) {
             Some(SourceState::Ready(_)) => return None,
-            Some(SourceState::Failed) => "×",
+            Some(SourceState::Failed) => raster.unavailable_text(),
             Some(SourceState::Loading) | None => "…",
         };
-        placeholder(raster.width, raster.height, symbol)
+        placeholder(raster.width, raster.height, text)
     }
 
     /// Requests a load for `source`, reusing any cached, in-flight, or pending entry.
@@ -444,18 +445,53 @@ impl ImageManager {
     }
 }
 
-pub(crate) fn placeholder(width: u16, height: u16, symbol: &str) -> Option<Image> {
+/// Builds a `width` by `height` box that paints `text` centred on its middle
+/// row, clipped to that row. Text that does not fit ends in an ellipsis, so a
+/// long alternative label stays readable inside a small box; glyphs are dropped
+/// from the end until the marker itself fits, which keeps the cut visible.
+pub(crate) fn placeholder(width: u16, height: u16, text: &str) -> Option<Image> {
     if width == 0 || height == 0 {
         return None;
     }
-    let cell = Cell::plain(symbol).ok()?;
-    let mut image = Image::new(usize::from(width), usize::from(height), Cell::blank()).ok()?;
-    let position = crate::ImagePosition::new(
-        usize::from(height.saturating_sub(1)) / 2,
-        usize::from(width.saturating_sub(1)) / 2,
-    );
-    image
-        .patch_cells(&[crate::CellEdit { position, cell }])
-        .ok()?;
+    let limit = usize::from(width);
+    let mut cells: Vec<Cell> = Vec::new();
+    let mut columns = 0_usize;
+    let mut clipped = false;
+    for grapheme in text.graphemes(true) {
+        let Ok(cell) = Cell::plain(grapheme) else {
+            continue;
+        };
+        let cell_width = cell.width();
+        if columns + cell_width > limit {
+            clipped = true;
+            break;
+        }
+        cells.push(cell);
+        columns += cell_width;
+    }
+    if clipped {
+        while columns >= limit {
+            let Some(cell) = cells.pop() else {
+                break;
+            };
+            columns -= cell.width();
+        }
+        if let Ok(marker) = Cell::plain("…") {
+            columns += marker.width();
+            cells.push(marker);
+        }
+    }
+    let mut image = Image::new(limit, usize::from(height), Cell::blank()).ok()?;
+    let row = usize::from(height.saturating_sub(1)) / 2;
+    let mut column = limit.saturating_sub(columns) / 2;
+    let mut edits = Vec::with_capacity(cells.len());
+    for cell in cells {
+        edits.push(crate::CellEdit {
+            position: crate::ImagePosition::new(row, column),
+            cell: cell.clone(),
+        });
+        column += cell.width();
+    }
+    image.patch_cells(&edits).ok()?;
     Some(image)
 }

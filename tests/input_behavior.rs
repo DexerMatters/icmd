@@ -14,8 +14,8 @@ use icmd::advanced::{
 };
 use icmd::{
     Attr, Component, ComponentContext, Dimension, EmojiMerging, EventListener, FocusEvent,
-    InputProps, Node, Props, Size, TerminalFocusEvent, TextValueEvent, TextWrap, TextareaProps,
-    column, input, textarea, ui, view,
+    InputProps, Layout, Node, Props, Size, TerminalFocusEvent, TextSelectionEvent, TextValueEvent,
+    TextWrap, TextareaProps, column, input, muted, selection_area, textarea, ui, view,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -2121,4 +2121,144 @@ fn enter_submits_single_line_and_inserts_newline_multiline() {
     }));
     dispatcher.dispatch(key(KeyCode::Enter, KeyModifiers::empty()));
     assert_eq!(&*values.lock().unwrap(), &["\na"]);
+}
+
+/// Dragging inside an editor must not also start a selection in an ancestor
+/// selectable region.
+///
+/// The editor owns a pointer gesture that lands on it: it places its own caret
+/// and extends its own selection. A selectable ancestor that also handled the
+/// gesture selected the prose around the field at the same time, so a drag
+/// inside the box highlighted the text above it.
+#[test]
+fn dragging_inside_an_input_does_not_select_the_surrounding_region() {
+    let selected = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+    let changes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (selection_sink, change_sink) = (selected.clone(), changes.clone());
+    let node = ui! {
+        <selection_area
+            on_selection_change={move |event: TextSelectionEvent| {
+                selection_sink
+                    .lock()
+                    .expect("selection log")
+                    .push((event.range.start, event.range.end));
+            }}
+            style={|style| {
+                style.layout /= Layout::Vertical;
+                style.width /= Dimension::Max;
+                style.height /= Dimension::Max;
+            }}>
+            <muted>"prose above the field"</muted>
+            <input
+                default_value={"hello world"}
+                on_change={move |event: TextValueEvent| {
+                    change_sink.lock().expect("change log").push(event.value);
+                }} />
+            <muted>"prose below the field"</muted>
+        </selection_area>
+    };
+    let (sender, output, dispatcher) = pipeline(Size::new(40, 8));
+    sender.send(node).unwrap();
+    let _ = output
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the first frame");
+    // The first child is one row, so the editor's text sits on row 1 and its
+    // value starts one cell in, after the host's left padding.
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), 1),
+        (MouseEventKind::Drag(MouseButton::Left), 7),
+        (MouseEventKind::Up(MouseButton::Left), 7),
+    ] {
+        dispatcher.dispatch(Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        }));
+    }
+    let _ = output.recv_timeout(Duration::from_secs(1));
+    // Cutting proves the editor, not the ancestor, owned the drag.
+    dispatcher.dispatch(key(
+        KeyCode::Char('x'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    let _ = output.recv_timeout(Duration::from_secs(1));
+
+    let ranges = selected.lock().unwrap().clone();
+    assert!(
+        ranges.is_empty(),
+        "the surrounding region must not select from a drag inside the field, got {ranges:?}"
+    );
+    let values = changes.lock().unwrap().clone();
+    let last = values.last().cloned().unwrap_or_default();
+    assert!(
+        !values.is_empty() && !last.contains("hello") && last.contains("orld"),
+        "the editor must have selected and cut the dragged run, got {values:?}"
+    );
+}
+
+/// An autofocus region painted above the current focus owner takes focus.
+///
+/// This is what lets a dialog or overlay receive the first keystroke when the
+/// page behind it already owned focus. A region painted *below* the owner cannot
+/// steal focus back, because paint order decides.
+#[test]
+fn an_autofocus_region_above_the_focus_owner_takes_focus() {
+    let page = Arc::new(Mutex::new(Vec::<String>::new()));
+    let field = Arc::new(Mutex::new(Vec::<String>::new()));
+    let tree = |page: Arc<Mutex<Vec<String>>>, field: Arc<Mutex<Vec<String>>>| {
+        ui! {
+            <view style={|style| {
+                style.layout /= Layout::Vertical;
+                style.width /= Dimension::Max;
+                style.height /= Dimension::Max;
+            }}>
+                <input
+                    default_value={"a"}
+                    on_change={move |event: TextValueEvent| {
+                        page.lock().expect("page log").push(event.value);
+                    }} />
+                <input
+                    default_value={"a"}
+                    autofocus
+                    on_change={move |event: TextValueEvent| {
+                        field.lock().expect("field log").push(event.value);
+                    }} />
+            </view>
+        }
+    };
+    let (sender, output, dispatcher) = pipeline(Size::new(20, 6));
+    sender.send(tree(page.clone(), field.clone())).unwrap();
+    let _ = output.recv_timeout(Duration::from_secs(1));
+
+    // The first field takes focus, exactly as a click on the page behind an
+    // overlay does.
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        dispatcher.dispatch(Event::Mouse(MouseEvent {
+            kind,
+            column: 1,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        }));
+    }
+    let _ = output.recv_timeout(Duration::from_secs(1));
+
+    // A commit republishes the autofocus field, which is painted after the page
+    // field, and focus has to move to it.
+    sender.send(tree(page.clone(), field.clone())).unwrap();
+    let _ = output.recv_timeout(Duration::from_secs(1));
+    dispatcher.dispatch(key(KeyCode::Char('z'), KeyModifiers::empty()));
+    let _ = output.recv_timeout(Duration::from_secs(1));
+
+    assert!(
+        !field.lock().unwrap().is_empty(),
+        "the autofocus field must take focus from the region behind it"
+    );
+    assert!(
+        page.lock().unwrap().is_empty(),
+        "the region behind the autofocus field must not keep the keystroke"
+    );
 }

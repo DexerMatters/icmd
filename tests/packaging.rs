@@ -43,6 +43,7 @@ fn ci_covers_the_release_gates() {
         .expect("the CI workflow must exist");
     for gate in [
         "cargo test --no-default-features",
+        "cargo test --no-default-features --features markdown",
         "cargo test --all-features",
         "icmd-high-level-fixture",
         "cargo audit",
@@ -50,6 +51,23 @@ fn ci_covers_the_release_gates() {
     ] {
         assert!(ci.contains(gate), "CI must run `{gate}`");
     }
+    // The documentation binary needs Chafa, pkg-config, and libclang, so its
+    // tests belong in the job that installs them, not in the pure-Rust job.
+    for gate in [
+        "cargo test -p cargo-icmd",
+        "cargo clippy -p cargo-icmd --all-targets --no-deps -- -D warnings",
+        "cargo package -p cargo-icmd --list",
+    ] {
+        assert!(ci.contains(gate), "CI must run `{gate}`");
+    }
+    let native_job = ci
+        .split("native-raster:")
+        .nth(1)
+        .expect("the native raster job must exist");
+    assert!(
+        native_job.contains("libchafa-dev pkg-config clang"),
+        "the documentation tool's native prerequisites must be installed"
+    );
     let stress = std::fs::read_to_string(root.join(".github/workflows/stress.yml"))
         .expect("the scheduled stress workflow must exist");
     assert!(
@@ -59,6 +77,63 @@ fn ci_covers_the_release_gates() {
     assert!(
         stress.contains("--test property"),
         "the property corpus must replay on a schedule"
+    );
+}
+
+// The documentation tool ships its own raster asset and its displayed snippets.
+// Both are release artifacts: the asset must exist with a license note, and the
+// runnable snippets must be compiled by a test so visible code cannot drift.
+#[test]
+fn documentation_tool_packages_its_assets_and_compiles_its_snippets() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tool = root.join("tools/cargo-icmd");
+    let manifest = std::fs::read_to_string(tool.join("Cargo.toml"))
+        .expect("the documentation tool manifest must exist");
+    for required in [
+        "name = \"cargo-icmd\"",
+        "path = \"src/main.rs\"",
+        "native-raster",
+        "markdown",
+    ] {
+        assert!(
+            manifest.contains(required),
+            "the tool manifest must declare `{required}`"
+        );
+    }
+
+    assert!(
+        tool.join("assets/guide.png").exists(),
+        "the bundled raster asset must ship in the tool package"
+    );
+    let asset_note = std::fs::read_to_string(tool.join("assets/README.md"))
+        .expect("the asset needs a source and license note");
+    for required in ["Source:", "License:", "MIT OR Apache-2.0"] {
+        assert!(
+            asset_note.contains(required),
+            "the asset note must document `{required}`"
+        );
+    }
+
+    let mut snippets = 0;
+    for entry in std::fs::read_dir(tool.join("snippets")).expect("snippets/ must exist") {
+        let path = entry.expect("readable entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            snippets += 1;
+        }
+    }
+    assert!(
+        snippets >= 10,
+        "the guide must ship real Rust snippets, found only {snippets}"
+    );
+    let compile_gate = std::fs::read_to_string(tool.join("src/snippets.rs"))
+        .expect("the snippet registry must exist");
+    assert!(
+        compile_gate.contains("include_str!"),
+        "displayed source must be included verbatim from snippet files"
+    );
+    assert!(
+        tool.join("src/snippets_compile.rs").exists(),
+        "every displayed snippet must be compiled by a test"
     );
 }
 

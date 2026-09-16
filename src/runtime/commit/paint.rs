@@ -5,6 +5,10 @@ use std::collections::HashMap;
 
 use crossterm::style::Color;
 
+use crate::basic::element_ref::{
+    ElementRect, ElementScrollState, ElementSnapshot, ResolvedBorderStyle, ResolvedElementStyle,
+    ResolvedTextStyle,
+};
 use crate::{
     BorderKind, Cell, DomId, DomNode, Fill, Image, Overflow, Rect, ScreenPosition,
     basic::{ScrollbarGlyph, ScrollbarStyle},
@@ -13,7 +17,6 @@ use crate::{
 use super::super::event::{
     EventRect, EventRegion, RuntimeScrollOffset, ScrollRegion, scrollbar_region,
 };
-use super::Commit;
 use super::geometry::RectI;
 use super::layout::ScrollbarMetrics;
 use super::style::{content_insets, scroll_spec};
@@ -22,6 +25,7 @@ use super::types::{
     BorderPainter, Clip, ComputedBorder, ComputedText, PaintContent, PaintFragment, PaintKey,
     PaintRole,
 };
+use super::{Commit, ElementBinding};
 
 pub(super) struct SelectionPaint<'a> {
     config: &'a crate::basic::selection::SelectionConfig,
@@ -52,6 +56,20 @@ impl SelectionPaint<'_> {
 }
 
 impl Commit {
+    /// Paints one lowered node into the scene.
+    ///
+    /// A selectable ancestor reserves the plain-text path for its own document,
+    /// so a text node carrying an editor surface is painted as a raster even
+    /// while a selection host is active. An editor owns its own selection, and
+    /// skipping it along with the document text would leave an input inside a
+    /// selection area painting its box and nothing else.
+    ///
+    /// Children of a scroll region are painted with that region's own offset
+    /// rather than the sum of every ancestor's. The offset reaches an editor as
+    /// the shift applied to its text, and its pointer mapping adds it to a
+    /// position that is already relative to the box the scroller sits in;
+    /// accumulating ancestors would add a page offset the editor's coordinates
+    /// never contained, sending a click past the end of the value.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_node<'a>(
         &mut self,
@@ -64,13 +82,16 @@ impl Commit {
         order: &mut u64,
         scene: &mut HashMap<PaintKey, PaintFragment>,
         event_regions: &mut Vec<EventRegion>,
+        element_bindings: &mut Vec<(DomId, ElementBinding)>,
+        measurement_paths: &std::collections::HashSet<DomId>,
         parent: Option<DomId>,
         event_order: &mut u64,
         scroll: (i32, i32),
         mut selection: Option<&mut SelectionPaint<'a>>,
     ) {
         self.instrument.placement();
-        if clip.is_empty() {
+        let measuring = measurement_paths.contains(&node.id());
+        if clip.is_empty() && !measuring {
             if let DomNode::Raster { id, raster } = node
                 && raster.loading == crate::ImageLoading::Eager
             {
@@ -128,81 +149,82 @@ impl Commit {
                 }
                 let current_backdrop = style.background.or(backdrop);
                 let paint_level = level.saturating_add(style.z_index);
-                Self::paint_background(
-                    scene,
-                    *id,
-                    style.background,
-                    style.fill.clone(),
-                    style.text,
-                    backdrop,
-                    rect,
-                    paint_level,
-                    clip,
-                    order,
-                );
-                Self::paint_border(
-                    scene,
-                    *id,
-                    style.border,
-                    style.background.or(backdrop),
-                    rect,
-                    paint_level,
-                    clip,
-                    order,
-                );
+                if style.visibility == crate::Visibility::Visible {
+                    Self::paint_background(
+                        scene,
+                        *id,
+                        style.background,
+                        style.fill.clone(),
+                        style.text,
+                        backdrop,
+                        rect,
+                        paint_level,
+                        clip,
+                        order,
+                    );
+                    Self::paint_border(
+                        scene,
+                        *id,
+                        style.border,
+                        style.background.or(backdrop),
+                        rect,
+                        paint_level,
+                        clip,
+                        order,
+                    );
+                }
                 let content = rect.inset(content_insets(style.border.insets(), style.padding));
                 let content_visible = clip.intersection(content);
+                let selection = selection.filter(|_| text.editor.is_none());
                 if let Some(selection) = selection {
-                    if text.editor.is_none() {
-                        let geometry = self.text_geometry_cached(*id, text, style.text, content);
-                        let origin = ScreenPosition::new(content.line, content.column);
-                        let doc_start = selection.builder.push(
-                            crate::basic::selection::Run::new(
-                                geometry.value.clone(),
-                                geometry.layout.clone(),
-                                origin,
-                                content.width.max(0) as usize,
-                                content.height.max(1) as usize,
-                            )
-                            .with_align(text.align)
-                            .with_visible(content_visible.is_some()),
+                    let geometry = self.text_geometry_cached(*id, text, style.text, content);
+                    let origin = ScreenPosition::new(content.line, content.column);
+                    let doc_start = selection.builder.push(
+                        crate::basic::selection::Run::new(
+                            geometry.value.clone(),
+                            geometry.layout.clone(),
+                            origin,
+                            content.width.max(0) as usize,
+                            content.height.max(1) as usize,
+                        )
+                        .with_align(text.align)
+                        .with_visible(content_visible.is_some()),
+                    );
+                    let overlay = selection
+                        .config
+                        .selection
+                        .local_range(doc_start, geometry.value.len())
+                        .map(|range| crate::basic::selection::SelectionOverlay {
+                            range,
+                            focused: selection.config.focused,
+                            styles: selection.config.styles.clone(),
+                        });
+                    if let Some(content_visible) = content_visible
+                        && let Some(image) = self.selectable_text_cached(
+                            *id,
+                            text,
+                            &geometry,
+                            content,
+                            content_visible,
+                            style.text,
+                            current_backdrop.unwrap_or(Color::Reset),
+                            scroll,
+                            overlay,
+                        )
+                    {
+                        Self::insert(
+                            scene,
+                            PaintKey {
+                                node: *id,
+                                role: PaintRole::Content,
+                            },
+                            image,
+                            content_visible,
+                            paint_level,
+                            *order,
+                            clip,
                         );
-                        let overlay = selection
-                            .config
-                            .selection
-                            .local_range(doc_start, geometry.value.len())
-                            .map(|range| crate::basic::selection::SelectionOverlay {
-                                range,
-                                focused: selection.config.focused,
-                                styles: selection.config.styles.clone(),
-                            });
-                        if let Some(content_visible) = content_visible
-                            && let Some(image) = self.selectable_text_cached(
-                                *id,
-                                text,
-                                &geometry,
-                                content,
-                                content_visible,
-                                style.text,
-                                current_backdrop.unwrap_or(Color::Reset),
-                                scroll,
-                                overlay,
-                            )
-                        {
-                            Self::insert(
-                                scene,
-                                PaintKey {
-                                    node: *id,
-                                    role: PaintRole::Content,
-                                },
-                                image,
-                                content_visible,
-                                paint_level,
-                                *order,
-                                clip,
-                            );
-                            *order = (*order).saturating_add(1);
-                        }
+                        *order = (*order).saturating_add(1);
                     }
                 } else if let Some(content_visible) = content_visible
                     && let Some(image) = self.raster_text_cached(
@@ -236,34 +258,36 @@ impl Commit {
                 children,
             } => {
                 let style = super::types::ComputedStyle::resolve(&props.style, inherited);
-                if style.visibility != crate::Visibility::Visible {
+                if style.visibility == crate::Visibility::Hidden {
                     return;
                 }
                 let current_backdrop = style.background.or(backdrop);
                 let paint_level = level.saturating_add(style.z_index);
 
-                Self::paint_background(
-                    scene,
-                    *id,
-                    style.background,
-                    style.fill.clone(),
-                    style.text,
-                    backdrop,
-                    rect,
-                    paint_level,
-                    clip,
-                    order,
-                );
-                Self::paint_border(
-                    scene,
-                    *id,
-                    style.border,
-                    style.background.or(backdrop),
-                    rect,
-                    paint_level,
-                    clip,
-                    order,
-                );
+                if style.visibility == crate::Visibility::Visible {
+                    Self::paint_background(
+                        scene,
+                        *id,
+                        style.background,
+                        style.fill.clone(),
+                        style.text,
+                        backdrop,
+                        rect,
+                        paint_level,
+                        clip,
+                        order,
+                    );
+                    Self::paint_border(
+                        scene,
+                        *id,
+                        style.border,
+                        style.background.or(backdrop),
+                        rect,
+                        paint_level,
+                        clip,
+                        order,
+                    );
+                }
                 let inner = rect.inset(style.border.insets());
                 let base_content = inner.inset(style.padding);
                 let spec = scroll_spec(props.scroll.as_deref());
@@ -295,6 +319,81 @@ impl Commit {
                 } else {
                     RuntimeScrollOffset::default()
                 };
+
+                if measurement_paths.contains(id)
+                    && (props.element_ref.is_set() || props.element_change.is_set())
+                {
+                    let visible_rect = (style.visibility == crate::Visibility::Visible)
+                        .then(|| clip.intersection(rect))
+                        .flatten()
+                        .map(ElementRect::from_rect);
+                    let resolved_style = ResolvedElementStyle {
+                        layout: style.layout,
+                        margin: style.margin,
+                        padding: style.padding,
+                        gap: style.gap,
+                        justify: style.justify,
+                        align: style.align,
+                        overflow: style.overflow,
+                        overflow_x: style.overflow_x,
+                        overflow_y: style.overflow_y,
+                        visibility: style.visibility,
+                        z_index: style.z_index,
+                        background: style.background,
+                        fill: style.fill.clone(),
+                        border: ResolvedBorderStyle {
+                            kind: style.border.kind,
+                            edges: style.border.edges,
+                            foreground: style.border.foreground,
+                            background: style.border.background,
+                            attributes: style.border.attributes,
+                        },
+                        text: ResolvedTextStyle {
+                            foreground: style.text.foreground,
+                            background: style.text.background,
+                            attributes: style.text.attributes,
+                        },
+                    };
+                    let axes = match (
+                        spec.as_ref().is_some_and(|value| value.horizontal),
+                        spec.as_ref().is_some_and(|value| value.vertical),
+                    ) {
+                        (true, true) => crate::ScrollAxes::Both,
+                        (true, false) => crate::ScrollAxes::Horizontal,
+                        _ => crate::ScrollAxes::Vertical,
+                    };
+                    let scroll = spec.as_ref().map(|_| ElementScrollState {
+                        axes,
+                        offset: crate::ScrollOffset::new(
+                            u32::try_from(offset.x.max(0)).unwrap_or(u32::MAX),
+                            u32::try_from(offset.y.max(0)).unwrap_or(u32::MAX),
+                        ),
+                        max_offset: crate::ScrollOffset::new(
+                            u32::try_from(max_x.max(0)).unwrap_or(u32::MAX),
+                            u32::try_from(max_y.max(0)).unwrap_or(u32::MAX),
+                        ),
+                        content_width: u32::try_from(scroll_layout.extent.0.max(0))
+                            .unwrap_or(u32::MAX),
+                        content_height: u32::try_from(scroll_layout.extent.1.max(0))
+                            .unwrap_or(u32::MAX),
+                    });
+                    let snapshot = ElementSnapshot::new(
+                        *id,
+                        ElementRect::from_rect(rect),
+                        ElementRect::from_rect(content),
+                        visible_rect,
+                        resolved_style,
+                        scroll,
+                    );
+                    element_bindings.push((
+                        *id,
+                        ElementBinding {
+                            element_ref: props.element_ref.as_ref().cloned(),
+                            listener: props.element_change.as_ref().cloned(),
+                            snapshot,
+                        },
+                    ));
+                }
                 let vertical_metrics = scroll_layout.vertical_metrics(offset);
                 let horizontal_metrics = scroll_layout.horizontal_metrics(offset);
                 let scroll_region = spec.as_ref().map(|spec| ScrollRegion {
@@ -316,7 +415,8 @@ impl Commit {
                     }),
                 });
 
-                if *id != DomId::root()
+                if style.visibility == crate::Visibility::Visible
+                    && *id != DomId::root()
                     && let Some(hit_rect) = clip.intersection(rect)
                     && hit_rect.width > 0
                     && hit_rect.height > 0
@@ -343,17 +443,21 @@ impl Commit {
                     *event_order = (*event_order).saturating_add(1);
                 }
 
-                let child_clip = match spec {
-                    Some(ref spec) => clip.restrict_axes(
-                        content,
-                        spec.horizontal || style.overflow_x == Overflow::Clip,
-                        spec.vertical || style.overflow_y == Overflow::Clip,
-                    ),
-                    None => clip.restrict_axes(
-                        inner,
-                        style.overflow_x == Overflow::Clip,
-                        style.overflow_y == Overflow::Clip,
-                    ),
+                let child_clip = if style.visibility != crate::Visibility::Visible {
+                    Clip::Empty
+                } else {
+                    match spec {
+                        Some(ref spec) => clip.restrict_axes(
+                            content,
+                            spec.horizontal || style.overflow_x == Overflow::Clip,
+                            spec.vertical || style.overflow_y == Overflow::Clip,
+                        ),
+                        None => clip.restrict_axes(
+                            inner,
+                            style.overflow_x == Overflow::Clip,
+                            style.overflow_y == Overflow::Clip,
+                        ),
+                    }
                 };
                 let mut host = props.selection.as_ref().map(|config| SelectionPaint {
                     config,
@@ -367,10 +471,7 @@ impl Commit {
                     let child_scroll = if spec.is_some() {
                         child_rect.line = child_rect.line.saturating_sub(offset.y);
                         child_rect.column = child_rect.column.saturating_sub(offset.x);
-                        (
-                            scroll.0.saturating_add(offset.y),
-                            scroll.1.saturating_add(offset.x),
-                        )
+                        (offset.y, offset.x)
                     } else {
                         scroll
                     };
@@ -388,6 +489,8 @@ impl Commit {
                         order,
                         scene,
                         event_regions,
+                        element_bindings,
+                        measurement_paths,
                         Some(*id),
                         event_order,
                         child_scroll,

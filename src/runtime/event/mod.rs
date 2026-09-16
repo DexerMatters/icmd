@@ -281,6 +281,13 @@ impl EventDispatcher {
         self.scroll_offsets.clone()
     }
 
+    /// Publishes the committed frame's regions and resolves the focus requests
+    /// the paint pass issued.
+    ///
+    /// An autofocus request is granted when nothing owns focus, and also when the
+    /// requesting region is painted above the current owner, because the region
+    /// order is paint order: an overlay or dialog can take focus from the view
+    /// behind it, while a region that merely scrolled into view cannot.
     pub(crate) fn publish(
         &self,
         mut regions: Vec<EventRegion>,
@@ -353,19 +360,30 @@ impl EventDispatcher {
                 .collect();
             state.regions = regions;
             let gained_focus = match state.pending_focus.take() {
-                Some(pending)
-                    if state.focused.is_none()
-                        && state
-                            .regions
-                            .iter()
-                            .any(|region| region.id == pending && region.focusable) =>
-                {
-                    state.focused = Some(pending);
-                    state
-                        .region(pending)
-                        .and_then(|region| listener(&region.handlers.focus_event))
+                Some(pending) => {
+                    let focusable = state
+                        .regions
+                        .iter()
+                        .any(|region| region.id == pending && region.focusable);
+                    let painted_above = state
+                        .by_id
+                        .get(&pending)
+                        .zip(
+                            state
+                                .focused
+                                .and_then(|focused| state.by_id.get(&focused).copied()),
+                        )
+                        .is_some_and(|(pending, focused)| *pending > focused);
+                    if focusable && (state.focused.is_none() || painted_above) {
+                        state.focused = Some(pending);
+                        state
+                            .region(pending)
+                            .and_then(|region| listener(&region.handlers.focus_event))
+                    } else {
+                        None
+                    }
                 }
-                _ => None,
+                None => None,
             };
             (lost_focus, gained_focus)
         };

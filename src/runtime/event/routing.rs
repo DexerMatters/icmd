@@ -129,6 +129,12 @@ pub(super) fn listener<T: Clone>(slot: &Attr<T>) -> Option<T> {
 }
 
 /// Appends every bubble-phase scroll listener from `target` to the root.
+///
+/// The bubble route is deliberate: a scroll host can wrap the region that
+/// actually scrolls and still observe it, which is how the editor controls keep
+/// their painted offset in step with the scroll area they own. A caller that
+/// controls an offset must therefore check that an event describes its own
+/// region before adopting it, because a nested region's event reaches it too.
 pub(super) fn queue_scroll_event(
     state: &EventState,
     target: DomId,

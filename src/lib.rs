@@ -57,17 +57,20 @@ pub use elements::{
     heading, input, kbd, label, link, muted, paragraph, progress_bar, radio, raw_input, row,
     scroll_area, section, selection_area, skeleton, spacer, spinner, switch, textarea,
 };
+#[cfg(feature = "markdown")]
+pub use elements::{MarkdownProps, markdown};
 
 pub use basic::{
     Align, AppHandle, Attr, Attributes, AxisPosition, BorderKind, BorderStyle, Component,
     ComponentContext, ContextKey, Dimension, DomId, DomNode, DomProps, Edges, EffectResult,
-    EventHandlers, EventListener, Fill, FillError, FocusEvent, Forward, Justify, Key,
-    KeyboardEvent, Layout, Node, Overflow, PasteEvent, Percent, PercentBasis, Point, PointerButton,
-    PointerEvent, PointerEventKind, PointerId, PointerType, Props, PropsTransform, Ref,
-    ResizeEvent, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph,
-    ScrollbarStyle, ScrollbarVisibility, Span, StateError, StateRef, StateSetter, Style,
-    StylePatch, TerminalFocusEvent, Text, TextAlign, TextOverflow, TextStyle, TextWrap, Visibility,
-    WheelEvent, create_context, empty, fragment, style, style_patch, text, view,
+    ElementRect, ElementRef, ElementScrollState, ElementSnapshot, EventHandlers, EventListener,
+    Fill, FillError, FocusEvent, Forward, Justify, Key, KeyboardEvent, Layout, Node, Overflow,
+    PasteEvent, Percent, PercentBasis, Point, PointerButton, PointerEvent, PointerEventKind,
+    PointerId, PointerType, Props, PropsTransform, Ref, ResizeEvent, ResolvedBorderStyle,
+    ResolvedElementStyle, ResolvedTextStyle, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset,
+    ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Span, StateError, StateRef, StateSetter,
+    Style, StylePatch, TerminalFocusEvent, Text, TextAlign, TextOverflow, TextStyle, TextWrap,
+    Visibility, WheelEvent, create_context, empty, fragment, style, style_patch, text, view,
 };
 pub use data::{
     Cell, CellEdit, CellError, EmojiMerging, Frame, Image, ImageError, ImageId, ImagePosition,
@@ -86,20 +89,25 @@ pub use raster::{
 pub mod prelude {
     pub use crate::{
         AppHandle, AppLifecycle, AppPhase, Attr, Component, ComponentContext, Dimension, DomProps,
-        Edges, EmojiMerging, ExitReason, ImageLoading, ImageSource, InputProps, Layout, Node,
-        Props, RawInputAppearance, RawInputMode, RawInputProps, Ref, ScrollAreaProps, ScrollAxes,
-        ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph, ScrollbarStyle,
-        ScrollbarVisibility, Style, StylePatch, TextClipboardAction, TextClipboardEvent,
-        TextValueEvent, TextWrap, TextareaProps, ThemeProviderProps, column, heading, input,
-        progress_bar, raw_input, row, scroll_area, style, style_patch, text, textarea,
-        theme_context, theme_provider, ui, view,
+        Edges, ElementRect, ElementRef, ElementScrollState, ElementSnapshot, EmojiMerging,
+        ExitReason, ImageLoading, ImageSource, InputProps, Layout, Node, Props, RawInputAppearance,
+        RawInputMode, RawInputProps, Ref, ResolvedBorderStyle, ResolvedElementStyle,
+        ResolvedTextStyle, ScrollAreaProps, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset,
+        ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Style, StylePatch,
+        TextClipboardAction, TextClipboardEvent, TextValueEvent, TextWrap, TextareaProps,
+        ThemeProviderProps, column, heading, input, progress_bar, raw_input, row, scroll_area,
+        style, style_patch, text, textarea, theme_context, theme_provider, ui, view,
     };
+    #[cfg(feature = "markdown")]
+    pub use crate::{MarkdownProps, markdown};
 }
 
 /// The built-in widgets, each an ordinary component constructor.
 pub mod widgets {
     pub use crate::elements::image::image as raster_image;
 
+    #[cfg(feature = "markdown")]
+    pub use crate::{MarkdownProps, markdown};
     pub use crate::{
         alert, badge, blockquote, button, canvas, card, center, checkbox, code, column, container,
         divider, empty, footer, fragment, heading, input, kbd, label, link, muted, paragraph,

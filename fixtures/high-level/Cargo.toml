@@ -8,4 +8,4 @@ edition = "2024"
 publish = false
 
 [dependencies]
-icmd = { path = "../..", default-features = false }
+icmd = { path = "../..", default-features = false, features = ["markdown"] }

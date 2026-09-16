@@ -22,6 +22,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --no-default-features -- -D warnings
       - run: cargo test --no-default-features
+      - name: Markdown parser (pure Rust)
+        run: cargo test --no-default-features --features markdown
       - name: Downstream high-level fixture
         run: cargo build -p icmd-high-level-fixture --no-default-features
 
@@ -46,6 +48,16 @@ jobs:
         run: pkg-config --modversion chafa
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+      # The documentation binary requires the native raster prerequisites, so it
+      # is built and tested only where Chafa, pkg-config, and libclang exist. Its
+      # tests commit every chapter at four terminal sizes in both themes and
+      # compile every displayed snippet against the public API.
+      - name: Documentation tool (cargo-icmd)
+        run: cargo test -p cargo-icmd
+      # `--no-deps` keeps this gate on the documentation tool's own code: the
+      # framework is linted by the workspace-wide step above.
+      - name: Documentation tool lints
+        run: cargo clippy -p cargo-icmd --all-targets --no-deps -- -D warnings
       - name: Downstream advanced fixture (native features)
         run: cargo build -p icmd-advanced-fixture
 
@@ -91,3 +103,13 @@ jobs:
           tar xzf icmd-*.crate
           cd icmd-*/
           cargo build --no-default-features
+      # The documentation tool ships its own raster asset and displayed
+      # snippets, so its package contents are validated explicitly rather than
+      # assumed from the framework's exclude list.
+      - name: Documentation tool package includes assets and snippets
+        run: |
+          cargo package -p cargo-icmd --list --allow-dirty > /tmp/cargo-icmd-files.txt
+          grep -q '^assets/guide.png$' /tmp/cargo-icmd-files.txt
+          grep -q '^assets/README.md$' /tmp/cargo-icmd-files.txt
+          grep -q '^snippets/release_card.rs$' /tmp/cargo-icmd-files.txt
+          grep -q '^src/chapters/ch10_api.rs$' /tmp/cargo-icmd-files.txt

@@ -1,0 +1,19 @@
+[package]
+name = "cargo-icmd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Interactive terminal documentation for the icmd UI framework."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/DexerMatters/icmd"
+keywords = ["tui", "terminal", "documentation", "cargo-subcommand"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+
+[[bin]]
+name = "cargo-icmd"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = "0.29.0"
+icmd = { path = "../..", version = "=0.1.0", default-features = false, features = ["markdown", "native-raster"] }

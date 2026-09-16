@@ -22,7 +22,9 @@ impl Renderer {
 
     /// Rebuilds `damage_rows` from the accumulated damage and marks the dirty
     /// bitmap. Each rectangle is expanded by two cells and clamped to the
-    /// viewport, row spans are merged, and `full` covers every cell.
+    /// viewport on both ends - a scrolled surface can report damage below or
+    /// right of it, and clamping only the end would leave a row span that starts
+    /// past the last row. Row spans are merged, and `full` covers every cell.
     pub(super) fn normalize_damage(&mut self, full: bool) {
         let width = usize::from(self.viewport.width);
         let height = usize::from(self.viewport.height);
@@ -41,10 +43,10 @@ impl Renderer {
         } else {
             for damage in &self.damage {
                 let left = damage.column.saturating_sub(2).max(0) as usize;
-                let top = damage.line.saturating_sub(2).max(0) as usize;
+                let top = damage.line.saturating_sub(2).clamp(0, height as i64) as usize;
                 let right = (damage.column + damage.width + 2).clamp(0, width as i64) as usize;
                 let bottom = (damage.line + damage.height + 2).clamp(0, height as i64) as usize;
-                if left >= right {
+                if left >= right || top >= bottom {
                     continue;
                 }
                 for row in &mut self.damage_rows[top..bottom] {
@@ -135,6 +137,10 @@ impl Renderer {
     /// continuation pairs that a layer boundary split. The layer order is moved
     /// out for the pass and restored before returning, avoiding a per-frame
     /// clone.
+    ///
+    /// Each surface's spans are clamped into the viewport row as well as into the
+    /// surface, so a surface overlapping the right edge can never write past the
+    /// row it belongs to.
     pub(super) fn compose_damage(&mut self, desired: &mut [CellSlot]) {
         self.rebuild_layers();
         let width = usize::from(self.viewport.width);
@@ -210,13 +216,19 @@ impl Renderer {
             for (line, row) in rows.iter().enumerate().take(bottom).skip(top) {
                 let local_line = (line as i32 - node.position.line) as usize;
                 for span in row {
-                    let left = span.start.max(node.position.column.max(0) as usize);
-                    let right = span.end.min(
-                        node.position
-                            .column
-                            .saturating_add(image.width() as i32)
-                            .max(0) as usize,
-                    );
+                    let left = span
+                        .start
+                        .max(node.position.column.max(0) as usize)
+                        .min(width);
+                    let right = span
+                        .end
+                        .min(
+                            node.position
+                                .column
+                                .saturating_add(image.width() as i32)
+                                .max(0) as usize,
+                        )
+                        .min(width);
                     if left >= right {
                         continue;
                     }

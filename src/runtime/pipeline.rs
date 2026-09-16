@@ -61,6 +61,9 @@ pub enum RuntimeError {
         /// Stage that stopped before the runtime closed its input.
         stage: Stage,
     },
+    /// An application callback failed while the commit stage published an
+    /// element snapshot.
+    ApplicationCallback(&'static str),
     /// Shutdown did not finish within the policy timeout.
     ShutdownTimeout {
         /// Stages still running when the timeout expired.
@@ -77,6 +80,9 @@ impl std::fmt::Display for RuntimeError {
             Self::StageClosed { stage } => {
                 write!(f, "{} stage stopped unexpectedly", stage.as_str())
             }
+            Self::ApplicationCallback(detail) => {
+                write!(f, "application callback failed: {detail}")
+            }
             Self::ShutdownTimeout { pending } => {
                 let names: Vec<_> = pending.iter().map(|stage| stage.as_str()).collect();
                 write!(f, "shutdown timed out waiting for: {}", names.join(", "))
@@ -92,6 +98,7 @@ impl std::error::Error for RuntimeError {
             Self::Frame(error) => Some(error),
             Self::StagePanicked { .. }
             | Self::StageClosed { .. }
+            | Self::ApplicationCallback(_)
             | Self::ShutdownTimeout { .. } => None,
         }
     }

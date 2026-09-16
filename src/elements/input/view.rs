@@ -208,6 +208,12 @@ fn config_from(props: &Props<RawInputProps>, emoji_merging: EmojiMerging) -> Con
 /// The editor never infers focus from receiving a key: the dispatcher routes a
 /// targeted key here only when this region is the focused target, and the
 /// `focus_event` listener records the transition.
+///
+/// A pointer gesture that lands on the editor belongs to the editor: it places
+/// the caret and extends its own selection, and it stops propagation so a
+/// selectable ancestor does not also select from the same gesture. Stopping
+/// propagation leaves focus on press and any caller-supplied pointer listener
+/// untouched, because neither is suppressed by it.
 pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Node {
     let state_ref = cx.use_ref(InputState::default);
     let (_, redraw) = cx.use_state(|| 0_u64);
@@ -465,6 +471,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 if policy.disabled || !event.is_primary_button() {
                     return;
                 }
+                event.stop_propagation();
                 {
                     let mut state = state_ref.lock().expect("input state poisoned");
                     let offset = pointer_offset(&probe, &state, &config, event.local_position);
@@ -499,6 +506,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 if !state.dragging {
                     return;
                 }
+                event.stop_propagation();
                 let committed = committed_document(&probe, &state, &config);
                 let point = document_point(&probe, event.local_position);
                 let pressed = state.pressed;
@@ -516,8 +524,16 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let state_ref = state_ref.clone();
         let caller = caller.pointer_up.as_ref().cloned();
         EventListener::compose(
-            move |_event: PointerEvent| {
-                state_ref.lock().expect("input state poisoned").dragging = false;
+            move |event: PointerEvent| {
+                let was_dragging = {
+                    let mut state = state_ref.lock().expect("input state poisoned");
+                    let was_dragging = state.dragging;
+                    state.dragging = false;
+                    was_dragging
+                };
+                if was_dragging {
+                    event.stop_propagation();
+                }
             },
             caller,
         )
@@ -527,8 +543,16 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let state_ref = state_ref.clone();
         let caller = caller.pointer_cancel.as_ref().cloned();
         EventListener::compose(
-            move |_event: PointerEvent| {
-                state_ref.lock().expect("input state poisoned").dragging = false;
+            move |event: PointerEvent| {
+                let was_dragging = {
+                    let mut state = state_ref.lock().expect("input state poisoned");
+                    let was_dragging = state.dragging;
+                    state.dragging = false;
+                    was_dragging
+                };
+                if was_dragging {
+                    event.stop_propagation();
+                }
             },
             caller,
         )

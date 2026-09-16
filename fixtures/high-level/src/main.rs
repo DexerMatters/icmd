@@ -1,9 +1,10 @@
 // A downstream application built only from the high-level tiers. It must not
 // name `icmd::advanced`, any `__ui_*` helper, or an internal module.
+use icmd::MarkdownProps;
 use icmd::events::{EventListener, KeyEvent, TerminalFocusEvent};
 use icmd::theme::{Theme, ThemeMode, ThemePreset};
 use icmd::widgets::{
-    button, column, input, link, raster_image, scroll_area, selection_area, text, view,
+    button, column, input, link, markdown, raster_image, scroll_area, selection_area, text, view,
 };
 use icmd::{AppLifecycle, AppPhase, render_with};
 use icmd::{Component, ComponentContext, Node, Props, RuntimeConfig, TextClipboardEvent};
@@ -23,6 +24,7 @@ fn app(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
             <selection_area on_clipboard={|_event: TextClipboardEvent| {}}>
                 "selectable text"
             </selection_area>
+            <markdown text="# **Markdown**" />
         </column>
     }
 }
@@ -42,7 +44,9 @@ fn uses_only_high_level_tiers() {
         scroll_area,
         selection_area,
         view,
+        markdown,
     );
+    let _ = MarkdownProps::default();
     let _ = text(String::from("typed"));
     let _ = AppPhase::Exit;
 }

@@ -496,6 +496,7 @@ pub struct RasterPlacement {
     pub height: u16,
     /// Fit, alignment, and mode for rendering.
     pub options: ImageRenderOptions,
+    pub(crate) alt: Option<String>,
     pub(crate) loading: ImageLoading,
     pub(crate) invalid_source: bool,
     pub(crate) full_width: u16,
@@ -523,6 +524,7 @@ impl RasterPlacement {
             width,
             height,
             options,
+            alt: None,
             loading: ImageLoading::Lazy,
             invalid_source,
             full_width: width,
@@ -539,6 +541,26 @@ impl RasterPlacement {
     pub fn with_loading(mut self, loading: ImageLoading) -> Self {
         self.loading = loading;
         self
+    }
+
+    /// Sets the text painted in place of a source that cannot be shown.
+    ///
+    /// A placement without alternative text paints the `×` placeholder when its
+    /// source is unavailable and `…` while it is still loading.
+    pub fn with_alt(mut self, alt: impl Into<String>) -> Self {
+        self.alt = Some(alt.into());
+        self
+    }
+
+    /// Returns the alternative text for a source that cannot be shown.
+    pub fn alt(&self) -> Option<&str> {
+        self.alt.as_deref()
+    }
+
+    /// The text this placement paints when its source cannot be shown, falling
+    /// back to the `×` placeholder.
+    pub(crate) fn unavailable_text(&self) -> &str {
+        self.alt().unwrap_or("×")
     }
 }
 

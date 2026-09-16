@@ -324,6 +324,13 @@ fn receive_frame(
     }
 }
 
+fn render_error_from_runtime(error: RuntimeError) -> RenderError {
+    match error {
+        RuntimeError::ApplicationCallback(detail) => RenderError::ApplicationCallback(detail),
+        error => RenderError::Stage(error),
+    }
+}
+
 impl RuntimeConfig {
     /// Rejects an invalid configuration before any side effect exists: no
     /// thread, no raw mode, no alternate screen. A zero `poll_interval`
@@ -589,12 +596,15 @@ pub fn run_session(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    outcome = Err(error);
+                    outcome = match errors.try_recv() {
+                        Ok(runtime_error) => Err(render_error_from_runtime(runtime_error)),
+                        Err(_) => Err(error),
+                    };
                     break 'render;
                 }
             }
             if let Ok(error) = errors.try_recv() {
-                outcome = Err(RenderError::Stage(error));
+                outcome = Err(render_error_from_runtime(error));
                 break 'render;
             }
             if handle.exit_requested() {
@@ -678,11 +688,16 @@ pub fn run_session(
                 }
             }
         }
+        if let Ok(error) = errors.try_recv()
+            && outcome.is_ok()
+        {
+            outcome = Err(render_error_from_runtime(error));
+        }
     }
     let drained = runtime.shutdown(ShutdownPolicy::default());
     match (outcome, drained) {
         (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(RenderError::Stage(error)),
+        (Ok(()), Err(error)) => Err(render_error_from_runtime(error)),
         (Ok(()), Ok(())) => Ok(()),
     }
 }

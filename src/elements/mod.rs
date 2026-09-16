@@ -9,6 +9,8 @@ pub(crate) mod image;
 pub(crate) mod input;
 pub(crate) mod interactive;
 pub(crate) mod link;
+#[cfg(feature = "markdown")]
+pub(crate) mod markdown;
 pub(crate) mod scroll;
 pub(crate) mod selection_area;
 
@@ -55,5 +57,7 @@ pub use input::{
     textarea,
 };
 pub use link::{LinkProps, link};
+#[cfg(feature = "markdown")]
+pub use markdown::{MarkdownProps, markdown};
 pub use scroll::{ScrollAreaProps, scroll_area};
 pub use selection_area::{SelectionAreaProps, TextSelectionEvent, selection_area};

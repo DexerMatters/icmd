@@ -2,7 +2,7 @@
 
 use crate::{
     Align, Attr, Dimension, DomProps, ImageAlign, ImageFit, ImageLoading, ImageMode,
-    ImageRenderOptions, Justify, Node, Props, RasterImage, RasterPlacement, Text,
+    ImageRenderOptions, Justify, Node, Props, RasterImage, RasterPlacement, Text, TextWrap,
     basic::ComponentContext,
 };
 
@@ -27,6 +27,13 @@ pub struct ImageProps {
     pub vertical_align: Attr<ImageAlign>,
     /// Raster render mode; defaults to [`ImageMode::Auto`].
     pub mode: Attr<ImageMode>,
+    /// Text painted in the box while the source cannot be shown, such as a
+    /// missing file or a failed decode; defaults to the `×` placeholder.
+    ///
+    /// A short label - a title, a filename, or a one-line description - keeps a
+    /// box that has reserved its size readable while the image is unavailable,
+    /// and a label too long for the box is clipped with an ellipsis.
+    pub alt: Attr<String>,
 }
 
 /// Raster image widget; see [`ImageProps`] for its configuration.
@@ -57,13 +64,12 @@ pub fn image(_cx: &mut ComponentContext, props: &Props<ImageProps>) -> Node {
         vertical_align: props.vertical_align | ImageAlign::Center,
         mode: props.mode | ImageMode::Auto,
     };
-    Node::element(
-        props.host_props(defaults),
-        [Node::raster(
-            RasterPlacement::new(src, width, height, options)
-                .with_loading(props.loading | ImageLoading::Lazy),
-        )],
-    )
+    let mut placement = RasterPlacement::new(src, width, height, options)
+        .with_loading(props.loading | ImageLoading::Lazy);
+    if let Some(alt) = Option::<String>::from(props.alt.clone()) {
+        placement = placement.with_alt(alt);
+    }
+    Node::element(props.host_props(defaults), [Node::raster(placement)])
 }
 
 /// Placeholder for an unloaded source that lacks an explicit width or height.
@@ -79,7 +85,11 @@ fn invalid_source(props: &Props<ImageProps>, width: u16, height: u16) -> Node {
         },
         ..DomProps::default()
     };
-    Node::element(props.host_props(defaults), [Text::new("×").into()])
+    let label = props.alt.clone() | String::from("×");
+    Node::element(
+        props.host_props(defaults),
+        [Text::new(label).wrap(TextWrap::Soft).into()],
+    )
 }
 
 /// Derive the cell box from the requested size and the source's pixel size,

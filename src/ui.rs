@@ -117,7 +117,7 @@ macro_rules! ui {
     }};
 
     (@build $component:ident [$($attrs:tt)*] [$($children:tt)*]) => {{
-        $crate::__private::__ui_apply($component, move |__icmd_ui_props| {
+        $crate::__private::__ui_apply($component, |__icmd_ui_props| {
             let mut __icmd_ui_key: Option<$crate::Key> = None;
             $crate::ui!(@attrs __icmd_ui_props __icmd_ui_key; $($attrs)*);
             __icmd_ui_props.children = vec![$($children)*];
@@ -150,6 +150,12 @@ macro_rules! ui {
     };
     (@set_attr $props:ident $key:ident events { $value:expr }) => {
         $props.dom.events = $crate::__private::__ui_events($value);
+    };
+    (@set_attr $props:ident $key:ident element_ref { $value:expr }) => {
+        $props.dom.element_ref /= $value;
+    };
+    (@set_attr $props:ident $key:ident on_element_change { $value:expr }) => {
+        $props.dom.element_change /= $value;
     };
 
     (@set_attr $props:ident $key:ident on_pointer_down { $value:expr }) => { $props.dom.events.pointer_down /= $value; };

@@ -509,3 +509,85 @@ fn a_region_sizes_to_its_children_and_clips_nothing_by_default() {
     assert!(painted(&frame).contains('x'));
     let _ = dispatcher;
 }
+
+// A disabled region is a barrier: it owns its subtree's document, so an ancestor
+// cannot select the text below it, and it consumes a press so a drag inside it
+// does not select the prose around it. This is what keeps an embedded example
+// out of a surrounding selectable region while a nested enabled region inside
+// the example stays selectable on its own terms.
+#[test]
+fn a_disabled_region_keeps_its_subtree_out_of_an_ancestor() {
+    let recorder = Arc::new(Mutex::new(Recorder::default()));
+    let barrier = {
+        let children = vec![Node::from("example")];
+        let props = Props::with_parts(
+            DomProps::default(),
+            children,
+            SelectionAreaProps {
+                disabled: Attr::Set(true),
+                ..SelectionAreaProps::default()
+            },
+        );
+        selection_area.apply(props)
+    };
+    // Three painted rows: ancestor text, the barrier's own line, ancestor text.
+    let children = vec![Node::from("above"), barrier, Node::from("below")];
+    let props = Props::with_parts(
+        DomProps::default(),
+        children,
+        props_with_recorder(&recorder),
+    );
+    let node = selection_area.apply(props);
+
+    let (sender, output, dispatcher) = pipeline(Size::new(16, 4));
+    sender.send(node).unwrap();
+    output
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+
+    interact(
+        &output,
+        &dispatcher,
+        Some(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1)),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(mouse(MouseEventKind::Drag(MouseButton::Left), 1, 6)),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(mouse(MouseEventKind::Up(MouseButton::Left), 1, 6)),
+    );
+    assert!(
+        recorder.lock().unwrap().selection.is_empty(),
+        "a drag inside the barrier must select nothing at all"
+    );
+
+    interact(
+        &output,
+        &dispatcher,
+        Some(mouse(MouseEventKind::Down(MouseButton::Left), 0, 1)),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(mouse(MouseEventKind::Drag(MouseButton::Left), 0, 5)),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(mouse(MouseEventKind::Up(MouseButton::Left), 0, 5)),
+    );
+    let selected = recorder.lock().unwrap().selection.clone();
+    let last = selected
+        .last()
+        .expect("the ancestor still selects its own text");
+    assert!(
+        !last.text.is_empty() && "above".contains(last.text.as_str()),
+        "the ancestor's own text must still select, got {:?}",
+        last.text
+    );
+}

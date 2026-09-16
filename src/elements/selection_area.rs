@@ -57,7 +57,14 @@ pub struct SelectionAreaProps {
     /// Style for the selection while the region is unfocused; defaults to the
     /// theme's inactive selection style.
     pub selection_inactive_style: Attr<TextStyle>,
-    /// Whether selection and focus are refused; defaults to `false`.
+    /// Whether selection and focus are refused, making the region a selection
+    /// barrier; defaults to `false`.
+    ///
+    /// A disabled region still delimits its subtree: the text below it belongs
+    /// to no ancestor's document, and a primary-button press inside it is
+    /// consumed rather than handed to an ancestor. That is how a subtree is kept
+    /// out of a surrounding selectable region - an embedded example, say - while
+    /// an enabled region nested inside it remains selectable on its own terms.
     pub disabled: Attr<bool>,
     /// Whether the region requests focus on mount; defaults to `false`.
     pub autofocus: Attr<bool>,
@@ -93,6 +100,14 @@ impl std::fmt::Debug for SelectionAreaProps {
 /// frames can never leave an out-of-range selection. The live selection is a
 /// plain value on the node rather than shared mutable state, so a change always
 /// changes the lowered tree and the renderer can never skip the repaint.
+///
+/// A disabled region is a barrier rather than an absence: it still owns the
+/// document of its subtree, so no ancestor can select that text, and it consumes
+/// a primary-button press so a drag inside it selects nothing instead of
+/// selecting the surrounding prose. Its pointer listeners are attached for that
+/// reason while its keyboard and focus listeners stay off, because a barrier is
+/// not focusable. An enabled region nested inside a barrier takes over its own
+/// subtree and stays fully selectable.
 pub fn selection_area(cx: &mut ComponentContext, props: &Props<SelectionAreaProps>) -> Node {
     let theme = cx.use_theme();
     let state_ref = cx.use_ref(AreaState::default);
@@ -146,7 +161,11 @@ pub fn selection_area(cx: &mut ComponentContext, props: &Props<SelectionAreaProp
         let caller = caller.pointer_down.as_ref().cloned();
         EventListener::compose(
             move |event: PointerEvent| {
-                if disabled || !event.is_primary_button() {
+                if !event.is_primary_button() {
+                    return;
+                }
+                if disabled {
+                    event.stop_propagation();
                     return;
                 }
                 let Some(committed) = probe.committed() else {
@@ -327,14 +346,19 @@ pub fn selection_area(cx: &mut ComponentContext, props: &Props<SelectionAreaProp
     host.style.text = theme.typography.body.clone();
     host.focusable = Attr::Set(!disabled);
     host.autofocus = (props.autofocus | false) && !disabled;
-    if !disabled {
-        host = host.with_selection_host(config);
-    }
+    host = host.with_selection_host(config);
 
     let children = props.children_node();
     if disabled {
         ui! {
-            <view key="selection-area-disabled" dom={host}>{children}</view>
+            <view key="selection-area-disabled" dom={host}
+                on_pointer_down={pointer_down}
+                on_pointer_move={pointer_move}
+                on_pointer_up={pointer_up}
+                on_pointer_cancel={pointer_cancel}
+            >
+                {children}
+            </view>
         }
     } else {
         ui! {
