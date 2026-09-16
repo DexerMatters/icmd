@@ -136,14 +136,14 @@ fn security_policy_is_present_and_actionable() {
     );
 }
 
-// The user's direction for this release: rustdoc is removed from the crate
-// source, while `//` maintenance comments are preserved. This gate keeps the
-// decision from being silently reverted by a future doc comment.
+// Rustdoc is the crate's documentation channel: module headers use `//!` and
+// items use `///`. Plain `//` comments are not carried, so this gate both
+// requires rustdoc and forbids the comment noise it replaced.
 #[test]
-fn crate_source_carries_maintenance_comments_but_no_rustdoc() {
+fn crate_source_documents_its_public_api_with_rustdoc() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = 0;
-    let mut comments = 0;
+    let mut rustdoc = 0;
     let mut stack = vec![root];
     while let Some(directory) = stack.pop() {
         for entry in std::fs::read_dir(&directory).expect("src is readable") {
@@ -158,14 +158,15 @@ fn crate_source_carries_maintenance_comments_but_no_rustdoc() {
             let source = std::fs::read_to_string(&path).expect("source is readable");
             for (number, line) in source.lines().enumerate() {
                 let trimmed = line.trim_start();
-                assert!(
-                    !trimmed.starts_with("///") && !trimmed.starts_with("//!"),
-                    "{}:{} carries rustdoc, which this release removes: {line}",
-                    path.display(),
-                    number + 1
-                );
-                if trimmed.starts_with("//") {
-                    comments += 1;
+                if trimmed.starts_with("///") || trimmed.starts_with("//!") {
+                    rustdoc += 1;
+                } else {
+                    assert!(
+                        !trimmed.starts_with("//"),
+                        "{}:{} is a plain `//` comment; documentation uses `///` or `//!`: {line}",
+                        path.display(),
+                        number + 1
+                    );
                 }
             }
             files += 1;
@@ -173,7 +174,7 @@ fn crate_source_carries_maintenance_comments_but_no_rustdoc() {
     }
     assert!(files > 0, "the crate source must have been inspected");
     assert!(
-        comments > 500,
-        "maintenance comments must be preserved, found only {comments}"
+        rustdoc > 200,
+        "the public API must be documented with `///` and `//!`, found only {rustdoc} lines"
     );
 }

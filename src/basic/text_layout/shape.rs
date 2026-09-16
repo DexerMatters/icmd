@@ -1,16 +1,23 @@
-// Text shaping: grapheme segmentation, separate/merge policy, and the
-// shared normalized buffer that glyph records index into.
+//! Text shaping: grapheme segmentation, separate/merge policy, and the shared
+//! normalized buffer that glyph records index into.
 #![allow(unused_imports)]
 
 use super::*;
 
-// Shaping output: one shared normalized buffer plus glyph records that index
-// into it.
+/// Shaping output: one shared normalized buffer plus glyph records that index
+/// into it.
 pub(super) struct ShapedText<S> {
+    /// Concatenated normalized text that every glyph `text` range indexes into.
     pub(super) normalized: String,
+    /// One record per addressable unit, in source order.
     pub(super) glyphs: Vec<ShapedGlyph<S>>,
 }
 
+/// Shapes a text value into one normalized buffer plus per-unit glyph records,
+/// splitting graphemes into separate units unless `merging` joins them. Source
+/// offsets are global to the whole `Text`, so each span contributes its
+/// normalized length to the running origin, and a separated unit owns its own
+/// codepoints' source range so a caret boundary exists between the parts.
 pub(super) fn shape_text<S>(
     text: &Text,
     inherited: ComputedText,
@@ -23,9 +30,6 @@ where
     crate::runtime::metrics::note_text_shaping();
     let mut normalized = String::new();
     let mut shaped = Vec::new();
-    // Source offsets are global to the whole `Text`, so a multi-span value has
-    // non-overlapping ranges just like a single-span one. Each span contributes
-    // its normalized length to the running origin.
     let mut source_origin = 0usize;
     for span in &text.spans {
         let style = merge(inherited, &span.style);
@@ -34,10 +38,6 @@ where
             if !merging.merges()
                 && let Some(parts) = crate::data::separate_units(grapheme)
             {
-                // Each unit owns its own codepoints' source range, so a caret
-                // boundary exists between the parts - exactly the cells a
-                // non-merging terminal paints - and pointer hits are monotonic
-                // across them.
                 for (range, width) in parts {
                     let start = normalized.len();
                     normalized.push_str(&grapheme[range.clone()]);
@@ -71,13 +71,15 @@ where
     }
 }
 
+/// Maps one grapheme to its display symbol, cell width, and glyph kind. Newlines
+/// and tabs get width 0 (tabs are column-relative, and `TextLayout::layout`
+/// fixes their width from the logical line column); control, over-long, or
+/// out-of-range-width graphemes become U+FFFD at width 1.
 fn display_glyph(grapheme: &str) -> (String, usize, ItemKind) {
     if grapheme == "\n" {
         return ("\n".to_string(), 0, ItemKind::Newline);
     }
     if grapheme == "\t" {
-        // Column-relative; `TextLayout::layout` fixes the width from the
-        // logical line column.
         return ("\t".to_string(), 0, ItemKind::Glyph);
     }
     if grapheme.chars().any(char::is_control) {

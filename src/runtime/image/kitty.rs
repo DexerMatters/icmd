@@ -1,3 +1,5 @@
+//! Kitty graphics backend: image upload with zlib or raw payloads, placement
+//! and deletion commands, and multiplexer-safe escape wrapping.
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -11,16 +13,24 @@ use super::passthrough::Passthrough;
 use super::surround_native;
 use super::types::{NativeTile, PreparedRaster, TileKey, TransformKey};
 
+/// Kitty graphics state: uploaded image ids per transform, live placements per
+/// tile, ids queued for release, and the next free protocol id.
 #[derive(Debug, Default)]
 pub(in crate::runtime) struct KittyBackend {
+    /// Uploaded image id per transform key.
     images: HashMap<TransformKey, u32>,
+    /// Transforms whose payload must be retransmitted on next use.
     invalid_images: HashSet<TransformKey>,
+    /// Placement id per tile key.
     placements: HashMap<TileKey, u32>,
+    /// Image ids queued for deletion on the next output.
     releases: Vec<u32>,
+    /// Next protocol id to hand out.
     next_id: u32,
 }
 
 impl KittyBackend {
+    /// Creates an empty backend whose first allocated protocol id is 1.
     pub(in crate::runtime) fn new() -> Self {
         Self {
             next_id: 1,
@@ -28,10 +38,13 @@ impl KittyBackend {
         }
     }
 
+    /// Marks every uploaded image as needing a fresh payload.
     fn mark_images_invalid(&mut self) {
         self.invalid_images.extend(self.images.keys().copied());
     }
 
+    /// Drops the image, placements, and native tiles for one transform and
+    /// queues its image id for deletion.
     pub(in crate::runtime) fn evict_transform(
         &mut self,
         key: TransformKey,
@@ -45,6 +58,11 @@ impl KittyBackend {
         }
     }
 
+    /// Emits one frame's native escape output: queued releases, uploads,
+    /// placement commands, and removals. `replace_all` forces every image to be
+    /// retransmitted, `prepared` supplies pixel payloads, and each tile position
+    /// is converted from cells using `cell_pixels`. `native_tiles` is updated to
+    /// the delivered set.
     pub(in crate::runtime) fn output(
         &mut self,
         tiles: Vec<NativeTile>,
@@ -86,9 +104,6 @@ impl KittyBackend {
                 *count = count.saturating_sub(1);
             }
 
-            // A resize changes transformed pixel dimensions, but Kitty lets
-            // us retransmit under the existing image id and replace its
-            // placement with the existing placement id.
             let mut force_upload = self.invalid_images.remove(&tile.key.transform);
             let preferred_image = if let Some(key) = matched_key
                 && key.transform != tile.key.transform
@@ -137,9 +152,6 @@ impl KittyBackend {
             );
         }
 
-        // A placement is independent terminal state. Remove only the
-        // placement that disappeared; use Kitty's image/placement delete
-        // operation rather than an image-only or unsupported form.
         for (key, placement) in old {
             if let Some(image) = self.images.get(&key.transform) {
                 output.push_str(
@@ -151,6 +163,8 @@ impl KittyBackend {
         surround_native(output)
     }
 
+    /// Deletes every uploaded image and returns the combined escape output, or
+    /// `None` when nothing was uploaded.
     pub(in crate::runtime) fn shutdown(&mut self, passthrough: Passthrough) -> Option<String> {
         let mut ids: Vec<_> = self.images.values().copied().collect();
         ids.sort_unstable();
@@ -166,12 +180,17 @@ impl KittyBackend {
         (!output.is_empty()).then(|| surround_native(output))
     }
 
+    /// Returns the next protocol id, wrapping to 1 instead of zero.
     fn allocate_id(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1).max(1);
         id
     }
 
+    /// Returns the image id for `key`, uploading the `prepared` payload in 3 KiB
+    /// chunks when missing or forced. A resize changes transformed pixel
+    /// dimensions but may retransmit under the existing image id, so
+    /// `preferred_image` is reused when the old transform is fully retired.
     fn image(
         &mut self,
         key: TransformKey,
@@ -198,8 +217,6 @@ impl KittyBackend {
             Some(payload) if payload.len() < prepared.pixels.pixels.len() => (payload, "o=z,"),
             _ => (&prepared.pixels.pixels, ""),
         };
-        // Keep chunks small enough to stay below conservative terminal input
-        // limits. Only the first chunk carries upload metadata.
         for (index, chunk) in payload.chunks(3 * 1024).enumerate() {
             let more = usize::from((index + 1) * 3 * 1024 < payload.len());
             if index == 0 {
@@ -220,13 +237,14 @@ impl KittyBackend {
         image
     }
 
+    /// Wraps a Kitty `_G` payload as an escape sequence.
     fn command(&self, payload: &str, passthrough: Passthrough) -> String {
         native_escape(&format!("\x1b_G{payload}\x1b\\"), passthrough)
     }
 }
 
-// Kitty/Sixel payloads must be wrapped for a multiplexer, and every embedded
-// escape has to be doubled inside the passthrough envelope.
+/// Wraps Kitty/Sixel payloads for a multiplexer; every embedded escape is
+/// doubled inside the passthrough envelope.
 fn native_escape(command: &str, passthrough: Passthrough) -> String {
     match passthrough.escape(command) {
         Some(envelope) => envelope
@@ -236,6 +254,7 @@ fn native_escape(command: &str, passthrough: Passthrough) -> String {
     }
 }
 
+/// Encodes bytes as standard base64 with `=` padding.
 fn base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -259,6 +278,7 @@ fn base64(bytes: &[u8]) -> String {
     output
 }
 
+/// Compresses bytes with fast zlib, or returns `None` if the encoder fails.
 fn zlib(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
     encoder.write_all(bytes).ok()?;

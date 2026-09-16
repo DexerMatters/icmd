@@ -119,7 +119,7 @@ fn uncontrolled_input_edits_and_emits_the_complete_value() {
         modifiers: KeyModifiers::empty(),
     }));
     dispatcher.dispatch(key(KeyCode::Char('x'), KeyModifiers::empty()));
-    assert_eq!(&*values.lock().unwrap(), &["abx"]);
+    assert_eq!(&*values.lock().unwrap(), &["axb"]);
 }
 
 #[test]
@@ -357,7 +357,8 @@ fn wrapped_row_pointer_and_vertical_navigation_share_source_positions() {
         .iter()
         .position(|line| line.contains("ef"))
         .expect("second wrapped row on screen") as u16;
-    // The last painted cell of the row so the caret lands at its end.
+    // The painted cell holding 'f': a click on a glyph places the caret on it,
+    // and the row's end is the cell after the glyph.
     let column = screen.lines()[row as usize]
         .chars()
         .position(|ch| ch == 'f')
@@ -376,8 +377,8 @@ fn wrapped_row_pointer_and_vertical_navigation_share_source_positions() {
 
     assert_eq!(
         values.lock().unwrap().last().map(String::as_str),
-        Some("abcdefx"),
-        "the caret after the wrapped first row continues from its end"
+        Some("abcdexf"),
+        "the caret after the wrapped first row continues from the clicked glyph"
     );
 }
 
@@ -458,8 +459,15 @@ fn captured_pointer_drag_selects_text_for_copy() {
         row: 0,
         modifiers: KeyModifiers::empty(),
     }));
-    dispatcher.dispatch(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-    assert_eq!(&*copied.lock().unwrap(), &["cd"]);
+    dispatcher.dispatch(key(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(
+        &*copied.lock().unwrap(),
+        &["bcd"],
+        "the drag keeps the pressed glyph and the glyph under the pointer"
+    );
 }
 
 #[test]
@@ -545,7 +553,10 @@ fn cut_notifies_the_clipboard_before_the_value_changes() {
         modifiers: KeyModifiers::empty(),
     }));
     dispatcher.dispatch(key(KeyCode::Char('A'), KeyModifiers::CONTROL));
-    dispatcher.dispatch(key(KeyCode::Char('X'), KeyModifiers::CONTROL));
+    dispatcher.dispatch(key(
+        KeyCode::Char('X'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
 
     assert_eq!(&*calls.lock().unwrap(), &["cut", "change"]);
 }
@@ -577,16 +588,27 @@ fn uncontrolled_input_repaints_a_paste_without_a_change_listener() {
         row: 0,
         modifiers: KeyModifiers::empty(),
     }));
-    let _ = output.recv_timeout(Duration::from_secs(1));
+    // Settle every frame the focus repaint produced: the paste frame must not be
+    // confused with a queued focus frame, whose row does not carry the paste.
+    while output.recv_timeout(Duration::from_millis(100)).is_ok() {}
 
     dispatcher.dispatch(Event::Paste("Z".into()));
-    let frame = output
-        .recv_timeout(Duration::from_secs(1))
-        .expect("paste must request a redraw even without on_change")
-        .unwrap();
+    let mut painted_paste = false;
+    for _ in 0..8 {
+        match output.recv_timeout(Duration::from_millis(250)) {
+            Ok(Ok(frame)) => {
+                if painted(&frame).contains('Z') {
+                    painted_paste = true;
+                    break;
+                }
+            }
+            Ok(Err(error)) => panic!("renderer failed: {error:?}"),
+            Err(_) => break,
+        }
+    }
     assert!(
-        painted(&frame).contains('Z'),
-        "pasted text must be painted, frame was {frame:?}"
+        painted_paste,
+        "pasted text must be painted even without an on_change observer"
     );
 }
 
@@ -640,7 +662,10 @@ fn backspace_and_delete_never_report_a_clipboard_action() {
     dispatcher.dispatch(key(KeyCode::Char('b'), KeyModifiers::empty()));
     assert!(actions.lock().unwrap().is_empty());
     dispatcher.dispatch(key(KeyCode::Char('A'), KeyModifiers::CONTROL));
-    dispatcher.dispatch(key(KeyCode::Char('X'), KeyModifiers::CONTROL));
+    dispatcher.dispatch(key(
+        KeyCode::Char('X'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
     assert_eq!(&*actions.lock().unwrap(), &[icmd::TextClipboardAction::Cut]);
 }
 
@@ -1126,10 +1151,12 @@ fn pointer_position_stays_correct_after_horizontal_scroll() {
     dispatcher.dispatch(key(KeyCode::Char('x'), KeyModifiers::empty()));
     let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
     let position = emitted.find('x').expect("the click must land in the input");
-    // A pointer lands inside a cell, so the caret belongs after that cell's
+    // A pointer lands on a cell, and the caret belongs on that cell's
     // character - never a cell earlier or later.
     assert_eq!(
-        emitted[..position].chars().next_back(),
+        // The inserted 'x' sits at the caret, so the clicked cell's character is
+        // the one right after it.
+        emitted[position..].chars().nth(1),
         Some(clicked),
         "the caret must land in the clicked cell {clicked:?}: {emitted:?}"
     );
@@ -1182,7 +1209,7 @@ fn focused_editor_consumes_ancestor_keyboard_listeners() {
     dispatcher.dispatch(key(KeyCode::Char('x'), KeyModifiers::empty()));
     dispatcher.dispatch(key(KeyCode::Right, KeyModifiers::empty()));
 
-    assert_eq!(&*values.lock().unwrap(), &["ax"]);
+    assert_eq!(&*values.lock().unwrap(), &["xa"]);
     assert_eq!(*keyboard_event_hits.lock().unwrap(), 0);
     assert_eq!(*key_down_hits.lock().unwrap(), 0);
 }
@@ -1462,7 +1489,7 @@ fn textarea_click_lands_on_the_cell_under_the_pointer() {
     dispatcher.dispatch(key(KeyCode::Char('X'), KeyModifiers::empty()));
     assert_eq!(
         values.lock().unwrap().last().map(String::as_str),
-        Some("abcdXefghij"),
+        Some("abcXdefghij"),
         "the caret must land on the cell under the pointer"
     );
 }
@@ -1500,7 +1527,7 @@ fn input_click_lands_on_the_cell_under_the_pointer() {
     dispatcher.dispatch(key(KeyCode::Char('X'), KeyModifiers::empty()));
     assert_eq!(
         values.lock().unwrap().last().map(String::as_str),
-        Some("abcdeXfghij"),
+        Some("abcdXefghij"),
         "padding must not shift the caret"
     );
 }
@@ -1554,7 +1581,7 @@ fn wrapped_textarea_click_maps_every_row() {
     dispatcher.dispatch(key(KeyCode::Char('X'), KeyModifiers::empty()));
     assert_eq!(
         values.lock().unwrap().last().map(String::as_str),
-        Some("abcdefghijkXlmnopqrstuvwxyz"),
+        Some("abcdefghijXklmnopqrstuvwxyz"),
         "a click on a wrapped row must map to that row's first cell"
     );
 }
@@ -1676,7 +1703,7 @@ fn narrow_textarea_click_still_maps_to_the_cell() {
     let _ = output.recv_timeout(Duration::from_millis(300));
     assert_eq!(
         values.lock().unwrap().last().map(String::as_str),
-        Some("012345678#9abcdefghijklmnopqrstuvwxyz"),
+        Some("01234567#89abcdefghijklmnopqrstuvwxyz"),
         "a click must land on the cell under the pointer even when the box is narrower than requested"
     );
 }
@@ -2093,5 +2120,5 @@ fn enter_submits_single_line_and_inserts_newline_multiline() {
         modifiers: KeyModifiers::empty(),
     }));
     dispatcher.dispatch(key(KeyCode::Enter, KeyModifiers::empty()));
-    assert_eq!(&*values.lock().unwrap(), &["a\n"]);
+    assert_eq!(&*values.lock().unwrap(), &["\na"]);
 }

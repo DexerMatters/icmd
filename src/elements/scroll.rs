@@ -1,20 +1,37 @@
+//! Scroll container that clips its content and owns a scroll offset.
+
 use crate::{
     Attr, DomProps, Node, Overflow, Props, ScrollAxes, ScrollOffset, ScrollbarStyle,
     ScrollbarVisibility, basic::ComponentContext, basic::props::ScrollConfig, ui, view,
 };
 
+/// Configuration for [`scroll_area`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScrollAreaProps {
+    /// Axes that scroll and clip; defaults to [`ScrollAxes::Vertical`].
     pub axes: Attr<ScrollAxes>,
+    /// When the scrollbar is shown; defaults to
+    /// [`ScrollbarVisibility::Auto`].
     pub scrollbar_visibility: Attr<ScrollbarVisibility>,
+    /// Controlled scroll offset in cells; when unset the runtime owns it.
     pub offset: Attr<ScrollOffset>,
+    /// Whether mouse dragging scrolls; defaults to `true`.
     pub enable_mouse: Attr<bool>,
+    /// Whether the wheel scrolls; defaults to `true`.
     pub enable_wheel: Attr<bool>,
+    /// Whether keyboard scrolling is handled; defaults to `true`.
     pub enable_keyboard: Attr<bool>,
+    /// Cells moved per wheel notch; defaults to `1` and is floored at `1`.
     pub wheel_step: Attr<u16>,
+    /// Scrollbar glyph style; defaults to the theme's scrollbar.
     pub scrollbar_style: Attr<ScrollbarStyle>,
 }
 
+/// Clipping scroll container; see [`ScrollAreaProps`] for its configuration.
+///
+/// Caller style is applied exactly once, by the canonical host-prop merge.
+/// Scrolling owns clipping on its enabled axes; that required invariant is
+/// applied after the caller merge so it cannot be overridden away.
 pub fn scroll_area(cx: &mut ComponentContext, props: &Props<ScrollAreaProps>) -> Node {
     let theme = cx.use_theme();
     let axes = props.axes | ScrollAxes::Vertical;
@@ -22,12 +39,7 @@ pub fn scroll_area(cx: &mut ComponentContext, props: &Props<ScrollAreaProps>) ->
     let horizontal = matches!(axes, ScrollAxes::Horizontal | ScrollAxes::Both);
     let vertical = matches!(axes, ScrollAxes::Vertical | ScrollAxes::Both);
 
-    // Caller style is applied exactly once, by the canonical host-prop merge.
-    // The previous code cloned it into the defaults and then merged it again,
-    // which both duplicated work and made precedence depend on merge order.
     let mut dom = props.host_props(DomProps::default());
-    // Scrolling owns clipping on its enabled axes. This required invariant is
-    // applied after the caller merge so it cannot be overridden away.
     if horizontal {
         dom.style.overflow_x = Attr::Set(Overflow::Clip);
     }

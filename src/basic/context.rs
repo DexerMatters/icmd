@@ -1,3 +1,7 @@
+//! Component context, hook state, shared-state handles, and context keys.
+//! Owns the per-render `ComponentContext` and the `ContextKey`, `StateSetter`,
+//! `StateRef`, and `Ref` shared-state types.
+
 use std::{
     any::Any,
     collections::HashMap,
@@ -10,12 +14,14 @@ use std::{
 };
 
 use super::hooks::{EffectCallback, FiberId, HookSlot, StateUpdate, UpdateQueue};
+use super::lifetime::AppHandle;
 use crossbeam_channel::Sender;
 
 use super::common::Node;
 
 static NEXT_CONTEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// A typed, process-unique key naming a context value and its default.
 #[derive(Clone)]
 pub struct ContextKey<T> {
     id: u64,
@@ -23,6 +29,7 @@ pub struct ContextKey<T> {
 }
 
 impl<T> ContextKey<T> {
+    /// Creates a key with a process-unique id and a default value.
     pub fn new(default: T) -> Self {
         Self {
             id: NEXT_CONTEXT_ID.fetch_add(1, Ordering::Relaxed),
@@ -30,6 +37,7 @@ impl<T> ContextKey<T> {
         }
     }
 
+    /// Builds a provider node that publishes `value` under this key to `children`.
     pub fn provider(&self, value: T, children: impl IntoIterator<Item = Node>) -> Node
     where
         T: Send + Sync + 'static,
@@ -41,13 +49,13 @@ impl<T> ContextKey<T> {
         self.id
     }
 
-    // The default is stored once as an `Arc`, so returning it to a consumer is
-    // a refcount bump rather than a deep clone of the value.
+    /// Returns the default value as an `Arc`, a refcount bump rather than a deep clone.
     pub(crate) fn default_arc(&self) -> Arc<T> {
         self.default.clone()
     }
 }
 
+/// Creates a context key whose default is seen when no provider is above the consumer.
 pub fn create_context<T>(default: T) -> ContextKey<T> {
     ContextKey::new(default)
 }
@@ -58,7 +66,7 @@ pub(crate) struct ContextValues {
 }
 
 impl ContextValues {
-    // Shared read: the stored value is an `Arc`, so this does not clone `T`.
+    /// Reads the stored value as an `Arc`, without cloning `T`.
     pub(crate) fn get_arc<T>(&self, key: &ContextKey<T>) -> Option<Arc<T>>
     where
         T: Send + Sync + 'static,
@@ -85,6 +93,7 @@ impl ContextValues {
     }
 }
 
+/// A handle that queues state updates for one hook slot and wakes the runtime.
 #[derive(Clone)]
 pub struct StateSetter<T> {
     fiber: FiberId,
@@ -95,10 +104,12 @@ pub struct StateSetter<T> {
 }
 
 impl<T: Send + 'static> StateSetter<T> {
+    /// Replaces the state with `value`.
     pub fn set(&self, value: T) {
         self.update(move |state| *state = value);
     }
 
+    /// Applies `update` to the current state and wakes the runtime.
     pub fn update(&self, update: impl FnOnce(&mut T) + Send + 'static) {
         let apply = Box::new(move |state: &mut (dyn Any + Send)| {
             let state = state
@@ -118,13 +129,15 @@ impl<T: Send + 'static> StateSetter<T> {
     }
 }
 
-// Transitional alias. New code should use `StateRef`, which encapsulates the
-// lock and reports poisoning instead of exposing the synchronization primitive
-// as permanent API policy.
+/// A shared, mutex-protected value; alias for `Arc<Mutex<T>>`.
+///
+/// Prefer `StateRef`, which encapsulates the lock and reports poisoning.
 pub type Ref<T> = Arc<Mutex<T>>;
 
+/// A shared-state failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateError {
+    /// The lock was poisoned by a panicking holder.
     Poisoned,
 }
 
@@ -138,14 +151,16 @@ impl std::fmt::Display for StateError {
 
 impl std::error::Error for StateError {}
 
-// Encapsulated shared state. The lock strategy is an implementation detail, so
-// it can change without a public compatibility event, and poison handling is
-// centralized here instead of being repeated at every call site.
+/// Shared state with an encapsulated mutex.
+///
+/// The lock strategy stays a private detail, so it can change without a public
+/// compatibility event, and poison handling is centralized here.
 pub struct StateRef<T> {
     inner: Arc<Mutex<T>>,
 }
 
 impl<T> StateRef<T> {
+    /// Creates shared state holding `value` under a new mutex.
     pub fn new(value: T) -> Self {
         Self {
             inner: Arc::new(Mutex::new(value)),
@@ -156,24 +171,26 @@ impl<T> StateRef<T> {
         Self { inner }
     }
 
-    // Wrap an existing shared allocation. Used by callers migrating from
-    // `Ref<T>`, and by tests that need to observe poisoning behavior.
+    /// Wraps an existing `Ref<T>` allocation, sharing the same value.
+    ///
+    /// Used by callers migrating from `Ref<T>` and by tests that observe poisoning.
     pub fn from_shared(inner: Ref<T>) -> Self {
         Self { inner }
     }
 
+    /// Runs `f` on a shared borrow, or reports `StateError::Poisoned`.
     pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> Result<R, StateError> {
         let guard = self.inner.lock().map_err(|_| StateError::Poisoned)?;
         Ok(f(&guard))
     }
 
+    /// Runs `f` on a mutable borrow, or reports `StateError::Poisoned`.
     pub fn update<R>(&self, f: impl FnOnce(&mut T) -> R) -> Result<R, StateError> {
         let mut guard = self.inner.lock().map_err(|_| StateError::Poisoned)?;
         Ok(f(&mut guard))
     }
 
-    // Non-blocking update: returns `None` when the lock is currently held, so a
-    // reentrant caller is rejected instead of deadlocking.
+    /// Runs `f` on a mutable borrow without blocking; returns `Ok(None)` when the lock is held.
     pub fn try_update<R>(&self, f: impl FnOnce(&mut T) -> R) -> Result<Option<R>, StateError> {
         match self.inner.try_lock() {
             Ok(mut guard) => Ok(Some(f(&mut guard))),
@@ -183,7 +200,9 @@ impl<T> StateRef<T> {
     }
 }
 
+/// The value an effect may return: `()` for no cleanup, or a `FnOnce()` cleanup.
 pub trait EffectResult: Send + 'static {
+    /// Converts this result into an optional cleanup closure.
     fn into_cleanup(self) -> Option<Box<dyn FnOnce() + Send>>;
 }
 
@@ -202,6 +221,7 @@ where
     }
 }
 
+/// The per-render hook and context environment passed to a component.
 pub struct ComponentContext<CustomHook = ()> {
     pub(crate) fiber: FiberId,
     pub(crate) hook_cursor: usize,
@@ -210,6 +230,7 @@ pub struct ComponentContext<CustomHook = ()> {
     pub(crate) wake: Sender<()>,
     pub(crate) inherited_context: ContextValues,
     pub(crate) provided_context: ContextValues,
+    pub(crate) handle: AppHandle,
     pub(crate) custom_hook: CustomHook,
 }
 
@@ -223,6 +244,7 @@ where
         updates: UpdateQueue,
         wake: Sender<()>,
         inherited_context: ContextValues,
+        handle: AppHandle,
     ) -> Self {
         Self {
             fiber,
@@ -232,10 +254,20 @@ where
             wake,
             inherited_context,
             provided_context: ContextValues::default(),
+            handle,
             custom_hook: CustomHook::default(),
         }
     }
 
+    /// Returns a cloneable session control handle.
+    ///
+    /// Its `request_exit` stops the application like the exit key does, running
+    /// the Unmount and Exit phases and restoring the terminal.
+    pub fn use_handle(&self) -> AppHandle {
+        self.handle.clone()
+    }
+
+    /// Returns a clone of the value published for `context`, or its default.
     pub fn use_context<'a, T>(&self, context: impl FnOnce() -> &'a ContextKey<T>) -> T
     where
         T: Clone + Send + Sync + 'static,
@@ -243,8 +275,10 @@ where
         (*self.use_context_arc(context)).clone()
     }
 
-    // Canonical shared read. Consumers that only inspect the value should use
-    // this and dereference, which avoids cloning the value on every render.
+    /// Returns the `Arc` published for `context`, or its default.
+    ///
+    /// Consumers that only inspect the value should use this and dereference,
+    /// which avoids cloning the value on every render.
     pub fn use_context_arc<'a, T>(
         &self,
         context: impl FnOnce() -> &'a ContextKey<T>,
@@ -258,6 +292,7 @@ where
             .unwrap_or_else(|| context.default_arc())
     }
 
+    /// Publishes `value` under `context` to this subtree.
     pub fn provide<T>(&mut self, context: &ContextKey<T>, value: T)
     where
         T: Send + Sync + 'static,
@@ -265,6 +300,7 @@ where
         self.provided_context.insert(context, value);
     }
 
+    /// Returns the current state and a setter, calling `initial` only on first render.
     pub fn use_state<T: Clone + Send + 'static>(
         &mut self,
         initial: impl FnOnce() -> T,
@@ -292,6 +328,7 @@ where
         )
     }
 
+    /// Returns the persistent `Ref<T>` for this hook slot, calling `initial` on first render.
     pub fn use_ref<T: Send + 'static>(&mut self, initial: impl FnOnce() -> T) -> Ref<T> {
         let index = self.next_hook();
         if index == self.hooks.len() {
@@ -307,12 +344,12 @@ where
         }
     }
 
-    // Shared reference state with an encapsulated lock. Shares the same
-    // allocation as `use_ref`, so both views observe the same value.
+    /// Returns a `StateRef` sharing the same allocation as `use_ref`.
     pub fn use_state_ref<T: Send + 'static>(&mut self, initial: impl FnOnce() -> T) -> StateRef<T> {
         StateRef::from_ref(self.use_ref(initial))
     }
 
+    /// Returns the memoized value, recomputing only when `dependencies` change.
     pub fn use_memo<T, D>(&mut self, dependencies: D, compute: impl FnOnce() -> T) -> T
     where
         T: Clone + Send + 'static,
@@ -352,6 +389,7 @@ where
         }
     }
 
+    /// Runs `effect` after render whenever `dependencies` change; its result is the cleanup.
     pub fn use_effect<D, F, R>(&mut self, dependencies: D, effect: F)
     where
         D: PartialEq + Send + 'static,
@@ -359,6 +397,22 @@ where
         R: EffectResult,
     {
         self.use_optional_effect(dependencies, move || effect().into_cleanup());
+    }
+
+    /// Runs `effect` once at mount; its result is the unmount cleanup.
+    pub fn use_mount_effect<R: EffectResult>(
+        &mut self,
+        effect: impl FnOnce() -> R + Send + 'static,
+    ) {
+        self.use_effect((), effect);
+    }
+
+    /// Registers `cleanup` to run once when this component unmounts.
+    ///
+    /// The body never runs at mount. For app-scoped exit behavior that must also
+    /// run when the tree never mounted, use `AppLifecycle::on_unmount`/`on_exit`.
+    pub fn use_unmount(&mut self, cleanup: impl FnOnce() + Send + 'static) {
+        self.use_effect((), move || cleanup);
     }
 
     fn use_optional_effect<D, F>(&mut self, dependencies: D, effect: F)

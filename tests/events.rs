@@ -174,6 +174,51 @@ fn reentrant_listener_delivery_terminates_without_deadlock() {
     );
 }
 
+#[test]
+fn an_application_shortcut_fires_once_per_press_not_once_per_edge() {
+    // A terminal with REPORT_EVENT_TYPES reports both edges of one physical
+    // press. A release must not fire a shortcut: focused, the press is consumed
+    // by the widget while the release still reached `app_key`, so the shortcut
+    // fired even though the widget handled the key; unfocused, both edges fired
+    // it, so one key changed the page twice.
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(Size::new(20, 5));
+    let (input, output) = Runtime::new(Lower::default()).then(commit).start();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_listener = calls.clone();
+    let node = root
+        .style(|style| {
+            style.width /= Dimension::Max;
+            style.height /= Dimension::Max;
+        })
+        .events(move |events| {
+            events.app_key /= EventListener::new(move |_event| {
+                calls_for_listener.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .apply(());
+    input.send(node).unwrap();
+    output.recv().unwrap();
+
+    // One physical key: press, repeat, release.
+    for kind in [
+        KeyEventKind::Press,
+        KeyEventKind::Repeat,
+        KeyEventKind::Release,
+    ] {
+        dispatcher.dispatch(Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Right,
+            KeyModifiers::empty(),
+            kind,
+        )));
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "only the press and the repeat are shortcut gestures"
+    );
+}
+
 // PERF-06: a deep route performs O(depth) ID lookups rather than rescanning
 // every published region at each ancestry step.
 #[test]
@@ -710,13 +755,21 @@ fn paste_payload_is_shared_across_the_ancestor_route() {
         ));
     }
     input.send(node).unwrap();
-    output.recv_timeout(Duration::from_secs(2)).unwrap();
+    // Settle before pressing. The first frame can be a bootstrap frame the
+    // commit pass published before this tree's regions existed, and a press
+    // against that frame focuses nothing - so the paste would never reach the
+    // listener and the test would fail under load rather than on a real defect.
+    while output.recv_timeout(Duration::from_millis(250)).is_ok() {}
     dispatcher.dispatch(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 1,
         row: 1,
         modifiers: KeyModifiers::empty(),
     }));
+    assert!(
+        dispatcher.focused().is_some(),
+        "the press must focus the region that the paste is routed through"
+    );
 
     let payload = "p".repeat(64 * 1024);
     dispatcher.dispatch(Event::Paste(payload.clone()));

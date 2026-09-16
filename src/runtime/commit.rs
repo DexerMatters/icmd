@@ -1,3 +1,7 @@
+//! Commit stage: turns a lowered DOM into a `Frame`, retaining the painted
+//! scene, event regions, text rasters, and layout caches between frames.
+//! Emits a frame both on new DOM input and on viewport changes.
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -6,6 +10,8 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded};
 use crossterm::style::Color;
 
+use crate::basic::selection::SelectionOverlay;
+use crate::basic::text_layout;
 use crate::{DomId, DomNode, EmojiMerging, Frame, Image, ImageId, Size, Text};
 
 use super::event::{EventDispatcher, EventRegion, RuntimeScrollOffset};
@@ -22,8 +28,10 @@ mod style;
 pub(crate) mod text;
 mod types;
 
+/// Configuration for a [`Commit`] stage.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CommitConfig {
+    /// Emoji merging mode applied to every text leaf in the commit.
     pub emoji_merging: EmojiMerging,
 }
 
@@ -33,10 +41,21 @@ struct CachedTextRaster {
     content_size: (i32, i32),
     visible_local: RectI,
     backdrop: Color,
+    overlay: Option<crate::basic::selection::SelectionOverlay>,
     image: Image,
     used: u64,
 }
 
+struct CachedTextGeometry {
+    text: Text,
+    inherited: ComputedText,
+    content_size: (i32, i32),
+    merging: EmojiMerging,
+    geometry: text::TextGeometry,
+    used: u64,
+}
+
+/// Cloneable handle used to publish a new viewport size to the commit stage.
 #[derive(Clone)]
 pub struct ViewportSetter {
     value: Arc<Mutex<Size>>,
@@ -44,11 +63,13 @@ pub struct ViewportSetter {
 }
 
 impl ViewportSetter {
+    /// Stores `size`, in terminal cells, and wakes the commit stage to repaint.
     pub fn set(&self, size: Size) {
         *self.value.lock().expect("viewport mutex poisoned") = size;
         let _ = self.wake.try_send(());
     }
 
+    /// Returns the current viewport size in terminal cells.
     pub fn viewport(&self) -> Size {
         *self.value.lock().expect("viewport mutex poisoned")
     }
@@ -58,6 +79,7 @@ impl ViewportSetter {
     }
 }
 
+/// Commit stage: owns the retained DOM, painted scene, caches, and event state.
 pub struct Commit {
     viewport: Size,
     viewport_state: Arc<Mutex<Size>>,
@@ -71,35 +93,33 @@ pub struct Commit {
     scroll_offsets: Arc<Mutex<HashMap<DomId, RuntimeScrollOffset>>>,
     text_cache: HashMap<DomId, Vec<CachedTextRaster>>,
     text_cache_tick: u64,
+    text_geometry: HashMap<DomId, CachedTextGeometry>,
+    text_geometry_tick: u64,
     text_seen: HashSet<DomId>,
     emoji_merging: EmojiMerging,
-    // Visit counters for the layout pass. They make the "one intrinsic
-    // measurement and one placement per node" budget measurable, which is the
-    // acceptance gate for the frame-local layout tree.
-    // Shared with a doc-hidden instrument handle so tests can read the layout
-    // budget without owning the worker's `Commit`.
     instrument: Arc<LayoutInstrument>,
-    // Natural (unwrapped) shaping results, keyed by node and validated by value.
-    // They are width-independent, so an unchanged leaf reuses its measurement
-    // instead of shaping twice per frame.
     natural_cache: crate::runtime::commit::text::NaturalCache,
 }
 
 impl Commit {
+    /// Builds a commit stage with its viewport setter and event dispatcher.
     pub fn new_with_events(viewport: Size) -> (Self, ViewportSetter, EventDispatcher) {
         Self::with_config_and_events(viewport, CommitConfig::default())
     }
 
+    /// Builds a commit stage with its viewport setter and default configuration.
     pub fn new(viewport: Size) -> (Self, ViewportSetter) {
         let (commit, setter, _) = Self::with_config_and_events(viewport, CommitConfig::default());
         (commit, setter)
     }
 
+    /// Builds a commit stage with its viewport setter and the given configuration.
     pub fn with_config(viewport: Size, config: CommitConfig) -> (Self, ViewportSetter) {
         let (commit, setter, _) = Self::with_config_and_events(viewport, config);
         (commit, setter)
     }
 
+    /// Builds a commit stage with its viewport setter, event dispatcher, and configuration.
     pub fn with_config_and_events(
         viewport: Size,
         config: CommitConfig,
@@ -125,6 +145,8 @@ impl Commit {
             scroll_offsets,
             text_cache: HashMap::new(),
             text_cache_tick: 0,
+            text_geometry: HashMap::new(),
+            text_geometry_tick: 0,
             text_seen: HashSet::new(),
             instrument: Arc::new(LayoutInstrument::default()),
             natural_cache: crate::runtime::commit::text::NaturalCache::default(),
@@ -133,6 +155,7 @@ impl Commit {
         (commit, setter, event_dispatcher)
     }
 
+    /// Returns a clone of the dispatcher that publishes regions and routes events.
     pub fn event_dispatcher(&self) -> EventDispatcher {
         self.event_dispatcher.clone()
     }
@@ -147,6 +170,96 @@ impl Commit {
         inherited: ComputedText,
         backdrop: Color,
         scroll: (i32, i32),
+    ) -> Option<Image> {
+        self.raster_text_entry(
+            id, text, content, visible, inherited, backdrop, scroll, None, None,
+        )
+    }
+
+    fn text_geometry_cached(
+        &mut self,
+        id: DomId,
+        text: &Text,
+        inherited: ComputedText,
+        content: RectI,
+    ) -> text::TextGeometry {
+        self.text_geometry_tick = self.text_geometry_tick.saturating_add(1);
+        let used = self.text_geometry_tick;
+        let content_size = (content.width, content.height);
+        if let Some(entry) = self.text_geometry.get_mut(&id)
+            && &entry.text == text
+            && entry.inherited == inherited
+            && entry.content_size == content_size
+            && entry.merging == self.emoji_merging
+        {
+            entry.used = used;
+            return entry.geometry.clone();
+        }
+        let layout = Arc::new(text::layout(
+            text,
+            content_size.0.max(1) as usize,
+            inherited,
+            self.emoji_merging,
+        ));
+        let value: Arc<str> = Arc::from(
+            text.spans
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>(),
+        );
+        let geometry = text::TextGeometry { layout, value };
+        self.text_geometry.insert(
+            id,
+            CachedTextGeometry {
+                text: text.clone(),
+                inherited,
+                content_size,
+                merging: self.emoji_merging,
+                geometry: geometry.clone(),
+                used,
+            },
+        );
+        geometry
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn selectable_text_cached(
+        &mut self,
+        id: DomId,
+        text: &Text,
+        geometry: &text::TextGeometry,
+        content: RectI,
+        visible: RectI,
+        inherited: ComputedText,
+        backdrop: Color,
+        scroll: (i32, i32),
+        overlay: Option<SelectionOverlay>,
+    ) -> Option<Image> {
+        self.raster_text_entry(
+            id,
+            text,
+            content,
+            visible,
+            inherited,
+            backdrop,
+            scroll,
+            overlay,
+            Some(&geometry.layout),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn raster_text_entry(
+        &mut self,
+        id: DomId,
+        text: &Text,
+        content: RectI,
+        visible: RectI,
+        inherited: ComputedText,
+        backdrop: Color,
+        scroll: (i32, i32),
+        overlay: Option<SelectionOverlay>,
+        layout: Option<&Arc<text_layout::TextLayout>>,
     ) -> Option<Image> {
         self.text_seen.insert(id);
         self.text_cache_tick = self.text_cache_tick.saturating_add(1);
@@ -164,19 +277,31 @@ impl Commit {
                 && entry.content_size == (content.width, content.height)
                 && entry.visible_local == visible_local
                 && entry.backdrop == backdrop
+                && entry.overlay == overlay
         }) {
             entry.used = used;
             return Some(entry.image.clone());
         }
-        let image = text::raster_text(
-            text,
-            content,
-            visible,
-            inherited,
-            backdrop,
-            scroll,
-            self.emoji_merging,
-        )?;
+        let image = match layout {
+            Some(layout) => text::raster_plain_with_layout(
+                text,
+                layout,
+                content,
+                visible,
+                inherited,
+                backdrop,
+                overlay.as_ref(),
+            ),
+            None => text::raster_text(
+                text,
+                content,
+                visible,
+                inherited,
+                backdrop,
+                scroll,
+                self.emoji_merging,
+            ),
+        }?;
         if entries.len() >= 2 {
             let oldest = entries
                 .iter()
@@ -192,6 +317,7 @@ impl Commit {
             content_size: (content.width, content.height),
             visible_local,
             backdrop,
+            overlay,
             image: image.clone(),
             used,
         });
@@ -202,12 +328,10 @@ impl Commit {
         if let Some(dom) = dom {
             self.latest = Some(dom);
         }
-        // Painting needs mutable commit state, so temporarily move the
-        // retained DOM out rather than cloning an entire tree on every resize
-        // or scroll-driven frame.
         let Some(root) = self.latest.take() else {
             self.event_dispatcher.publish(Vec::new(), &HashSet::new());
             self.text_cache.clear();
+            self.text_geometry.clear();
             self.text_seen.clear();
             return make_frame(Vec::new(), include_viewport.then_some(self.viewport));
         };
@@ -241,29 +365,26 @@ impl Commit {
             None,
             &mut event_order,
             (0, 0),
+            None,
         );
-        // Autofocus is an explicit post-publication focus request: the runtime
-        // grants it on the next published region set. This is how an input
-        // starts focused without inferring focus from receiving input.
         if let Some(region) = event_regions.iter().find(|region| region.autofocus) {
             self.event_dispatcher.request_focus(region.id);
         }
         self.event_dispatcher
             .publish(event_regions, &retained_scroll_ids);
 
-        // `diff_scene` produces the one canonical sorted order for this commit;
-        // collecting and sorting a second time here was pure duplication.
         let (operations, order) = self.diff_scene(&next);
         self.scene_order = order;
         self.scene = next;
         self.latest = Some(root);
         self.text_cache.retain(|id, _| self.text_seen.contains(id));
+        self.text_geometry
+            .retain(|id, _| self.text_seen.contains(id));
         make_frame(operations, include_viewport.then_some(self.viewport))
     }
 }
 
-// Layout visit counters. They make the "one intrinsic measurement and one
-// placement per node" budget measurable, which is PERF-02's acceptance gate.
+/// Atomic counters of intrinsic measurements and placements for one frame.
 #[derive(Debug, Default)]
 pub struct LayoutInstrument {
     intrinsic: std::sync::atomic::AtomicU64,
@@ -288,7 +409,7 @@ impl LayoutInstrument {
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
-    // (intrinsic measurements, placement visits) observed so far.
+    /// Returns `(intrinsic measurements, placement visits)` since the last reset.
     pub fn counts(&self) -> (u64, u64) {
         (
             self.intrinsic.load(std::sync::atomic::Ordering::Relaxed),
@@ -298,8 +419,7 @@ impl LayoutInstrument {
 }
 
 impl Commit {
-    // Build a commit that shares its layout instrument with the caller, so a
-    // test can observe the visit counts of the frame the worker produced.
+    /// Builds a commit stage that shares its layout instrument with the caller.
     #[doc(hidden)]
     pub fn instrumented(
         viewport: Size,

@@ -1,3 +1,6 @@
+//! Runtime assembly: commit, event, image, lowering, limiting, metrics, and
+//! renderer modules gathered into one runtime surface.
+
 pub(crate) mod commit;
 mod event;
 pub(crate) mod image;

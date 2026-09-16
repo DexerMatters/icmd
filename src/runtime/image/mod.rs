@@ -1,3 +1,6 @@
+//! Image scheduling: request queuing, decode and transform budgets, and the
+//! per-frame lifecycle of a placement.
+
 mod kitty;
 mod lifecycle;
 pub(crate) mod manager;

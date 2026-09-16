@@ -2,7 +2,7 @@
 // their boundaries are driven through the hidden module.
 use icmd::__private::render_rgba_with_cell_size;
 use icmd::advanced::{ImageResource, LimitError, ResourceLimits};
-use icmd::image::{ImageRenderOptions, ImageSource};
+use icmd::{ImageRenderOptions, ImageSource};
 use icmd::{RasterImage, RasterImageError, Size};
 
 fn tiny() -> RasterImage {

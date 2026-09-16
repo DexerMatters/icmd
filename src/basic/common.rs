@@ -1,3 +1,7 @@
+//! Core node vocabulary: keys, nodes, components, and tri-state attributes.
+//! Owns the `Node` tree payloads, the `Component`/`PropsTransform` traits, and
+//! the `Attr` tri-state value shared with style and DOM props.
+
 use std::path::{Path, PathBuf};
 use std::{
     any::{Any, TypeId},
@@ -16,16 +20,18 @@ use super::{
     text::Text,
 };
 
+/// A stable, cloneable node identity used to match nodes across renders.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Key(Arc<str>);
 
 impl Key {
-    // Canonical construction avoids the intermediate `String` that
-    // `impl Into<String>` forced for `&str` and `Arc<str>` inputs.
+    /// Builds a key without the intermediate `String` that an `Into<String>`
+    /// bound would force for `&str` and `Arc<str>` inputs.
     pub fn new(value: impl Into<Key>) -> Self {
         value.into()
     }
 
+    /// Returns the key as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -67,6 +73,7 @@ impl From<u64> for Key {
     }
 }
 
+/// A single node in the retained tree: a component, element, provider, or leaf.
 #[derive(Clone)]
 pub struct Node {
     pub(crate) kind: NodeKind,
@@ -116,6 +123,7 @@ impl Node {
         })
     }
 
+    /// Builds an element node from DOM props and children.
     pub fn element(dom: DomProps, children: impl IntoIterator<Item = Node>) -> Self {
         Self::from_kind(NodeKind::Element {
             dom,
@@ -123,11 +131,13 @@ impl Node {
         })
     }
 
+    /// Attaches a reconciliation key and returns the node.
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = Some(key.into());
         self
     }
 
+    /// Builds a raster-placement leaf node.
     pub fn raster(raster: RasterPlacement) -> Self {
         Self::from_kind(NodeKind::Raster(raster))
     }
@@ -172,14 +182,17 @@ where
     }
 }
 
+/// Builds a text node from any string-like content.
 pub fn text(content: impl Into<String>) -> Node {
     Text::new(content).into()
 }
 
+/// Renders a bare element from `props`; the default function-component shape.
 pub fn view(_cx: &mut ComponentContext, props: &Props<()>) -> Node {
     Node::element(props.dom.clone(), props.children.clone())
 }
 
+/// Collects children into a single fragment node.
 pub fn fragment<I, V>(children: I) -> Node
 where
     I: IntoIterator<Item = V>,
@@ -188,11 +201,13 @@ where
     children.into_iter().collect()
 }
 
+/// Builds a fragment node with no children.
 pub fn empty() -> Node {
     fragment(std::iter::empty::<Node>())
 }
 
 #[doc(hidden)]
+/// Macro support: builds a component node, applying `build` to its props to derive a key.
 pub fn __ui_apply<P, C>(component: C, build: impl FnOnce(&mut Props<P>) -> Option<Key>) -> Node
 where
     C: Component<P> + Send + Sync + 'static,
@@ -208,6 +223,7 @@ where
 }
 
 #[doc(hidden)]
+/// Macro support: builds an event handler set by applying `apply`.
 pub fn __ui_events(apply: impl FnOnce(&mut EventHandlers)) -> EventHandlers {
     let mut events = EventHandlers::default();
     apply(&mut events);
@@ -215,6 +231,7 @@ pub fn __ui_events(apply: impl FnOnce(&mut EventHandlers)) -> EventHandlers {
 }
 
 #[doc(hidden)]
+/// Macro support: compares two tag names byte-for-byte at compile time.
 pub const fn __ui_tag_names_equal(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
     let right = right.as_bytes();
@@ -231,11 +248,15 @@ pub const fn __ui_tag_names_equal(left: &str, right: &str) -> bool {
     true
 }
 
+/// A node-producing type parameterized by its props type `P`.
 pub trait Component<P>: 'static {
+    /// Mutates props before rendering, once per construction.
     fn prepare(&self, _props: &mut Props<P>) {}
 
+    /// Builds this component's node for `props`.
     fn render(&self, cx: &mut ComponentContext, props: &Props<P>) -> Node;
 
+    /// Prepares and erases `props` into a component node.
     fn apply(self, props: impl Into<Props<P>>) -> Node
     where
         Self: Sized + Send + Sync + 'static,
@@ -260,6 +281,7 @@ pub trait Component<P>: 'static {
         }
     }
 
+    /// Returns a forwarder that sets fields of `P` from `extra` on each construction.
     fn props(self, extra: impl Into<P>) -> Forward<Self, impl PropsTransform<P>>
     where
         Self: Sized,
@@ -271,6 +293,7 @@ pub trait Component<P>: 'static {
         })
     }
 
+    /// Returns a forwarder that mutates `P` through `apply` on each construction.
     fn extra(
         self,
         apply: impl Fn(&mut P) + Send + Sync + 'static,
@@ -282,6 +305,7 @@ pub trait Component<P>: 'static {
         Forward::new(self, move |props: &mut Props<P>| apply(props.data_mut()))
     }
 
+    /// Returns a forwarder that replaces the node style.
     fn style(self, apply: impl FnOnce(&mut Style)) -> Forward<Self, impl PropsTransform<P>>
     where
         Self: Sized,
@@ -293,6 +317,7 @@ pub trait Component<P>: 'static {
         })
     }
 
+    /// Returns a forwarder that registers event handlers.
     fn events(
         self,
         events: impl FnOnce(&mut EventHandlers) + Send + 'static,
@@ -304,6 +329,7 @@ pub trait Component<P>: 'static {
         Forward::new(self, EventSetter(std::sync::Mutex::new(Some(events))))
     }
 
+    /// Applies `children` as the full child list and returns the node.
     fn children(self, children: impl IntoIterator<Item = Node>) -> Node
     where
         Self: Sized + Send + Sync + 'static,
@@ -314,6 +340,7 @@ pub trait Component<P>: 'static {
         })
     }
 
+    /// Appends one child and returns the node.
     fn child(self, child: impl Into<Node>) -> Node
     where
         Self: Sized + Send + Sync + 'static,
@@ -323,6 +350,7 @@ pub trait Component<P>: 'static {
         apply_props(self, move |props| props.children.push(child))
     }
 
+    /// Builds the node with default props.
     fn node(self) -> Node
     where
         Self: Sized + Send + Sync + 'static,
@@ -331,6 +359,7 @@ pub trait Component<P>: 'static {
         self.apply(Props::default())
     }
 
+    /// Returns a forwarder that applies `transform` to props.
     fn mapped<F>(self, transform: F) -> Forward<Self, F>
     where
         Self: Sized,
@@ -350,6 +379,7 @@ where
     component.apply(props)
 }
 
+/// A component paired with a props transform applied before rendering.
 #[derive(Clone)]
 pub struct Forward<F, T> {
     component: F,
@@ -357,6 +387,7 @@ pub struct Forward<F, T> {
 }
 
 impl<F, T> Forward<F, T> {
+    /// Pairs a component with a props transform.
     pub fn new(component: F, transform: T) -> Self {
         Self {
             component,
@@ -381,7 +412,9 @@ where
     }
 }
 
+/// A reusable in-place mutation applied to props before rendering.
 pub trait PropsTransform<P>: Send + Sync + 'static {
+    /// Mutates `props` in place.
     fn apply(&self, props: &mut Props<P>);
 }
 
@@ -423,14 +456,18 @@ where
     }
 }
 
+/// A tri-state value: unset, or explicitly set to `T`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Attr<T> {
+    /// No explicit value; consumers fall back to their own default.
     #[default]
     Unset,
+    /// An explicit value that overrides any default.
     Set(T),
 }
 
 impl<T> Attr<T> {
+    /// Returns `true` when a value is explicitly set.
     pub fn is_set(&self) -> bool {
         matches!(self, Self::Set(_))
     }
@@ -444,30 +481,29 @@ impl<T> Attr<T> {
         }
     }
 
-    // Explicit attribute operations. These are the canonical mutation API;
-    // the `/=`, `|`, and `|=` operators remain as transitional surface syntax
-    // and desugar to exactly these calls.
+    /// Sets an explicit value; the `/=`, `|`, and `|=` operators desugar to this call.
     pub fn set(&mut self, value: T) {
         *self = Self::Set(value);
     }
 
-    // Set only when currently unset: the "default" behaviour of the `|`
-    // operator, named explicitly.
+    /// Sets `value` only when currently unset; the `|` operator's default behaviour.
     pub fn set_default(&mut self, value: T) {
         if matches!(self, Self::Unset) {
             *self = Self::Set(value);
         }
     }
 
-    // Return to the unset state, which is distinct from an explicit value.
+    /// Returns to the unset state, which differs from an explicit value.
     pub fn clear(&mut self) {
         *self = Self::Unset;
     }
 
+    /// Returns `true` for an explicitly set value; the inverse of `Unset`.
     pub fn is_explicit(&self) -> bool {
         matches!(self, Self::Set(_))
     }
 
+    /// Returns a copy, preserving the unset state.
     pub fn cloned(&self) -> Attr<T>
     where
         T: Clone,
@@ -478,6 +514,7 @@ impl<T> Attr<T> {
         }
     }
 
+    /// Returns the set value, or `None` when unset.
     pub fn as_ref(&self) -> Option<&T> {
         match self {
             Self::Unset => None,
@@ -485,6 +522,7 @@ impl<T> Attr<T> {
         }
     }
 
+    /// Returns the set value mutably, or `None` when unset.
     pub fn as_mut(&mut self) -> Option<&mut T> {
         match self {
             Self::Unset => None,
@@ -492,6 +530,7 @@ impl<T> Attr<T> {
         }
     }
 
+    /// Returns the set value, or `default` when unset.
     pub fn resolve(&self, default: T) -> T
     where
         T: Clone,
@@ -499,6 +538,7 @@ impl<T> Attr<T> {
         self.as_ref().cloned().unwrap_or(default)
     }
 
+    /// Returns the set value, or the result of `default` when unset.
     pub fn resolve_with(&self, default: impl FnOnce() -> T) -> T
     where
         T: Clone,
@@ -506,6 +546,7 @@ impl<T> Attr<T> {
         self.as_ref().cloned().unwrap_or_else(default)
     }
 
+    /// Returns the set value, or `T::default()` when unset.
     pub fn unwrap_or_default(self) -> T
     where
         T: Default,
@@ -516,6 +557,7 @@ impl<T> Attr<T> {
         }
     }
 
+    /// Returns the set value, or `value` when unset.
     pub fn unwrap_or(self, value: T) -> T {
         match self {
             Self::Unset => value,
@@ -523,6 +565,7 @@ impl<T> Attr<T> {
         }
     }
 
+    /// Maps the set value with `f`, leaving `Unset` unchanged.
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Attr<U> {
         match self {
             Self::Unset => Attr::Unset,
@@ -530,6 +573,7 @@ impl<T> Attr<T> {
         }
     }
 
+    /// Chains `f` on the set value, leaving `Unset` unchanged.
     pub fn and_then<U>(self, f: impl FnOnce(T) -> Attr<U>) -> Attr<U> {
         match self {
             Self::Unset => Attr::Unset,

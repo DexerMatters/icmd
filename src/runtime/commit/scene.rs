@@ -1,3 +1,5 @@
+//! Scene diffing for a commit: the terminal operations that reach the next
+//! paint, plus the one canonical sorted scene order callers store.
 use std::collections::HashMap;
 
 use crate::{ImageId, Operation};
@@ -6,17 +8,17 @@ use super::Commit;
 use super::types::{PaintContent, PaintFragment, PaintKey};
 
 impl Commit {
-    // Returns the operations for this commit plus the one canonical sorted
-    // order for the new scene. Callers store that order instead of collecting
-    // and sorting a second time.
+    /// Returns the operations for this commit plus the one canonical sorted
+    /// order for the new scene; callers store that order instead of collecting
+    /// and sorting a second time. Cell/raster transitions cannot preserve a
+    /// patchable footprint and fall back to whole-image replacement, and the
+    /// previous order is moved out rather than cloned.
     pub(super) fn diff_scene(
         &mut self,
         next: &HashMap<PaintKey, PaintFragment>,
     ) -> (Vec<Operation>, Vec<PaintKey>) {
         let mut operations = Vec::new();
         let mut retired = Vec::new();
-        // The previous order is replaced by the new one, so it can be moved out
-        // instead of cloned.
         let old_keys = std::mem::take(&mut self.scene_order);
         for key in old_keys {
             let Some(new) = next.get(&key) else {
@@ -46,8 +48,6 @@ impl Commit {
                             raster: raster.clone(),
                         })
                     }
-                    // Cell/raster transitions cannot preserve a patchable
-                    // footprint and retain the existing replacement contract.
                     (_, PaintContent::Cells(image)) => operations.push(Operation::Replace {
                         id,
                         image: image.clone(),
@@ -122,6 +122,8 @@ impl Commit {
         (operations, next_keys)
     }
 
+    /// Returns the stable `ImageId` for a paint key, allocating and recording the
+    /// next id on first use.
     fn image_id(&mut self, key: PaintKey) -> ImageId {
         if let Some(id) = self.image_ids.get(&key) {
             return *id;

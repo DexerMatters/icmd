@@ -1,39 +1,49 @@
+//! Builder that tracks surface handles while assembling a [`Frame`].
+
 use std::collections::HashMap;
 
 use crate::{
     CellEdit, Frame, Image, ImageId, Operation, RasterPlacement, Rect, ScreenPosition, Size,
 };
 
-// Typed handles produced by the builder. Cell and raster handles are distinct
-// types, so a raster operation cannot be written against a cell surface (or the
-// reverse): the mismatch is a compile error, not a runtime validation failure.
+/// A typed handle to a cell surface created by this builder.
+///
+/// Cell and raster handles are distinct types, so a raster operation cannot be
+/// written against a cell surface, or the reverse: the mismatch is a compile
+/// error rather than a runtime validation failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CellSurfaceHandle(ImageId);
 
+/// A typed handle to a raster surface created by this builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RasterSurfaceHandle(ImageId);
 
 impl CellSurfaceHandle {
+    /// Returns the underlying surface identifier.
     pub const fn id(self) -> ImageId {
         self.0
     }
 }
 
 impl RasterSurfaceHandle {
+    /// Returns the underlying surface identifier.
     pub const fn id(self) -> ImageId {
         self.0
     }
 }
 
-// A handle of either kind, for operations that are surface-agnostic (position,
-// level, order, removal).
+/// A handle of either kind, for operations that are surface-agnostic such as
+/// position, level, order, and removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SurfaceHandle {
+    /// A cell surface handle.
     Cells(CellSurfaceHandle),
+    /// A raster surface handle.
     Raster(RasterSurfaceHandle),
 }
 
 impl SurfaceHandle {
+    /// Returns the underlying surface identifier.
     pub const fn id(self) -> ImageId {
         match self {
             Self::Cells(handle) => handle.0,
@@ -54,9 +64,12 @@ impl From<RasterSurfaceHandle> for SurfaceHandle {
     }
 }
 
+/// Why a builder operation was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildError {
+    /// The handle was not created by this builder.
     UnknownHandle,
+    /// The surface was already removed.
     Removed,
 }
 
@@ -84,10 +97,11 @@ struct Tracked {
     removed: bool,
 }
 
-// Builds a frame while tracking creation, kind, and removal within the batch.
-// The result is still a raw `Frame`, so the renderer's transactional validation
-// remains the single authority; the builder only makes common mistakes
-// unrepresentable before that point.
+/// Builds a frame while tracking creation, kind, and removal within the batch.
+///
+/// The result is still a raw [`Frame`], so the renderer's transactional
+/// validation remains the single authority; the builder only makes common
+/// mistakes unrepresentable before that point.
 #[derive(Debug, Default)]
 pub struct FrameBuilder {
     operations: Vec<Operation>,
@@ -98,6 +112,7 @@ pub struct FrameBuilder {
 }
 
 impl FrameBuilder {
+    /// Creates an empty builder whose first surface identifier is 1.
     pub fn new() -> Self {
         Self {
             next_id: 1,
@@ -105,11 +120,13 @@ impl FrameBuilder {
         }
     }
 
+    /// Sets the terminal size the finished frame resizes to.
     pub fn with_viewport(mut self, viewport: Size) -> Self {
         self.viewport = Some(viewport);
         self
     }
 
+    /// Requests a full repaint in the finished frame.
     pub fn invalidate(mut self) -> Self {
         self.force_redraw = true;
         self
@@ -128,6 +145,8 @@ impl FrameBuilder {
         id
     }
 
+    /// Rejects unknown, removed, or wrong-kind handles; the wrong-kind branch is
+    /// unreachable through the typed API and kept as a defence in depth.
     fn check(&self, id: ImageId, expected: Kind) -> Result<(), BuildError> {
         let Some(tracked) = self.tracked.get(&id) else {
             return Err(BuildError::UnknownHandle);
@@ -136,12 +155,12 @@ impl FrameBuilder {
             return Err(BuildError::Removed);
         }
         if tracked.kind != expected {
-            // Unreachable through the typed API; kept as a defence in depth.
             return Err(BuildError::UnknownHandle);
         }
         Ok(())
     }
 
+    /// Adds a cell surface and returns its handle.
     pub fn create_cells(
         &mut self,
         image: Image,
@@ -158,6 +177,7 @@ impl FrameBuilder {
         CellSurfaceHandle(id)
     }
 
+    /// Adds a raster surface and returns its handle.
     pub fn create_raster(
         &mut self,
         raster: RasterPlacement,
@@ -174,6 +194,7 @@ impl FrameBuilder {
         RasterSurfaceHandle(id)
     }
 
+    /// Adds cell edits to a cell surface.
     pub fn patch_cells(
         &mut self,
         handle: CellSurfaceHandle,
@@ -187,6 +208,7 @@ impl FrameBuilder {
         Ok(())
     }
 
+    /// Replaces a rectangular region of a cell surface.
     pub fn patch_rect(
         &mut self,
         handle: CellSurfaceHandle,
@@ -202,6 +224,7 @@ impl FrameBuilder {
         Ok(())
     }
 
+    /// Replaces a cell surface's image.
     pub fn replace_cells(
         &mut self,
         handle: CellSurfaceHandle,
@@ -215,6 +238,7 @@ impl FrameBuilder {
         Ok(())
     }
 
+    /// Replaces a raster surface's placement.
     pub fn replace_raster(
         &mut self,
         handle: RasterSurfaceHandle,
@@ -228,6 +252,7 @@ impl FrameBuilder {
         Ok(())
     }
 
+    /// Sets or clears a raster surface's clip rectangle.
     pub fn set_raster_clip(
         &mut self,
         handle: RasterSurfaceHandle,
@@ -239,6 +264,7 @@ impl FrameBuilder {
         Ok(())
     }
 
+    /// Moves a surface to a new position.
     pub fn place(
         &mut self,
         handle: impl Into<SurfaceHandle>,
@@ -250,6 +276,7 @@ impl FrameBuilder {
         Ok(())
     }
 
+    /// Sets a surface's stacking level.
     pub fn set_level(
         &mut self,
         handle: impl Into<SurfaceHandle>,
@@ -261,6 +288,7 @@ impl FrameBuilder {
         Ok(())
     }
 
+    /// Sets a surface's order within its level.
     pub fn set_order(
         &mut self,
         handle: impl Into<SurfaceHandle>,
@@ -272,8 +300,8 @@ impl FrameBuilder {
         Ok(())
     }
 
-    // Remove is idempotent-safe within the batch: a second removal is rejected
-    // instead of emitting a use-after-remove operation.
+    /// Removes a surface; a second removal in the same batch is rejected as
+    /// [`BuildError::Removed`] instead of emitting a use-after-remove operation.
     pub fn remove(&mut self, handle: impl Into<SurfaceHandle>) -> Result<(), BuildError> {
         let id = handle.into().id();
         match self.tracked.get_mut(&id) {
@@ -293,6 +321,7 @@ impl FrameBuilder {
         }
     }
 
+    /// Consumes the builder and returns the assembled frame.
     pub fn finish(self) -> Frame {
         let mut frame = Frame::new(self.operations);
         if let Some(viewport) = self.viewport {

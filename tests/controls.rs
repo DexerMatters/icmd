@@ -12,8 +12,8 @@ use crossterm::event::{
 };
 use icmd::advanced::{Commit, Lower, Renderer, Runtime};
 use icmd::{
-    Attr, ButtonProps, CheckboxProps, Component, EventListener, Node, RadioProps, Size,
-    SwitchProps, button, checkbox, radio, switch,
+    Attr, ButtonProps, CheckboxProps, Component, EventListener, LinkProps, Node, RadioProps, Size,
+    SwitchProps, button, checkbox, link, radio, switch,
 };
 
 fn pipeline(
@@ -137,6 +137,71 @@ fn disabled_button_suppresses_activation_and_focus() {
     assert!(
         harness.dispatcher.focused().is_none(),
         "a disabled control must not take focus"
+    );
+}
+
+#[test]
+fn link_reports_its_target_once_per_activation() {
+    let followed = Arc::new(Mutex::new(Vec::new()));
+    let seen = followed.clone();
+    let harness = Harness::mount(
+        link.props(LinkProps {
+            href: Attr::Set("https://example.com/icmd".into()),
+            label: Attr::Set("docs".into()),
+            on_follow: Attr::Set(EventListener::new(move |target: String| {
+                seen.lock().unwrap().push(target);
+            })),
+            ..LinkProps::default()
+        })
+        .node(),
+    );
+
+    // Pointer: one follow request per press, carrying the target itself rather
+    // than an empty activation.
+    click(&harness.dispatcher, 1, 0);
+    assert_eq!(
+        &*followed.lock().unwrap(),
+        &["https://example.com/icmd".to_string()],
+        "one click is one follow request carrying the href"
+    );
+
+    // Keyboard: focus by click, then Enter follows the same target again.
+    harness.settle();
+    key(&harness.dispatcher, KeyCode::Enter);
+    assert_eq!(
+        followed.lock().unwrap().len(),
+        2,
+        "Enter follows the focused link"
+    );
+}
+
+#[test]
+fn disabled_link_neither_follows_nor_takes_focus() {
+    let followed = Arc::new(AtomicUsize::new(0));
+    let seen = followed.clone();
+    let harness = Harness::mount(
+        link.props(LinkProps {
+            href: Attr::Set("https://example.com/icmd".into()),
+            label: Attr::Set("docs".into()),
+            disabled: Attr::Set(true),
+            on_follow: Attr::Set(EventListener::new(move |_target: String| {
+                seen.fetch_add(1, Ordering::SeqCst);
+            })),
+            ..LinkProps::default()
+        })
+        .node(),
+    );
+
+    click(&harness.dispatcher, 1, 0);
+    key(&harness.dispatcher, KeyCode::Enter);
+    assert_eq!(
+        followed.load(Ordering::SeqCst),
+        0,
+        "a disabled link must not follow"
+    );
+    assert!(
+        harness.dispatcher.focused().is_none(),
+        "a disabled link must not take focus"
     );
 }
 
@@ -287,10 +352,11 @@ fn every_interactive_control_passes_the_shared_suite() {
         Checkbox,
         Switch,
         Radio,
+        Link,
     }
 
-    // Each control reaches activation through its own prop, but all four accept
-    // keyboard activation and all four must refuse it when disabled.
+    // Each control reaches activation through its own prop, but all of them
+    // accept keyboard activation and must refuse it when disabled.
     fn build(control: Control, disabled: bool, fired: Arc<AtomicUsize>) -> Node {
         match control {
             Control::Button => button
@@ -332,6 +398,17 @@ fn every_interactive_control_passes_the_shared_suite() {
                     ..RadioProps::default()
                 })
                 .node(),
+            Control::Link => link
+                .props(LinkProps {
+                    href: Attr::Set("https://example.com/icmd".into()),
+                    label: Attr::Set("example".into()),
+                    disabled: Attr::Set(disabled),
+                    on_follow: Attr::Set(EventListener::new(move |_target: String| {
+                        fired.fetch_add(1, Ordering::SeqCst);
+                    })),
+                    ..LinkProps::default()
+                })
+                .node(),
         }
     }
 
@@ -340,12 +417,14 @@ fn every_interactive_control_passes_the_shared_suite() {
         Control::Checkbox,
         Control::Switch,
         Control::Radio,
+        Control::Link,
     ] {
         let name = match control {
             Control::Button => "button",
             Control::Checkbox => "checkbox",
             Control::Switch => "switch",
             Control::Radio => "radio",
+            Control::Link => "link",
         };
 
         // Activation: focusing the control and pressing Space or Enter fires it.

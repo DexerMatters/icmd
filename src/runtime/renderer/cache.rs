@@ -1,10 +1,14 @@
-// Raster transform cache, symbol preparation, and byte accounting. The
-// renderer's terminal output does not depend on this module.
+//! Raster transform cache, symbol preparation, and byte accounting. The
+//! renderer's terminal output does not depend on this module.
 #![allow(unused_imports)]
 
 use super::*;
 
 impl Renderer {
+    /// Returns the transform key for `raster`, reusing a cached entry or
+    /// rendering and caching a fresh RGBA buffer with its per-cell alpha mask.
+    /// A transform that cannot fit the configured budget is refused here,
+    /// before its pixel buffer is reserved.
     pub(in crate::runtime) fn prepare_raster(
         &mut self,
         raster: &RasterPlacement,
@@ -16,8 +20,6 @@ impl Renderer {
             return Some(key);
         }
         let source = self.source_image(&raster.source)?;
-        // A transform that cannot fit the configured budget is refused here,
-        // before its pixel buffer is reserved.
         let pixels = render_rgba_with_cell_size(
             &source,
             raster.full_width,
@@ -60,6 +62,9 @@ impl Renderer {
         Some(key)
     }
 
+    /// Rasterizes the cached transform of `key` into a symbol image `width` by
+    /// `height` cells and charges 48 bytes per cell against the cache; a no-op
+    /// when the transform is absent or already has symbols.
     pub(in crate::runtime) fn prepare_symbols(
         &mut self,
         key: TransformKey,
@@ -90,6 +95,8 @@ impl Renderer {
         }
     }
 
+    /// Re-probes the terminal cell size when detection is enabled, forcing a
+    /// full redraw if it changed.
     pub(in crate::runtime) fn refresh_cell_pixels(&mut self) {
         if !self.detect_cell_pixels {
             return;
@@ -103,10 +110,12 @@ impl Renderer {
         }
     }
 
+    /// Evicts entries until the cache total plus `incoming` fits
+    /// `native_cache_limit`: encoded native payloads first, then unpinned
+    /// prepared transforms, then inactive decoded sources. Transforms of the
+    /// current scene are pinned, so a cache limit never thrashes the active
+    /// frame.
     pub(in crate::runtime) fn evict_cache(&mut self, incoming: usize) {
-        // Encoded protocol payloads are cheapest to regenerate, so discard
-        // them before transformed RGBA data. Current transforms are pinned:
-        // a cache limit never causes the active scene to thrash itself.
         while self.cache_bytes().saturating_add(incoming) > self.native_cache_limit {
             let Some(key) = self
                 .native_cache
@@ -161,6 +170,8 @@ impl Renderer {
         }
     }
 
+    /// Total cache bytes: decoded sources plus prepared rasters and native
+    /// payloads.
     pub(in crate::runtime) fn cache_bytes(&self) -> usize {
         self.image_manager
             .source_cache_bytes()
@@ -168,7 +179,9 @@ impl Renderer {
             .saturating_add(self.native_cache_bytes)
     }
 
-    #[allow(dead_code)] // Kept beside the cache it mutates; called by eviction paths.
+    /// Removes one native payload and subtracts its bytes; kept beside the cache
+    /// it mutates and called by eviction paths.
+    #[allow(dead_code)]
     fn remove_native_cache(&mut self, key: NativeKey) {
         if let Some(value) = self.native_cache.remove(&key) {
             self.native_cache_bytes = self.native_cache_bytes.saturating_sub(value.value.len());

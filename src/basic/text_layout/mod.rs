@@ -1,3 +1,7 @@
+//! Shaping and layout of a text value: wraps it into painted rows and builds the
+//! caret-boundary and hit-testing tables every consumer (painting, navigation,
+//! and selection) reads.
+
 use std::ops::Range;
 
 use textwrap::core::Fragment;
@@ -10,26 +14,40 @@ use crate::{EmojiMerging, MAX_GLYPH_BYTES};
 use super::props::TextStyle;
 use super::text::{Text, TextWrap};
 
+/// Cells a tab advances to the next multiple of, measured from the logical line
+/// column so the width is independent of where a soft wrap put it.
 pub const TAB_WIDTH: usize = 4;
 
+/// Which side of a cell a hit test resolves a caret to when the cell holds a
+/// wide grapheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HitBias {
+    /// Resolve to the boundary at the cell's leading edge.
     #[default]
     Leading,
+    /// Resolve to the boundary at the cell's trailing edge.
     Trailing,
 }
 
+/// What one shaped glyph contributes to a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemKind {
+    /// A painted grapheme.
     Glyph,
+    /// A soft-wrap space that owns source bytes but paints no cells.
     Separator,
+    /// An explicit line break that owns no item.
     Newline,
 }
 
+/// Resolved foreground, background, and attributes for a glyph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComputedText {
+    /// The glyph colour.
     pub foreground: crossterm::style::Color,
+    /// The glyph background, or `None` for the terminal default.
     pub background: Option<crossterm::style::Color>,
+    /// The glyph's text attributes.
     pub attributes: crossterm::style::Attributes,
 }
 
@@ -43,67 +61,87 @@ impl Default for ComputedText {
     }
 }
 
+/// One materialized item of a laid-out row.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // `text`/`cell`/`row` are the layout's public geometry surface.
+#[allow(dead_code)]
 pub struct Item {
+    /// Byte range in the source text that this item covers.
     pub source: Range<usize>,
-    // Byte range into the layout's normalized text. The glyph's rendered symbol
-    // is resolved from here rather than stored per item, which removed a heap
-    // allocation and a copy per glyph.
+    /// Byte range into the layout's normalized text, from which the glyph's
+    /// rendered symbol is resolved rather than stored per item.
     pub text: Range<usize>,
+    /// Row-relative starting cell.
     pub cell: usize,
+    /// Width in cells.
     pub width: usize,
+    /// What the item contributes to the row.
     pub kind: ItemKind,
+    /// Index of the owning row.
     pub row: usize,
+    /// Resolved style for the item.
     pub style: ComputedText,
 }
 
 impl Item {
-    // The symbol this item paints within `text`. Empty for a separator, which
-    // occupies cells but is deliberately not drawn.
+    /// The symbol this item paints within `text`. Empty for a separator, which
+    /// occupies cells but is deliberately not drawn.
     pub fn symbol<'a>(&self, text: &'a str) -> &'a str {
         text.get(self.text.clone()).unwrap_or("")
     }
 
+    /// Whether the item resolves to an empty symbol.
     pub fn is_empty_symbol(&self, text: &str) -> bool {
         self.symbol(text).is_empty()
     }
 
-    #[allow(dead_code)] // Used by the rasterization paths and their tests.
+    /// Whether the item's symbol is a tab character.
+    #[allow(dead_code)]
     pub fn is_tab(&self, text: &str) -> bool {
         self.symbol(text) == "\t"
     }
 }
 
+/// One visual row of the layout.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Row {
+    /// Index of the row's first item.
     pub first_item: usize,
+    /// Number of items in the row.
     pub len: usize,
+    /// First source byte the row paints.
     pub source_start: usize,
+    /// First source byte after the row.
     pub source_end: usize,
 }
 
+/// One shaped glyph before it is packed into a row.
 #[derive(Debug, Clone)]
 pub struct ShapedGlyph<S> {
+    /// Byte range in the source text.
     pub source: Range<usize>,
-    // Byte range into the shared normalized text built during shaping. Glyphs
-    // refer to ranges instead of owning a `String`, so shaping performs one
-    // backing allocation rather than one per glyph.
+    /// Byte range into the shared normalized text built during shaping; glyphs
+    /// refer to ranges instead of owning a `String`, so shaping performs one
+    /// backing allocation rather than one per glyph.
     pub text: Range<usize>,
+    /// Width in cells.
     pub width: usize,
+    /// What the glyph contributes.
     pub kind: ItemKind,
+    /// Style produced by the merge callback.
     pub style: S,
 }
 
+/// A shaped value laid out into painted rows, with the caret and hit-testing
+/// tables built once at construction.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // Operations are the API; storage stays private.
+#[allow(dead_code)]
 pub struct TextLayout {
     text: String,
     items: Vec<Item>,
     rows: Vec<Row>,
     boundaries: Vec<usize>,
-    // Row source ranges are non-decreasing, so a row lookup is a binary search
-    // rather than a scan. Cached with each row's painted and maximum width.
+    /// Row source ranges are non-decreasing, so a row lookup is a binary search
+    /// rather than a scan; cached with each row's painted and maximum width.
     row_source_ends: Vec<usize>,
     row_widths: Vec<usize>,
     max_row_width: usize,
@@ -111,6 +149,8 @@ pub struct TextLayout {
     source_len: usize,
 }
 
+/// Shape `text` and lay it out at `width` cells, resolving each glyph's style
+/// through `merge` and then `into_computed`.
 pub fn layout_text<S>(
     text: &Text,
     width: usize,
@@ -133,6 +173,11 @@ where
 }
 
 impl TextLayout {
+    /// Pack shaped glyphs into wrapped rows and build the caret and hit-testing
+    /// tables. `width` is clamped to at least 1; `wrap` chooses the wrapping
+    /// rule. Tabs advance from the logical line column, empty logical lines stay
+    /// as empty rows, explicit newlines own no item, and a source position past
+    /// the last shaped glyph falls back to the end of the value.
     pub fn layout<S>(
         text: String,
         shaped: Vec<ShapedGlyph<S>>,
@@ -146,8 +191,6 @@ impl TextLayout {
         let width = width.max(1);
         let source_len = shaped.last().map_or(0, |glyph| glyph.source.end);
 
-        // A tab advances to the next tab stop from the *logical* line column,
-        // so its width is independent of where a soft wrap put it.
         let mut widths = Vec::with_capacity(shaped.len());
         let mut column = 0usize;
         for glyph in &shaped {
@@ -165,8 +208,6 @@ impl TextLayout {
             column = column.saturating_add(width);
         }
 
-        // Split the shaped sequence into logical lines, then wrap each line
-        // independently. Empty logical lines stay as empty rows.
         let mut logical_lines: Vec<Range<usize>> = Vec::new();
         let mut line_start = 0usize;
         for (index, glyph) in shaped.iter().enumerate() {
@@ -177,17 +218,12 @@ impl TextLayout {
         }
         logical_lines.push(line_start..shaped.len());
 
-        // Wrap each logical line into one or more ordered visual rows, keeping
-        // each row's packing pieces so dropped separators can be identified.
-        // Whitespace is dropped only on a non-final row of its logical line.
         struct Placed {
             range: Range<usize>,
             source_start: usize,
             pieces: Vec<Piece>,
             is_last_row: bool,
         }
-        // The source start of a shaped index; the end of the value past the
-        // last shaped glyph.
         let source_at = |index: usize| {
             shaped
                 .get(index)
@@ -195,9 +231,6 @@ impl TextLayout {
         };
         let mut placed: Vec<Placed> = Vec::new();
         for logical in &logical_lines {
-            // A logical line with no glyphs (only its terminating newline, or a
-            // trailing empty line) is a real but empty row. Its single
-            // navigable position is where its content would begin.
             if logical.start >= logical.end
                 || shaped[logical.start..logical.end]
                     .iter()
@@ -234,10 +267,6 @@ impl TextLayout {
             }
         }
 
-        // Materialize items in visual order with row and row-relative cells.
-        // Explicit newlines are not items: a row's source range ends at the
-        // newline that terminates it, and the next row starts after it, which
-        // is exactly how navigation and selection treat line breaks.
         let mut items = Vec::with_capacity(shaped.len());
         let mut rows = Vec::with_capacity(placed.len());
         for (row_index, entry) in placed.iter().enumerate() {
@@ -274,8 +303,6 @@ impl TextLayout {
                 first_item,
                 len: items.len() - first_item,
                 source_start: entry.source_start,
-                // The final row owns everything through the end of the value,
-                // including a trailing newline the value ends with.
                 source_end: source_end.max(entry.source_start),
             });
         }
@@ -289,9 +316,6 @@ impl TextLayout {
             .max()
             .unwrap_or(0);
 
-        // Every grapheme edge, every explicit-newline edge, and the value ends
-        // are valid boundaries. Newlines own no items, so they are collected
-        // separately from the shaped table.
         let mut boundaries = Vec::with_capacity(items.len() * 2 + 4);
         boundaries.push(0usize);
         for glyph in &shaped {
@@ -302,8 +326,6 @@ impl TextLayout {
         boundaries.sort_unstable();
         boundaries.dedup();
 
-        // One traversal builds both row indexes, and the row widths are
-        // computed once here instead of being rescanned per query.
         let mut row_source_ends = Vec::with_capacity(rows.len());
         let mut row_widths = Vec::with_capacity(rows.len());
         let mut max_row_width = 0usize;
@@ -330,42 +352,50 @@ impl TextLayout {
         }
     }
 
-    #[allow(dead_code)] // Exercised only by the crate's own layout tests.
+    /// Number of visual rows.
+    #[allow(dead_code)]
     pub fn row_count(&self) -> usize {
         self.rows.len()
     }
 
+    /// Painted width of the widest row in cells.
     pub fn width(&self) -> usize {
         self.width
     }
 
-    #[allow(dead_code)] // Exercised only by the crate's own layout tests.
+    /// Length of the source text in bytes.
+    #[allow(dead_code)]
     pub fn source_len(&self) -> usize {
         self.source_len
     }
 
+    /// The normalized text every item's `text` range indexes.
     #[allow(dead_code)]
     pub fn text(&self) -> &str {
         &self.text
     }
 
-    #[allow(dead_code)] // Exercised only by the crate's own layout tests.
+    /// All items in visual order.
+    #[allow(dead_code)]
     pub fn items(&self) -> &[Item] {
         &self.items
     }
 
+    /// The items of one row, or an empty slice when the index is out of range.
     pub fn row_items(&self, index: usize) -> &[Item] {
         self.rows.get(index).map_or(&[], |row| {
             &self.items[row.first_item..row.first_item + row.len]
         })
     }
 
+    /// First source byte the row paints.
     pub fn row_start(&self, index: usize) -> usize {
         self.rows
             .get(index)
             .map_or(self.source_len, |row| row.source_start)
     }
 
+    /// First source byte after the row's last non-empty glyph.
     #[allow(dead_code)]
     pub fn row_end(&self, index: usize) -> usize {
         self.row_items(index)
@@ -374,36 +404,49 @@ impl TextLayout {
             .map_or_else(|| self.row_start(index), |item| item.source.end)
     }
 
-    #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
+    /// First source byte after the row.
+    #[allow(dead_code)]
     pub fn row_source_end(&self, index: usize) -> usize {
         self.rows
             .get(index)
             .map_or(self.source_len, |row| row.source_end)
     }
 
-    // A separator is deliberately not painted, so it contributes no cells even
-    // though it owns source bytes. The width is cached at construction.
+    /// Every valid caret boundary, in ascending order. The selection engine
+    /// builds its document-wide table from these, so the editor and a selectable
+    /// region share exactly one definition of where a caret may sit.
+    pub(crate) fn boundaries(&self) -> &[usize] {
+        &self.boundaries
+    }
+
+    /// Painted cell width of one row, separators excluded. A separator is
+    /// deliberately not painted, so it contributes no cells even though it owns
+    /// source bytes; the width is cached at construction.
     pub fn row_width(&self, index: usize) -> usize {
         self.row_widths.get(index).copied().unwrap_or(0)
     }
 
+    /// Widest painted row in cells.
     pub fn max_row_width(&self) -> usize {
         self.max_row_width
     }
 
+    /// Index of the row owning a source byte; a position past the end is the
+    /// last row.
     pub fn row_of_source(&self, source: usize) -> usize {
         if self.rows.is_empty() {
             return 0;
         }
         let source = source.min(self.source_len);
-        // `partition_point` finds the first row whose source range ends after
-        // the offset: O(log rows) instead of a linear scan per query.
         match self.row_source_ends.partition_point(|end| *end <= source) {
             index if index < self.rows.len() => index,
             _ => self.rows.len() - 1,
         }
     }
 
+    /// Snap an arbitrary source offset to the nearest caret boundary, preferring
+    /// the nearer boundary; ties resolve forward so repeated stepping always
+    /// advances.
     pub fn clamp(&self, source: usize) -> usize {
         if self.boundaries.is_empty() {
             return 0;
@@ -420,8 +463,6 @@ impl TextLayout {
                 }
                 let before = self.boundaries[at - 1];
                 let after = self.boundaries[at];
-                // Prefer the nearer boundary; ties resolve forward so repeated
-                // stepping always advances.
                 if source - before < after - source {
                     before
                 } else {
@@ -431,7 +472,8 @@ impl TextLayout {
         }
     }
 
-    #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
+    /// The caret boundary before `source`, or 0 at the start.
+    #[allow(dead_code)]
     pub fn previous_boundary(&self, source: usize) -> usize {
         let source = self.clamp(source);
         match self.boundaries.binary_search(&source) {
@@ -442,10 +484,10 @@ impl TextLayout {
         }
     }
 
-    #[allow(dead_code)] // Part of the layout's operation surface; exercised by tests.
+    /// The caret boundary after `source`, or the clamped position at the end.
+    #[allow(dead_code)]
     pub fn next_boundary(&self, source: usize) -> usize {
         let clamped = self.clamp(source);
-        // A position that clamped forward is already the next boundary.
         if clamped > source {
             return clamped;
         }
@@ -455,13 +497,15 @@ impl TextLayout {
         }
     }
 
+    /// The `(row, cell, width)` caret for a source offset, where `width` is the
+    /// painted width of the glyph at the caret. A position in a dropped
+    /// separator or on an explicit newline belongs to the row that owns those
+    /// bytes, not the next row.
     pub fn caret(&self, source: usize) -> (usize, usize, usize) {
         if self.rows.is_empty() {
             return (0, 0, 1);
         }
         let source = self.clamp(source);
-        // A source position that falls in a dropped separator or on an explicit
-        // newline belongs to the row that owns those bytes, not the next row.
         let row = self.row_of_source(source);
         let mut cell = 0usize;
         let mut separator_cell = None;
@@ -473,13 +517,9 @@ impl TextLayout {
                 separator_cell.get_or_insert(cell);
             }
             if source <= item.source.start {
-                // The caret sits before this item. For a wide grapheme with the
-                // caret at its left edge the offset is correct as-is.
                 return (row, cell, item.width.max(1));
             }
             if source < item.source.end {
-                // Inside a grapheme (already snapped by `clamp`); place the
-                // caret after it.
                 return (row, cell.saturating_add(item.width), 1);
             }
             cell = cell.saturating_add(item.width);
@@ -492,13 +532,13 @@ impl TextLayout {
         (row, cell, 1)
     }
 
+    /// Resolve a cell in a row to a source offset. `bias` picks the side of a
+    /// wide grapheme, and the result never leaves the hit row, so a boundary
+    /// shared with the previous row cannot place a caret on the wrong line.
     pub fn hit(&self, row: usize, cell: usize, bias: HitBias) -> usize {
         let row = row.min(self.rows.len().saturating_sub(1));
         let mut offset = 0usize;
         for item in self.row_items(row) {
-            // Never resolve outside the row that was hit: a boundary shared with
-            // the previous row (the leading edge of this row's first grapheme)
-            // would otherwise place a caret on the wrong visual line.
             let clamp_to_row =
                 |offset: usize| offset.clamp(self.row_start(row), self.row_last_boundary(row));
             if item.kind == ItemKind::Newline {
@@ -526,23 +566,25 @@ impl TextLayout {
             }
             offset = end;
         }
-        // Past the painted content: the caret belongs after this row's last
-        // glyph, not at the next row's first boundary.
         self.row_last_boundary(row)
     }
 
-    fn row_last_boundary(&self, row: usize) -> usize {
+    /// Source offset at the end of the row's last item.
+    pub(crate) fn row_last_boundary(&self, row: usize) -> usize {
         self.row_items(row)
             .last()
             .map_or_else(|| self.row_start(row), |item| item.source.end)
     }
 
+    /// Painted cell of a source offset.
     #[allow(dead_code)]
     pub fn column(&self, source: usize) -> usize {
         let (_, cell, _) = self.caret(source);
         cell
     }
 
+    /// Step one row in `direction` (`-1` up, `1` down), holding `preferred` cell
+    /// when given, and return the new source offset plus the preferred cell.
     #[allow(dead_code)]
     pub fn vertical(
         &self,
@@ -561,6 +603,8 @@ impl TextLayout {
     }
 }
 
+/// Pack the glyphs of one logical line into pieces, using the explicit newline
+/// as a hard break and applying the wrap rule to the content before it.
 fn line_pieces<S>(
     normalized: &str,
     shaped: &[ShapedGlyph<S>],
@@ -571,7 +615,6 @@ fn line_pieces<S>(
     width: usize,
 ) -> Vec<Piece> {
     let last = first + len;
-    // An explicit newline is not wrapped; it terminates the logical line.
     let content_last = (first..last)
         .find(|index| shaped[*index].kind == ItemKind::Newline)
         .unwrap_or(last);
@@ -589,11 +632,7 @@ fn line_pieces<S>(
         return hard_pieces(widths, first, last);
     }
     let mut pieces = soft_pieces(normalized, shaped, widths, first, content_last, width);
-    // The explicit newline that terminated the line always belongs to the final
-    // row and is never dropped as a separator.
     if content_last < last {
-        // Whitespace immediately before an explicit newline is ordinary
-        // content: that break is hard, not soft, so nothing is dropped for it.
         if let Some(last_piece) = pieces.last_mut() {
             last_piece.content_end = last_piece.end;
             last_piece.content_width = last_piece.width;
@@ -610,6 +649,7 @@ fn line_pieces<S>(
     pieces
 }
 
+/// One piece per glyph, the hard-wrap rule.
 fn hard_pieces(widths: &[usize], first: usize, last: usize) -> Vec<Piece> {
     (first..last)
         .map(|index| Piece {
@@ -622,25 +662,21 @@ fn hard_pieces(widths: &[usize], first: usize, last: usize) -> Vec<Piece> {
         .collect()
 }
 
+/// Whether a glyph is trailing whitespace dropped by a soft wrap: the last piece
+/// packed onto its row, on a row that is not the logical line's last.
 fn item_is_dropped_separator(pieces: &[Piece], index: usize, is_last_row: bool) -> bool {
     if is_last_row {
-        // The last row of a logical line paints its trailing whitespace.
         return false;
     }
     let position = pieces.partition_point(|piece| piece.start <= index);
     let Some(piece) = position.checked_sub(1).and_then(|at| pieces.get(at)) else {
         return false;
     };
-    // `pieces` holds only the pieces packed onto THIS row. Whitespace is
-    // dropped only when its piece is the row's LAST piece: that whitespace is
-    // what pushed the following piece onto a later row. Whitespace inside the
-    // row - a piece that is followed by another piece on the same row - is
-    // ordinary painted content, and dropping it would shift every later
-    // grapheme out of agreement with the caret and hit-testing tables.
     let is_last_piece = position >= pieces.len();
     is_last_piece && index >= piece.content_end
 }
 
+/// Painted cells of a row, counting glyph items only.
 fn row_cells(items: &[Item], row: &Row) -> usize {
     items[row.first_item..row.first_item + row.len]
         .iter()
@@ -648,6 +684,8 @@ fn row_cells(items: &[Item], row: &Row) -> usize {
         .fold(0usize, |sum, item| sum.saturating_add(item.width))
 }
 
+/// One packing piece of a logical line, with its trailing whitespace separated
+/// from its content so the wrapper can drop it at a soft break.
 #[derive(Debug, Clone, Copy)]
 struct Piece {
     start: usize,
@@ -671,6 +709,9 @@ impl Fragment for Piece {
     }
 }
 
+/// Split the content before an explicit newline into word pieces, preserving
+/// trailing whitespace on the logical line and breaking an oversized word
+/// between glyphs.
 fn soft_pieces<S>(
     normalized: &str,
     shaped: &[ShapedGlyph<S>],
@@ -734,7 +775,6 @@ fn soft_pieces<S>(
         });
     }
 
-    // Trailing whitespace on the logical line is content, not a separator.
     let last_symbol = &normalized[shaped[content_last - 1].text.clone()];
     let preserve_trailing = last_symbol.chars().all(char::is_whitespace) && !last_symbol.is_empty();
     if preserve_trailing && let Some(last) = pieces.last_mut() {
@@ -777,37 +817,46 @@ fn soft_pieces<S>(
     split
 }
 
+/// Sum of the glyph widths in `start..end`, ignoring out-of-range indexes.
 fn sum_widths(widths: &[usize], start: usize, end: usize) -> usize {
     widths[start.min(widths.len())..end.min(widths.len())]
         .iter()
         .fold(0usize, |sum, width| sum.saturating_add(*width))
 }
 
+/// Test-only handle exposing private layout accessors.
 #[doc(hidden)]
 pub struct TextLayoutForTest(pub TextLayout);
 
 impl TextLayoutForTest {
+    /// Number of visual rows.
     pub fn row_count(&self) -> usize {
         self.0.rows.len()
     }
 
+    /// Index of the row owning a source byte.
     pub fn row_of_source(&self, source: usize) -> usize {
         self.0.row_of_source(source)
     }
 
+    /// First source byte after the row.
     pub fn row_source_end(&self, index: usize) -> usize {
         self.0.row_source_end(index)
     }
 
+    /// Painted cell width of one row, separators excluded.
     pub fn row_width(&self, index: usize) -> usize {
         self.0.row_width(index)
     }
 
+    /// Widest painted row in cells.
     pub fn max_row_width(&self) -> usize {
         self.0.max_row_width()
     }
 }
 
+/// Build a layout for tests at `width` cells, splitting emoji rather than
+/// merging them.
 #[doc(hidden)]
 pub fn indexed_layout_for_test(text: &str, width: usize) -> TextLayoutForTest {
     let node = crate::Text::new(text);

@@ -1,10 +1,12 @@
-// Damage normalization, layer ordering, and the composition pass that
-// turns retained surfaces into the desired cell frame.
+//! Damage normalization, layer ordering, and the composition pass that turns
+//! retained surfaces into the desired cell frame.
 #![allow(unused_imports)]
 
 use super::*;
 
 impl Renderer {
+    /// Rebuilds the bottom-to-top layer order when the image set changed,
+    /// sorting by `(level, order, mutation, id)`.
     pub(super) fn rebuild_layers(&mut self) {
         if !self.layers_dirty && self.layers.len() == self.images.len() {
             return;
@@ -18,6 +20,9 @@ impl Renderer {
         self.layers_dirty = false;
     }
 
+    /// Rebuilds `damage_rows` from the accumulated damage and marks the dirty
+    /// bitmap. Each rectangle is expanded by two cells and clamped to the
+    /// viewport, row spans are merged, and `full` covers every cell.
     pub(super) fn normalize_damage(&mut self, full: bool) {
         let width = usize::from(self.viewport.width);
         let height = usize::from(self.viewport.height);
@@ -75,7 +80,7 @@ impl Renderer {
         self.dirty_marks = marks;
     }
 
-    // Clear exactly the cells marked dirty for the previous attempt.
+    /// Clears exactly the cells marked dirty for the previous attempt.
     pub(super) fn clear_dirty_marks(&mut self) {
         if self.dirty_marks.is_empty() {
             return;
@@ -93,9 +98,9 @@ impl Renderer {
         self.dirty_marks.clear();
     }
 
-    // Copy the presented frame into the scratch buffer for every row this frame
-    // will read. Rows outside the damage are never inspected, so leaving them
-    // stale is free.
+    /// Copies every row this frame will read from the presented frame into the
+    /// scratch buffer; rows outside the damage are never inspected, so leaving
+    /// them stale is free.
     pub(super) fn refresh_desired_rows(&self, desired: &mut [CellSlot]) {
         let width = usize::from(self.viewport.width);
         for (line, spans) in self.damage_rows.iter().enumerate() {
@@ -110,7 +115,7 @@ impl Renderer {
         }
     }
 
-    // Apply only the rows that changed to the presented frame.
+    /// Writes only the rows that changed back into the presented frame.
     pub(super) fn apply_desired_rows(&mut self, desired: &[CellSlot]) {
         let width = usize::from(self.viewport.width);
         for (line, spans) in self.damage_rows.iter().enumerate() {
@@ -125,6 +130,11 @@ impl Renderer {
         }
     }
 
+    /// Clears damaged cells to blanks, then assigns layers bottom-to-top so the
+    /// highest-ranked surface owns each cell, and repairs wide-glyph lead and
+    /// continuation pairs that a layer boundary split. The layer order is moved
+    /// out for the pass and restored before returning, avoiding a per-frame
+    /// clone.
     pub(super) fn compose_damage(&mut self, desired: &mut [CellSlot]) {
         self.rebuild_layers();
         let width = usize::from(self.viewport.width);
@@ -137,14 +147,6 @@ impl Renderer {
             }
         }
 
-        // Split immutable scene/cache access from mutable scratch access. The
-        // composition pass is deliberately bottom-to-top, so an assignment is
-        // the exact deterministic equivalent of selecting the highest rank at
-        // every cell.
-        // The layer order is moved out for the duration of the pass instead of
-        // cloned: iteration only needs to read it, and it is restored before
-        // returning. This removes a per-frame allocation of the whole layer
-        // list for scenes with many images.
         let layers = std::mem::take(&mut self.layers);
         let symbols_for_native = self.symbols_for_native;
         let protocol = self.protocol;
@@ -269,7 +271,6 @@ impl Renderer {
             }
         }
 
-        // Restore the layer order that was moved out for the pass.
         self.layers = layers;
     }
 }

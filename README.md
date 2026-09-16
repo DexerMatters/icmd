@@ -9,6 +9,10 @@ Highlights:
 - Transactional frame validation: invalid batches are rejected before any renderer mutation.
 - Enforceable resource budgets for trees, images, caches, and emitted output.
 - Joinable, named pipeline workers with typed stage errors and acknowledged shutdown.
+- Ordered application lifecycle phases (`boot`, `mount`, `ready`, `unmount`, `exit`)
+  plus component mount/unmount effects, so startup and exit cleanup are explicit.
+- `cx.use_handle()` gives an event handler a cloneable session handle, so a button
+  press can request a graceful exit instead of stranding the terminal.
 - Optional native raster rendering behind the `native-raster` feature; the default
   pure-Rust build needs no native toolchain.
 

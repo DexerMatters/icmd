@@ -1,3 +1,8 @@
+//! Raster image decoding, cache identity, and cell rendering.
+//!
+//! Owns [`RasterImage`] and its limit-aware loaders, [`RasterPlacement`] and the
+//! render options, and the symbol engine that lowers pixels to cells.
+
 use std::{
     error::Error,
     fmt, fs,
@@ -16,30 +21,43 @@ use crate::{Cell, Image, Size};
 
 static NEXT_RASTER_ID: AtomicU64 = AtomicU64::new(1);
 
-// Errors carry their originating source, so they are compared by shape rather
-// than by `PartialEq`: two distinct I/O failures are not the same failure.
+/// Why a raster image could not be created or loaded.
+///
+/// Errors carry their originating source, so they are compared by shape rather
+/// than by `PartialEq`: two distinct I/O failures are not the same failure.
 #[derive(Debug, Clone)]
 pub enum RasterImageError {
+    /// A requested dimension was zero.
     Empty,
+    /// The RGBA8 buffer length did not match the dimensions.
     InvalidLength {
+        /// Required buffer length in bytes.
         expected: usize,
+        /// Supplied buffer length in bytes.
         actual: usize,
     },
+    /// The dimensions overflowed the supported range.
     DimensionsTooLarge {
+        /// Requested width in pixels.
         width: u32,
+        /// Requested height in pixels.
         height: u32,
     },
-    // Sources are preserved rather than flattened into strings so callers can
-    // inspect the underlying I/O or decode failure.
+    /// The encoded bytes could not be decoded.
     Decode {
+        /// Underlying decoder failure, preserved for inspection.
         source: Arc<::image::ImageError>,
     },
+    /// The file could not be read.
     Io {
+        /// Path that was being read.
         path: PathBuf,
+        /// Underlying I/O failure, preserved for inspection.
         source: Arc<std::io::Error>,
     },
-    // A configured resource ceiling rejected the work before allocating.
+    /// A configured resource ceiling rejected the work before allocating.
     Limit(LimitError),
+    /// The native symbol engine could not create an image canvas.
     ChafaUnavailable,
 }
 
@@ -97,8 +115,8 @@ impl Error for RasterImageError {
     }
 }
 
-// Configure the decoder from framework policy and enforce the dimension and
-// decoded-byte ceilings from the actual header before the pixel buffer exists.
+/// Decodes a reader under framework policy, enforcing the dimension and
+/// decoded-byte ceilings from the header before the pixel buffer exists.
 fn decode_reader<R: std::io::BufRead + std::io::Seek>(
     mut reader: ::image::ImageReader<R>,
     limits: &ResourceLimits,
@@ -121,6 +139,7 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(
     Ok(decoded)
 }
 
+/// An immutable RGBA8 raster image with a unique identity.
 #[derive(Clone)]
 pub struct RasterImage {
     id: u64,
@@ -153,6 +172,8 @@ impl Hash for RasterImage {
 }
 
 impl RasterImage {
+    /// Creates an image from a row-major RGBA8 buffer, whose length must be
+    /// exactly `width * height * 4` bytes.
     pub fn from_rgba8(
         width: u32,
         height: u32,
@@ -181,13 +202,16 @@ impl RasterImage {
         })
     }
 
+    /// Decodes encoded image bytes under the default resource limits.
     pub fn decode(bytes: impl AsRef<[u8]>) -> Result<Self, RasterImageError> {
         Self::decode_with_limits(bytes.as_ref(), &ResourceLimits::default())
     }
 
-    // Decoding a byte slice consults the same header/dimension/byte budgets as
-    // file loading. The reader is configured from the policy rather than the
-    // dependency's defaults, so the framework can state its own upper bound.
+    /// Decodes encoded image bytes under `limits`.
+    ///
+    /// A byte slice consults the same header, dimension, and byte budgets as
+    /// file loading: the reader is configured from the policy rather than the
+    /// dependency's defaults, so the framework states its own upper bound.
     pub fn decode_with_limits(
         bytes: &[u8],
         limits: &ResourceLimits,
@@ -202,21 +226,26 @@ impl RasterImage {
         Self::from_rgba8(decoded.width(), decoded.height(), decoded.into_raw())
     }
 
-    // Opens exactly the path the caller supplied. No lexical normalization is
-    // applied: on a filesystem with symlinks, `link/../target` resolves after
-    // the link is traversed, so folding `..` textually can select a different
-    // file than the kernel would. The original path is preserved in errors.
+    /// Decodes the image file at `path` under the default resource limits.
+    ///
+    /// Opens exactly the path the caller supplied: no lexical normalization is
+    /// applied, because on a filesystem with symlinks `link/../target` resolves
+    /// after the link is traversed, so folding `..` textually can select a
+    /// different file than the kernel would. The original path is preserved in
+    /// errors.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RasterImageError> {
         Self::open_with_limits(path, &ResourceLimits::default())
     }
 
+    /// Decodes the image file at `path` under `limits`.
+    ///
+    /// An oversized encoded file is rejected from its metadata before reading,
+    /// so a huge file never becomes a huge buffer.
     pub fn open_with_limits(
         path: impl AsRef<Path>,
         limits: &ResourceLimits,
     ) -> Result<Self, RasterImageError> {
         let path = path.as_ref();
-        // Reject an oversized encoded file from metadata before reading it, so
-        // a huge file never becomes a huge buffer.
         let metadata = fs::metadata(path).map_err(|error| RasterImageError::io(path, error))?;
         limits
             .check_encoded_bytes(metadata.len())
@@ -229,31 +258,43 @@ impl RasterImage {
         Self::from_rgba8(decoded.width(), decoded.height(), decoded.into_raw())
     }
 
+    /// Returns the width in pixels.
     pub const fn width(&self) -> u32 {
         self.width
     }
+    /// Returns the height in pixels.
     pub const fn height(&self) -> u32 {
         self.height
     }
+    /// Returns the unique identity assigned when the image was created.
     pub const fn id(&self) -> u64 {
         self.id
     }
+    /// Returns the row-major RGBA8 pixel buffer.
     pub fn rgba8(&self) -> &[u8] {
         &self.pixels
     }
 }
 
+/// Where a raster surface's pixels come from: an already-loaded image or a file
+/// path loaded on demand.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ImageSource {
+    /// An image already held in memory.
     Loaded(RasterImage),
+    /// A path resolved when the image is loaded.
     File(Arc<PathBuf>),
 }
 
-// Cache identity, derived separately from the caller-visible source so that two
-// spellings of the same opened file share one entry.
+/// Cache identity derived from an [`ImageSource`].
+///
+/// It is computed separately from the caller-visible source so that two
+/// spellings of the same opened file share one entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ImageSourceKey {
+    /// Identity of a loaded image, by image id.
     Loaded(u64),
+    /// Identity of a file source, by canonical path when available.
     File(PathBuf),
 }
 
@@ -264,20 +305,23 @@ impl From<&ImageSource> for ImageSourceKey {
 }
 
 impl ImageSource {
+    /// Wraps an already-loaded image.
     pub fn loaded(image: RasterImage) -> Self {
         Self::Loaded(image)
     }
 
-    // Stores the caller's path verbatim so loading resolves exactly what the
-    // caller asked for. Cache identity is decided later, from the handle that
-    // was actually opened, by `key`.
+    /// Creates a file source that stores the caller's path verbatim, so loading
+    /// resolves exactly what the caller asked for; cache identity is decided
+    /// later from the opened handle by [`ImageSource::cache_key`].
     pub fn file(path: impl AsRef<Path>) -> Self {
         Self::File(Arc::new(path.as_ref().to_path_buf()))
     }
 
-    // Identity used for caching. Canonicalization is best-effort: a sandboxed or
-    // since-deleted path can still be a perfectly valid handle, so failure falls
-    // back to the caller-visible path instead of rejecting the source.
+    /// Returns the identity used for caching.
+    ///
+    /// Canonicalization is best-effort: a sandboxed or since-deleted path can
+    /// still be a valid handle, so failure falls back to the caller-visible path
+    /// instead of rejecting the source.
     pub fn cache_key(&self) -> ImageSourceKey {
         match self {
             Self::Loaded(image) => ImageSourceKey::Loaded(image.id()),
@@ -287,6 +331,7 @@ impl ImageSource {
         }
     }
 
+    /// Returns the file path, or `None` for an already-loaded image.
     pub fn path(&self) -> Option<&Path> {
         match self {
             Self::Loaded(_) => None,
@@ -294,6 +339,7 @@ impl ImageSource {
         }
     }
 
+    /// Returns the image, loading a file source under `limits`.
     pub fn load_with_limits(
         &self,
         limits: &ResourceLimits,
@@ -304,6 +350,7 @@ impl ImageSource {
         }
     }
 
+    /// Returns the already-loaded image, or `None` for a file source.
     pub(crate) fn loaded_image(&self) -> Option<&RasterImage> {
         match self {
             Self::Loaded(image) => Some(image),
@@ -342,59 +389,88 @@ impl From<&Path> for ImageSource {
     }
 }
 
+/// When a file-backed raster source is decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ImageLoading {
+    /// Decode when the surface first needs pixels.
     #[default]
     Lazy,
+    /// Decode when the surface is created.
     Eager,
 }
 
+/// The terminal image protocol a raster surface prefers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ImageProtocol {
+    /// Select the protocol from the terminal's detected capabilities.
     #[default]
     Auto,
+    /// The Kitty graphics protocol.
     Kitty,
+    /// The Sixel graphics protocol.
     Sixel,
+    /// The iTerm2 inline image protocol.
     Iterm2,
+    /// Render with text symbols instead of a graphics protocol.
     Symbols,
 }
 
+/// When a raster surface may be repainted with the native protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ImageUpdatePolicy {
+    /// Repaint with whichever protocol the terminal supports.
     #[default]
     Adaptive,
+    /// Repaint only with the native protocol.
     NativeOnly,
 }
 
+/// Whether a raster surface renders natively or as text symbols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ImageMode {
+    /// Choose the mode from terminal capabilities.
     #[default]
     Auto,
+    /// Render with a native graphics protocol.
     Native,
+    /// Render with text symbols.
     Symbols,
 }
 
+/// How a source image is fitted into the target raster box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ImageFit {
+    /// Scale to fit entirely inside the box, preserving aspect ratio.
     #[default]
     Contain,
+    /// Scale to cover the box, preserving aspect ratio and cropping.
     Cover,
+    /// Scale to exactly the box, ignoring aspect ratio.
     Stretch,
 }
 
+/// Where content is placed on an axis when it is smaller than the box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ImageAlign {
+    /// Align to the start of the axis.
     Start,
+    /// Center on the axis.
     #[default]
     Center,
+    /// Align to the end of the axis.
     End,
 }
 
+/// How a raster source is fitted and aligned inside its target box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ImageRenderOptions {
+    /// Fit policy for the source image.
     pub fit: ImageFit,
+    /// Horizontal placement when the fitted image is narrower than the box.
     pub horizontal_align: ImageAlign,
+    /// Vertical placement when the fitted image is shorter than the box.
     pub vertical_align: ImageAlign,
+    /// Whether to render natively or with text symbols.
     pub mode: ImageMode,
 }
 
@@ -409,11 +485,16 @@ impl Default for ImageRenderOptions {
     }
 }
 
+/// A raster surface's source, target box, and render options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RasterPlacement {
+    /// Image source, either loaded or file-backed.
     pub source: ImageSource,
+    /// Target width in terminal cells.
     pub width: u16,
+    /// Target height in terminal cells.
     pub height: u16,
+    /// Fit, alignment, and mode for rendering.
     pub options: ImageRenderOptions,
     pub(crate) loading: ImageLoading,
     pub(crate) invalid_source: bool,
@@ -422,6 +503,8 @@ pub struct RasterPlacement {
 }
 
 impl RasterPlacement {
+    /// Creates a placement for `source` in a `width` by `height` cell box. A
+    /// file source with a zero dimension is marked invalid and clamped to 1.
     pub fn new(
         source: impl Into<ImageSource>,
         width: u16,
@@ -447,16 +530,19 @@ impl RasterPlacement {
         }
     }
 
+    /// Returns the placement's image source.
     pub fn source(&self) -> &ImageSource {
         &self.source
     }
 
+    /// Sets when a file-backed source is decoded.
     pub fn with_loading(mut self, loading: ImageLoading) -> Self {
         self.loading = loading;
         self
     }
 }
 
+/// Renders the whole source into an image of `width` by `height` cells.
 pub(crate) fn symbols(
     source: &RasterImage,
     width: u16,
@@ -466,6 +552,8 @@ pub(crate) fn symbols(
     symbols_tile(source, width, height, 0, 0, width, height, _options)
 }
 
+/// Renders a `width` by `height` cell tile at `column` and `line` of a
+/// `full_width` by `full_height` render of the source.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn symbols_tile(
     source: &RasterImage,
@@ -491,6 +579,8 @@ pub(crate) fn symbols_tile(
     )
 }
 
+/// Renders a pixel buffer into an image of `width` by `height` cells, using
+/// `cell_pixels` as the per-cell pixel geometry.
 pub(crate) fn symbols_from_pixels(
     pixels: &RasterPixels,
     width: u16,
@@ -506,10 +596,11 @@ pub(crate) fn symbols_from_pixels(
     )
 }
 
-// A pure-Rust engine renders each cell as a colored block derived from the
-// average of the pixels it covers. It is deliberately simple: it keeps the
-// no-default-features build useful for raster previews without asserting the
-// quality of the native symbol engine.
+/// Renders each cell as a colored block derived from the average of the pixels
+/// it covers.
+///
+/// The pure-Rust fallback keeps the no-default-features build useful for raster
+/// previews without asserting the quality of the native symbol engine.
 #[cfg(not(feature = "native-raster"))]
 fn symbols_from_rgba(
     pixels: &[u8],
@@ -567,6 +658,8 @@ fn symbols_from_rgba(
     Image::from_rows(rows).map_err(|_| RasterImageError::ChafaUnavailable)
 }
 
+/// Renders a pixel buffer into an image of `width` by `height` cells through the
+/// Chafa symbol engine.
 #[cfg(feature = "native-raster")]
 fn symbols_from_rgba(
     pixels: &[u8],
@@ -633,12 +726,16 @@ fn symbols_from_rgba(
     }
 }
 
+/// A rendered RGBA8 pixel buffer with its pixel width.
 #[derive(Debug, Clone)]
 pub struct RasterPixels {
+    /// Width in pixels; the buffer is row-major with four bytes per pixel.
     pub width: u32,
+    /// Pixel bytes, four per pixel, top row first.
     pub pixels: Vec<u8>,
 }
 
+/// Renders `source` into a full-cell-size RGBA8 buffer under the default limits.
 pub(crate) fn render_rgba(
     source: &RasterImage,
     full_width: u16,
@@ -655,10 +752,14 @@ pub(crate) fn render_rgba(
     )
 }
 
-// Every dimension and byte count is checked before allocation. Saturating
-// multiplication is deliberately avoided: it turns an invalid request into a
-// huge allocation instead of a typed error. The output buffer is reserved
-// fallibly, so a capacity failure is a resource error, not a process abort.
+/// Renders `source` into an RGBA8 buffer of `full_width` by `full_height` cells,
+/// each cell `cell_pixels` pixels across.
+///
+/// Every dimension and byte count is checked before allocation; saturating
+/// multiplication is deliberately avoided because it would turn an invalid
+/// request into a huge allocation instead of a typed error, and the output
+/// buffer is reserved fallibly so a capacity failure is a resource error rather
+/// than a process abort.
 pub fn render_rgba_with_cell_size(
     source: &RasterImage,
     full_width: u16,
@@ -673,10 +774,6 @@ pub fn render_rgba_with_cell_size(
     let height_u64 = (u64::from(full_height) * cell_height).max(1);
     let width = u32::try_from(width_u64).unwrap_or(u32::MAX);
     let height = u32::try_from(height_u64).unwrap_or(u32::MAX);
-    // The *source* limits bound the decoded image; the transformed target has
-    // its own budget. Checking the transform against the source cap made the
-    // transform budget unenforceable, since raising one ceiling changed the
-    // other's effective behavior.
     let pixels = ResourceLimits::checked_area(width, height).map_err(RasterImageError::limit)?;
     limits
         .check_transform_pixels(pixels)
@@ -742,6 +839,8 @@ pub fn render_rgba_with_cell_size(
     })
 }
 
+/// Copies the tile at `tile_column` and `tile_line` out of a full render into a
+/// new RGBA8 buffer of `tile_width` by `tile_height` cells.
 pub(crate) fn crop_rgba(
     full: &RasterPixels,
     tile_column: u16,

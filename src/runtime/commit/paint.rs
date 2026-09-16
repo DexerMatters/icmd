@@ -1,3 +1,6 @@
+//! Paint pass that turns a laid-out DOM tree into ordered paint fragments for a frame.
+//! Owns traversal, clipping, backgrounds, borders, scrollbars, rasters, and selection tiling.
+
 use std::collections::HashMap;
 
 use crossterm::style::Color;
@@ -20,11 +23,39 @@ use super::types::{
     PaintRole,
 };
 
+pub(super) struct SelectionPaint<'a> {
+    config: &'a crate::basic::selection::SelectionConfig,
+    builder: crate::basic::selection::DocumentBuilder,
+    origin: ScreenPosition,
+    width: usize,
+    height: usize,
+}
+
+impl SelectionPaint<'_> {
+    fn publish(self) {
+        let Self {
+            config,
+            builder,
+            origin,
+            width,
+            height,
+        } = self;
+        config
+            .probe
+            .publish(crate::basic::selection::CommittedSelection {
+                origin,
+                width,
+                height,
+                document: builder.finish(),
+            });
+    }
+}
+
 impl Commit {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn paint_node(
+    pub(super) fn paint_node<'a>(
         &mut self,
-        node: &DomNode,
+        node: &'a DomNode,
         rect: RectI,
         inherited: ComputedText,
         backdrop: Option<Color>,
@@ -35,22 +66,11 @@ impl Commit {
         event_regions: &mut Vec<EventRegion>,
         parent: Option<DomId>,
         event_order: &mut u64,
-        // How far this node's rect has been shifted by the scroll containers
-        // around it, in `(line, column)` order. It is the offset the frame is
-        // really painted with - the runtime's clamped value, not the request -
-        // so consumers that map painted coordinates back to layout coordinates
-        // can agree with the pixels.
         scroll: (i32, i32),
+        mut selection: Option<&mut SelectionPaint<'a>>,
     ) {
-        // One placement visit per painted node, so the acceptance budget for
-        // the layout work is directly measurable.
         self.instrument.placement();
         if clip.is_empty() {
-            // Eager file sources are retained even when an ancestor's
-            // viewport clip currently excludes the tile. This records a
-            // zero paint clip while allowing the renderer to start loading
-            // immediately; hidden/visibility-gated ancestors still return
-            // before reaching this branch.
             if let DomNode::Raster { id, raster } = node
                 && raster.loading == crate::ImageLoading::Eager
             {
@@ -131,7 +151,60 @@ impl Commit {
                     order,
                 );
                 let content = rect.inset(content_insets(style.border.insets(), style.padding));
-                if let Some(content_visible) = clip.intersection(content)
+                let content_visible = clip.intersection(content);
+                if let Some(selection) = selection {
+                    if text.editor.is_none() {
+                        let geometry = self.text_geometry_cached(*id, text, style.text, content);
+                        let origin = ScreenPosition::new(content.line, content.column);
+                        let doc_start = selection.builder.push(
+                            crate::basic::selection::Run::new(
+                                geometry.value.clone(),
+                                geometry.layout.clone(),
+                                origin,
+                                content.width.max(0) as usize,
+                                content.height.max(1) as usize,
+                            )
+                            .with_align(text.align)
+                            .with_visible(content_visible.is_some()),
+                        );
+                        let overlay = selection
+                            .config
+                            .selection
+                            .local_range(doc_start, geometry.value.len())
+                            .map(|range| crate::basic::selection::SelectionOverlay {
+                                range,
+                                focused: selection.config.focused,
+                                styles: selection.config.styles.clone(),
+                            });
+                        if let Some(content_visible) = content_visible
+                            && let Some(image) = self.selectable_text_cached(
+                                *id,
+                                text,
+                                &geometry,
+                                content,
+                                content_visible,
+                                style.text,
+                                current_backdrop.unwrap_or(Color::Reset),
+                                scroll,
+                                overlay,
+                            )
+                        {
+                            Self::insert(
+                                scene,
+                                PaintKey {
+                                    node: *id,
+                                    role: PaintRole::Content,
+                                },
+                                image,
+                                content_visible,
+                                paint_level,
+                                *order,
+                                clip,
+                            );
+                            *order = (*order).saturating_add(1);
+                        }
+                    }
+                } else if let Some(content_visible) = content_visible
                     && let Some(image) = self.raster_text_cached(
                         *id,
                         text,
@@ -248,12 +321,6 @@ impl Commit {
                     && hit_rect.width > 0
                     && hit_rect.height > 0
                 {
-                    // Handlers compare the position they receive with the
-                    // content they drew, so a node's local origin is its own
-                    // content box. Scroll offsets are deliberately not folded
-                    // in: a scroll container converts its viewport-local
-                    // position with the offset it owns, and its children are
-                    // already drawn shifted by that offset.
                     let (origin_line, origin_column) = (base_content.line, base_content.column);
 
                     event_regions.push(EventRegion {
@@ -288,6 +355,14 @@ impl Commit {
                         style.overflow_y == Overflow::Clip,
                     ),
                 };
+                let mut host = props.selection.as_ref().map(|config| SelectionPaint {
+                    config,
+                    builder: crate::basic::selection::DocumentBuilder::new(self.emoji_merging)
+                        .with_viewport_height(content.height.max(0) as usize),
+                    origin: ScreenPosition::new(base_content.line, base_content.column),
+                    width: content.width.max(0) as usize,
+                    height: content.height.max(0) as usize,
+                });
                 for (child, mut child_rect) in scroll_layout.children {
                     let child_scroll = if spec.is_some() {
                         child_rect.line = child_rect.line.saturating_sub(offset.y);
@@ -298,6 +373,10 @@ impl Commit {
                         )
                     } else {
                         scroll
+                    };
+                    let active = match host.as_mut() {
+                        Some(host) => Some(host),
+                        None => selection.as_deref_mut(),
                     };
                     self.paint_node(
                         child,
@@ -312,7 +391,11 @@ impl Commit {
                         Some(*id),
                         event_order,
                         child_scroll,
+                        active,
                     );
+                }
+                if let Some(host) = host {
+                    host.publish();
                 }
                 if let Some(spec) = spec {
                     self.paint_scrollbars(

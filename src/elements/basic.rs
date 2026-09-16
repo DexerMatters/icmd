@@ -1,3 +1,6 @@
+//! Layout and typography primitives: containers, text elements, and the
+//! interactive button.
+
 use crate::{
     Align, Attr, BorderKind, Dimension, Edges, EventListener, Justify, Layout, Node, Props,
     basic::ComponentContext,
@@ -6,19 +9,24 @@ use crate::{
 use super::interactive::{Activation, interactive};
 use super::themed;
 
-// A button is interactive: it owns press, disabled, and autofocus semantics
-// instead of leaving every caller to attach its own click listener.
+/// Configuration for [`button`].
+///
+/// A button is interactive: it owns press, disabled, and autofocus semantics
+/// instead of leaving every caller to attach its own click listener.
 #[derive(Clone, Default)]
 pub struct ButtonProps {
+    /// Whether activation and focus are refused; defaults to `false`.
     pub disabled: Attr<bool>,
+    /// Whether the button requests focus on mount; defaults to `false`.
     pub autofocus: Attr<bool>,
-    // One semantic activation per press, however it was triggered.
+    /// Listener invoked once per semantic activation, however it was triggered.
     pub on_press: Attr<EventListener<()>>,
-    // Presentation-only override of the themed style.
+    /// Presentation-only override of the themed style; defaults to
+    /// [`ButtonVariant::Primary`].
     pub variant: Attr<ButtonVariant>,
 }
 
-// The listener slot is opaque, so it is omitted from the debug output.
+/// The listener slot is opaque, so it is omitted from the debug output.
 impl std::fmt::Debug for ButtonProps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ButtonProps")
@@ -29,14 +37,20 @@ impl std::fmt::Debug for ButtonProps {
     }
 }
 
+/// Semantic role that selects a button's themed colors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ButtonVariant {
+    /// Primary call to action.
     #[default]
     Primary,
+    /// Supporting action.
     Secondary,
+    /// Destructive action.
     Destructive,
 }
 
+/// Full-size vertical container with the background color; children lay out top
+/// to bottom with extra-small spacing.
 pub fn container(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Vertical;
@@ -47,6 +61,7 @@ pub fn container(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Vertical stack with small spacing between children.
 pub fn column(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Vertical;
@@ -54,6 +69,7 @@ pub fn column(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Horizontal stack with small spacing between children.
 pub fn row(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Horizontal;
@@ -61,6 +77,8 @@ pub fn row(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Full-width vertical group with medium spacing, used to separate page
+/// sections.
 pub fn section(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Vertical;
@@ -69,6 +87,7 @@ pub fn section(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Full-width row that centers its children on both axes.
 pub fn center(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Horizontal;
@@ -79,6 +98,8 @@ pub fn center(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Full-width vertical panel with card background, border, and symmetric
+/// padding.
 pub fn card(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Vertical;
@@ -94,12 +115,14 @@ pub fn card(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Heading-level text using the theme's heading typography.
 pub fn heading(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.text = theme.typography.heading.clone();
     })
 }
 
+/// Body text laid out as a vertical block.
 pub fn paragraph(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Vertical;
@@ -107,18 +130,21 @@ pub fn paragraph(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Text using the theme's label typography.
 pub fn label(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.text = theme.typography.label.clone();
     })
 }
 
+/// De-emphasized text using the theme's muted typography.
 pub fn muted(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.text = theme.typography.muted.clone();
     })
 }
 
+/// Inline code text on the muted background with horizontal padding.
 pub fn code(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.padding /= Edges::symmetric(theme.spacing.xs, theme.spacing.sm);
@@ -127,12 +153,14 @@ pub fn code(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Interactive button; see [`ButtonProps`] for its configuration.
+///
+/// Disabled suppresses activation and focus, not just color.
 pub fn button(cx: &mut ComponentContext, props: &Props<ButtonProps>) -> Node {
     let theme = cx.use_theme();
     let disabled = props.disabled | false;
     let variant = props.variant | ButtonVariant::Primary;
 
-    // Disabled suppresses activation and focus, not just color.
     let (background, foreground, border) = match (disabled, variant) {
         (true, _) => (
             theme.colors.muted,
@@ -175,8 +203,6 @@ pub fn button(cx: &mut ComponentContext, props: &Props<ButtonProps>) -> Node {
             listener.call(());
         }
     });
-    // The listener node owns the themed style, so it is the painted and
-    // hit-tested node rather than a wrapper around one.
     interactive(
         crate::DomProps::default().with_style(style),
         &props.dom,
@@ -185,6 +211,7 @@ pub fn button(cx: &mut ComponentContext, props: &Props<ButtonProps>) -> Node {
     )
 }
 
+/// Full-width single-cell horizontal rule on the top edge.
 pub fn divider(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.width /= Dimension::Max;
@@ -200,6 +227,7 @@ pub fn divider(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Fixed one-cell-square gap used to separate siblings.
 pub fn spacer(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, _theme| {
         style.width /= Dimension::Cells(1);
@@ -207,6 +235,7 @@ pub fn spacer(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Horizontal row of muted text, used as a page footer.
 pub fn footer(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Horizontal;
@@ -215,6 +244,7 @@ pub fn footer(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Muted vertical block with a heavy left border and symmetric padding.
 pub fn blockquote(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.layout /= Layout::Vertical;
@@ -236,6 +266,8 @@ pub fn blockquote(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     })
 }
 
+/// Keyboard-key text on the muted background with a border and label
+/// typography.
 pub fn kbd(cx: &mut ComponentContext, props: &Props<()>) -> Node {
     themed(cx, props, |style, theme| {
         style.padding /= Edges::symmetric(theme.spacing.xs, theme.spacing.sm);

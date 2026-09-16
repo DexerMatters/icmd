@@ -34,7 +34,7 @@ native-raster = ["dep:chafa-sys"]
 [dependencies]
 chafa-sys = { version = "0.1.4", optional = true }
 crossbeam-channel = "0.5.16"
-crossterm = "0.29.0"
+crossterm = { version = "0.29.0", features = ["osc52"] }
 flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 slotmap = "1.1.1"

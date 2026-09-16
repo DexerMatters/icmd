@@ -1,3 +1,7 @@
+//! Pipeline runtime: stage identity, typed stage errors, the component and
+//! driver traits, chain construction, and the handle that owns the worker
+//! threads and performs bounded shutdown.
+
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::atomic::{AtomicUsize, Ordering},
@@ -11,17 +15,23 @@ use super::limits::RendererConfigError;
 use super::lower::LowerError;
 use super::renderer::FrameError;
 
-// Must cover `ResourceLimits::max_tree_depth` recursive frames with margin.
+/// Worker thread stack size in bytes, sized to cover
+/// `ResourceLimits::max_tree_depth` recursive frames with margin.
 const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
+/// Identifies one pipeline stage for naming, diagnostics, and shutdown reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stage {
+    /// Lowers logical nodes into DOM nodes.
     Lower,
+    /// Commits DOM nodes into a rendered frame through layout and paint.
     Commit,
+    /// Encodes rendered frames into terminal output strings.
     Renderer,
 }
 
 impl Stage {
+    /// Returns the lowercase stage name used in thread names and error text.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Lower => "lower",
@@ -31,16 +41,31 @@ impl Stage {
     }
 }
 
-// Every stage failure is a typed, named condition. A closed channel is never
-// collapsed into a generic error: shutdown paths distinguish an expected close
-// from a stage that panicked or timed out.
+/// One typed, named pipeline failure; a closed channel is never collapsed into a
+/// generic error, so shutdown distinguishes an expected close from a stage that
+/// panicked or timed out.
 #[derive(Debug)]
 pub enum RuntimeError {
+    /// Logical-tree lowering failed.
     Lower(LowerError),
+    /// Frame rendering failed.
     Frame(FrameError),
-    StagePanicked { stage: Stage },
-    StageClosed { stage: Stage },
-    ShutdownTimeout { pending: Vec<Stage> },
+    /// A stage panicked; the panic is reported by stage name and the stage's
+    /// output sender is dropped on every path so downstream stages terminate.
+    StagePanicked {
+        /// Stage whose worker panicked.
+        stage: Stage,
+    },
+    /// A stage's channel closed unexpectedly.
+    StageClosed {
+        /// Stage that stopped before the runtime closed its input.
+        stage: Stage,
+    },
+    /// Shutdown did not finish within the policy timeout.
+    ShutdownTimeout {
+        /// Stages still running when the timeout expired.
+        pending: Vec<Stage>,
+    },
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -86,25 +111,26 @@ impl From<LowerError> for RuntimeError {
 
 impl From<RendererConfigError> for RuntimeError {
     fn from(_error: RendererConfigError) -> Self {
-        // A configuration rejection can only be produced before the runtime
-        // exists; reaching a worker with one is an internal invariant break.
         Self::StageClosed {
             stage: Stage::Renderer,
         }
     }
 }
 
-// A stage consumes its upstream channel and produces its downstream channel.
-// The upstream receiver is handed in by the runtime so adjacent stages are
-// wired point-to-point, with no forwarding (bridge) thread between them.
+/// A stage that consumes its upstream channel and produces its downstream
+/// channel; adjacent stages are wired point-to-point with no forwarding thread.
 pub trait PipelineComponent: Send + 'static {
+    /// Item type received from the upstream stage.
     type Input: Send + 'static;
+    /// Item type sent to the downstream stage.
     type Output: Send + 'static;
 
+    /// Stage identity this component reports in errors and thread names.
     const STAGE: Stage;
 
-    // `errors` lets a stage report a recoverable rejection and keep serving.
-    // Returning `Err` is terminal: the worker stops and the error is reported.
+    /// Runs until the input channel closes, forwarding recoverable rejections
+    /// through `errors` and staying alive; returning `Err` is terminal and stops
+    /// the worker.
     fn run(
         self,
         input: Receiver<Self::Input>,
@@ -113,12 +139,19 @@ pub trait PipelineComponent: Send + 'static {
     ) -> Result<(), RuntimeError>;
 }
 
+/// Terminates a [`Chain`] type list.
 pub struct End;
 
+/// Type-level list of pipeline stages; starting it allocates each intermediate
+/// channel once and hands the receiver directly to the next stage, so there are
+/// exactly as many named workers as stages and every join handle is retained.
 pub struct Chain<Head, Tail>(Head, Tail);
 
+/// Appends one stage type to a [`Chain`] type list.
 pub trait Append<Next> {
+    /// Chain type with `Next` added at the tail.
     type Output;
+    /// Appends `next` at the tail of the chain.
     fn append(self, next: Next) -> Self::Output;
 }
 
@@ -144,13 +177,11 @@ where
 
 type WorkerJoin = (Stage, JoinHandle<()>);
 
-// Builds the chain by allocating each intermediate channel once and handing the
-// receiver directly to the next stage. There are exactly as many workers as
-// stages, each named, and every join handle is retained by the caller.
-// Test/diagnostic counter so a leaked worker is a direct test failure rather
-// than an invisible thread.
+/// Test/diagnostic counter of live workers, so a leaked worker is a direct test
+/// failure rather than an invisible thread.
 static LIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
+/// Number of pipeline worker threads currently alive, for tests and diagnostics.
 #[doc(hidden)]
 pub fn live_worker_count() -> usize {
     LIVE_WORKERS.load(Ordering::SeqCst)
@@ -171,11 +202,16 @@ impl Drop for WorkerGuard {
     }
 }
 
+/// Spawns one worker per stage and wires their channels, recording each join
+/// handle in `joins`; internal plumbing exposed for the chain types.
 #[doc(hidden)]
 pub trait Driver {
+    /// Item type received by the first stage of the chain.
     type Input: Send + 'static;
+    /// Item type produced by the last stage of the chain.
     type Output: Send + 'static;
 
+    /// Spawns every chain worker over channels bounded by `capacity` items.
     fn drive(
         self,
         capacity: usize,
@@ -199,18 +235,11 @@ fn spawn_worker<C>(
     let error_tx = errors.clone();
     let stage_error_tx = errors.clone();
     let name = format!("icmd-{}", stage.as_str());
-    // Lowering, layout, and paint are recursive over the logical tree, so the
-    // worker stack must comfortably cover the configured depth limit. The
-    // default thread stack is not enough for a tree at the default depth, whose
-    // overflow would abort the process rather than return a typed error.
     let handle = thread::Builder::new()
         .name(name)
         .stack_size(WORKER_STACK_BYTES)
         .spawn(move || {
             let _live = WorkerGuard::enter();
-            // A panicking stage is reported by name instead of looking like an
-            // unexplained closed channel. The output sender is dropped on every
-            // path, so downstream stages still terminate.
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 component.run(input, output, stage_error_tx)
             }));
@@ -271,7 +300,9 @@ where
     }
 }
 
+/// Bounds how long shutdown waits for workers to join.
 pub struct ShutdownPolicy {
+    /// Maximum time to wait for workers after the input side closes.
     pub timeout: Duration,
 }
 
@@ -284,11 +315,13 @@ impl Default for ShutdownPolicy {
 }
 
 impl ShutdownPolicy {
+    /// Builds a policy that waits up to `timeout` for workers to join.
     pub fn with_timeout(timeout: Duration) -> Self {
         Self { timeout }
     }
 }
 
+/// Builder that owns a pipeline chain and its per-channel item capacity.
 pub struct Runtime<C> {
     chain: C,
     capacity: usize,
@@ -298,6 +331,8 @@ impl<C> Runtime<Chain<C, End>>
 where
     C: PipelineComponent,
 {
+    /// Starts a runtime around a single component with a default capacity of 64
+    /// items per channel.
     pub fn new(component: C) -> Self {
         Self {
             chain: Chain(component, End),
@@ -305,6 +340,8 @@ where
         }
     }
 
+    /// Starts a runtime around a single component with `capacity` items per
+    /// channel, clamped to at least 1.
     pub fn with_capacity(component: C, capacity: usize) -> Self {
         Self {
             chain: Chain(component, End),
@@ -314,6 +351,7 @@ where
 }
 
 impl<C> Runtime<C> {
+    /// Appends `next` as the final stage, preserving the configured capacity.
     pub fn then<Next>(self, next: Next) -> Runtime<<C as Append<Next>>::Output>
     where
         C: Append<Next>,
@@ -325,7 +363,8 @@ impl<C> Runtime<C> {
         }
     }
 
-    // Owns the workers and their join handles so shutdown can be acknowledged.
+    /// Spawns the workers and returns a handle that owns their join handles, so
+    /// shutdown can be observed and acknowledged.
     pub fn start_handle(self) -> RuntimeHandle<C::Input, C::Output>
     where
         C: Driver,
@@ -333,10 +372,10 @@ impl<C> Runtime<C> {
         self.chain.start_handle(self.capacity)
     }
 
-    // Transitional tuple constructor. It hands back the same channels but keeps
-    // worker ownership on a supervisor thread that joins the stages once the
-    // caller drops its senders. New code should use `start_handle` so it can
-    // observe typed stage errors and acknowledge shutdown itself.
+    /// Transitional tuple constructor: returns the same channels but keeps worker
+    /// ownership on a supervisor thread that joins the stages once the caller
+    /// drops its senders. New code should use [`Runtime::start_handle`] so it can
+    /// observe typed stage errors and acknowledge shutdown itself.
     pub fn start(self) -> (Sender<C::Input>, Receiver<C::Output>)
     where
         C: Driver,
@@ -352,26 +391,38 @@ where
     I: Send + 'static,
     O: Send + 'static,
 {
+    /// Returns a clone of the input sender for submitting logical roots.
     pub fn input(&self) -> Sender<I> {
         self.input
             .clone()
             .expect("runtime handle already shut down")
     }
 
+    /// Stops accepting roots without joining the workers; dropping the handle's
+    /// own input sender is what lets the stages observe the channel as closed.
+    /// Frames emitted while the pipeline drains must still be consumed by the
+    /// caller before [`RuntimeHandle::shutdown`] joins the workers.
+    pub fn close_input(&mut self) {
+        self.input.take();
+    }
+
+    /// Returns a clone of the frame receiver for downstream consumers.
     pub fn output(&self) -> Receiver<O> {
         self.output.clone()
     }
 
+    /// Returns a clone of the typed stage-error receiver.
     pub fn errors(&self) -> Receiver<RuntimeError> {
         self.errors.clone()
     }
 
+    /// Returns the next typed stage error if one is queued, without blocking.
     pub fn try_error(&self) -> Option<RuntimeError> {
         self.errors.try_recv().ok()
     }
 
-    // Split the handle into its channels and hand worker ownership to a
-    // supervisor thread that joins the stages when they finish.
+    /// Splits the handle into its input sender and output receiver, moving worker
+    /// ownership to a supervisor thread that joins the stages when they finish.
     pub fn into_parts(mut self) -> (Sender<I>, Receiver<O>) {
         let input = self.input.take().expect("runtime handle already shut down");
         let output = self.output.clone();
@@ -386,9 +437,9 @@ where
         (input, output)
     }
 
-    // Close the input side, then join every worker within the policy timeout.
-    // A timeout is reported with the stages still pending; it is never mistaken
-    // for a successful shutdown.
+    /// Closes the input side and joins every worker within `policy.timeout`;
+    /// exceeding it returns [`RuntimeError::ShutdownTimeout`] listing the stages
+    /// still pending rather than reporting success.
     pub fn shutdown(mut self, policy: ShutdownPolicy) -> Result<(), RuntimeError> {
         self.input.take();
         let deadline = Instant::now() + policy.timeout;
@@ -411,6 +462,9 @@ where
     }
 }
 
+/// Owns a started pipeline's channels and worker join handles, so callers can
+/// observe typed errors and acknowledge bounded shutdown; dropping it stops
+/// intake and waits up to 250 ms for workers without blocking forever.
 pub struct RuntimeHandle<I: Send + 'static, O: Send + 'static> {
     input: Option<Sender<I>>,
     output: Receiver<O>,
@@ -424,8 +478,6 @@ where
     O: Send + 'static,
 {
     fn drop(&mut self) {
-        // Dropping without an explicit shutdown still stops intake and gives
-        // workers a bounded chance to finish; it never blocks forever.
         self.input.take();
         let deadline = Instant::now() + Duration::from_millis(250);
         while self.joins.iter().any(|(_, handle)| !handle.is_finished())

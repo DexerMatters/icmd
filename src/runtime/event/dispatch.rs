@@ -1,10 +1,12 @@
-// Event dispatch: pointer, keyboard, paste, resize, and terminal activation
-// routing, plus the focus-transition API that owns DOM focus.
+//! Event dispatch routing for pointer, keyboard, paste, resize, and terminal
+//! activation, plus the focus-transition API that owns DOM focus.
 #![allow(unused_imports)]
 
 use super::*;
 
 impl EventDispatcher {
+    /// Routes one terminal event to its listeners and built-in actions; counts
+    /// every listener call in the returned outcome.
     pub fn dispatch(&self, event: Event) -> DispatchOutcome {
         crate::runtime::metrics::note_event_dispatched();
         match event {
@@ -29,13 +31,14 @@ impl EventDispatcher {
         }
     }
 
+    /// Moves focus to the region with this DOM id, reporting whether the
+    /// transition occurred; unknown or already-focused ids leave focus unchanged.
     pub fn focus(&self, id: DomId) -> bool {
         self.change_focus(id).0
     }
 
-    // Checked programmatic focus. Unlike `focus`, this enforces that the target
-    // exists in the current generation and is actually focusable, so a
-    // fabricated or stale handle cannot steal focus.
+    /// Checked programmatic focus that rejects a fabricated or stale target:
+    /// the region must exist in the current generation and be focusable.
     pub fn try_focus(&self, id: DomId) -> Result<FocusOutcome, FocusError> {
         {
             let state = self.state.read().expect("event registry poisoned");
@@ -59,9 +62,9 @@ impl EventDispatcher {
         })
     }
 
-    // Request focus for a target that may not be published yet. The request is
-    // granted on the next publication that contains the target, which is the
-    // only moment a focus transition can be observed by the target itself.
+    /// Requests focus for a target that may not be published yet; the request
+    /// is granted at the next publication containing the target, the only
+    /// moment a focus transition can be observed by the target itself.
     pub(crate) fn request_focus(&self, id: DomId) {
         let mut state = self.state.write().expect("event registry poisoned");
         state.pending_focus = Some(id);
@@ -96,6 +99,8 @@ impl EventDispatcher {
         (true, count)
     }
 
+    /// Removes focus from the current region, reporting whether a region held
+    /// focus; notifies that region's focus listener with `Lost`.
     pub fn blur(&self) -> bool {
         let callback = {
             let mut state = self.state.write().expect("event registry poisoned");
@@ -112,12 +117,13 @@ impl EventDispatcher {
         true
     }
 
+    /// Returns the DOM id of the region that currently owns focus, if any.
     pub fn focused(&self) -> Option<DomId> {
         self.state.read().expect("event registry poisoned").focused
     }
 
-    // Number of indexed region lookups since the last call. Used by tests to
-    // prove a deep route is O(route depth), not O(depth * published regions).
+    /// Returns and clears the count of indexed region lookups since the last
+    /// call, used by tests to prove a deep route is O(route depth).
     #[doc(hidden)]
     pub fn take_id_probe_count(&self) -> u64 {
         self.state
@@ -127,14 +133,16 @@ impl EventDispatcher {
             .swap(0, std::sync::atomic::Ordering::Relaxed)
     }
 
-    // Surface (and clear) the first callback fault recorded during dispatch.
-    // A panic or a rejected reentrant delivery stops being invisible here; the
-    // runtime loop turns it into a typed error and performs cleanup.
+    /// Returns and clears the first callback fault recorded during dispatch,
+    /// turning a panic or rejected reentrant delivery into a typed message.
     #[doc(hidden)]
     pub fn take_callback_fault(&self) -> Option<&'static str> {
         crate::basic::events::take_callback_fault().map(|fault| fault.message())
     }
 
+    /// Sets pointer capture on the region with this DOM id, notifying the previous
+    /// capture target with lost-capture and the new one with got-capture;
+    /// returns whether the region exists and now holds capture.
     pub fn set_pointer_capture(&self, id: DomId) -> bool {
         let mut deliveries = Vec::new();
         let accepted = {
@@ -184,6 +192,8 @@ impl EventDispatcher {
         accepted
     }
 
+    /// Releases pointer capture held by the region with this DOM id, notifying it
+    /// with lost-capture; returns whether that region held capture.
     pub fn release_pointer_capture(&self, id: DomId) -> bool {
         let mut deliveries = Vec::new();
         let released = {
@@ -215,6 +225,7 @@ impl EventDispatcher {
         released
     }
 
+    /// Returns the DOM id of the region that currently holds pointer capture, if any.
     pub fn pointer_capture(&self) -> Option<DomId> {
         self.state
             .read()
@@ -223,10 +234,9 @@ impl EventDispatcher {
             .map(|capture| capture.target)
     }
 
+    /// Dispatches a mouse event: capture listeners run root-to-target before the
+    /// target/bubble phase and built-in actions, and stopping them suppresses both.
     pub(super) fn dispatch_mouse(&self, event: MouseEvent) -> DispatchOutcome {
-        // Capture pass: root to target, before any default action or pointer
-        // state change. Stopping here suppresses the target/bubble phase and
-        // every built-in action for this event.
         let capture_outcome = self.dispatch_pointer_capture(event);
         if capture_outcome.propagation_stopped {
             return capture_outcome;
@@ -236,10 +246,6 @@ impl EventDispatcher {
         let mut scroll_deliveries = Vec::new();
         let mut focus_target = None;
         let mut scroll_changed = false;
-        // A wheel scroll applies its offset while routing, before listeners run.
-        // The snapshot lets a listener that calls `prevent_default` restore the
-        // offset it refused, so the built-in scroll action is genuinely
-        // suppressible instead of already committed.
         let wheel_offsets_before = wheel_delta(event.kind).map(|_| {
             self.scroll_offsets
                 .lock()
@@ -315,8 +321,6 @@ impl EventDispatcher {
                         }),
                 );
 
-                // Boundary events use normal hit testing. While captured,
-                // pointer boundary events stay with the capture target.
                 if !capture_event
                     && matches!(event.kind, MouseEventKind::Moved | MouseEventKind::Down(_))
                     && state.hovered != normal_target
@@ -489,9 +493,6 @@ impl EventDispatcher {
                         );
                         state.captured = None;
 
-                        // Browser ordering is pointerup -> lostpointercapture
-                        // -> click. A click is only produced when the primary
-                        // button is released over its original target.
                         let dragged = state.drag.take().is_some_and(|drag| drag.moved);
                         if changed_button == PointerButton::Primary
                             && normal_target == Some(capture.target)
@@ -509,8 +510,6 @@ impl EventDispatcher {
                             );
                         }
 
-                        // Once capture is released, restore normal boundary
-                        // semantics at the release location.
                         if state.hovered != normal_target {
                             let boundary = PointerEvent {
                                 kind: PointerEventKind::Out,
@@ -568,10 +567,6 @@ impl EventDispatcher {
             }
         }
 
-        // DOM ordering puts pointerdown (and its capture lifecycle) before
-        // the focus transition caused by the press. Every event family shares
-        // one propagation frame, so a listener can stop propagation or prevent
-        // the framework's default action for pointer and wheel events too.
         let dispatch = crate::basic::events::begin_dispatch();
         let mut count = 0;
         for (listener, event) in pointer_deliveries {
@@ -603,8 +598,6 @@ impl EventDispatcher {
         let prevented = crate::basic::events::default_prevented();
         drop(dispatch);
 
-        // A prevented default suppresses the built-in action: focus-on-press and
-        // the scroll the runtime applied for a wheel event.
         if prevented && let Some(before) = wheel_offsets_before {
             *self.scroll_offsets.lock().expect("scroll mutex poisoned") = before;
             scroll_changed = false;
@@ -625,7 +618,7 @@ impl EventDispatcher {
         }
     }
 
-    // Runs capture listeners for the event's family, in root-to-target order.
+    /// Runs capture listeners for the event's family, in root-to-target order.
     pub(super) fn dispatch_pointer_capture(&self, event: MouseEvent) -> DispatchOutcome {
         let position = ScreenPosition::new(event.row as i32, event.column as i32);
         let (pointer_events, wheel_events) = {
@@ -701,19 +694,15 @@ impl EventDispatcher {
         }
     }
 
+    /// Dispatches a key event: capture listeners run first, then target-specific
+    /// and application-global shortcuts, then built-in key scrolling.
     pub(super) fn dispatch_key(&self, event: KeyboardEvent) -> DispatchOutcome {
-        // Capture pass first: root to target, before the target and bubble
-        // listeners and before the built-in key scrolling.
         let capture_outcome = self.dispatch_key_capture(event);
         if capture_outcome.propagation_stopped {
             return capture_outcome;
         }
         let mut scroll_changed = false;
         let mut scroll_deliveries = Vec::new();
-        // Targeted delivery requires an actual focused target. Falling back to
-        // the root let an unfocused root input edit as though it held focus, so
-        // a widget editing key was indistinguishable from an application
-        // shortcut. Global shortcuts use `app_key` instead.
         let (target, keyboard_callbacks, key_callbacks, app_callbacks) = {
             let state = self.state.read().expect("event registry poisoned");
             let app_callbacks = state
@@ -741,12 +730,8 @@ impl EventDispatcher {
             (target, keyboard_callbacks, key_callbacks, app_callbacks)
         };
 
-        // The guard restores thread-local propagation state on every exit path,
-        // including a listener that unwinds.
         let dispatch = crate::basic::events::begin_dispatch();
         let mut count = 0;
-        // Target-specific handlers run first, allowing an editor to consume a
-        // key before application-level keyboard listeners see it.
         for listener in key_callbacks {
             listener.call(event);
             count += 1;
@@ -763,9 +748,11 @@ impl EventDispatcher {
                 }
             }
         }
-        // Application-global shortcuts run last, and only when no focused
-        // widget consumed the key.
-        if !crate::basic::events::propagation_stopped() {
+        let shortcut_kind = matches!(
+            event.key.kind,
+            crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+        );
+        if shortcut_kind && !crate::basic::events::propagation_stopped() {
             for listener in app_callbacks {
                 listener.call(event);
                 count += 1;
@@ -778,8 +765,6 @@ impl EventDispatcher {
         let prevented = crate::basic::events::default_prevented();
         drop(dispatch);
 
-        // A listener that prevented the default suppresses the built-in
-        // keyboard scrolling for this key.
         if !consumed
             && !prevented
             && let Some(target) = target
@@ -822,7 +807,7 @@ impl EventDispatcher {
         }
     }
 
-    // Runs capture listeners for a key routed at the focused target.
+    /// Runs capture listeners for a key routed at the focused target.
     pub(super) fn dispatch_key_capture(&self, event: KeyboardEvent) -> DispatchOutcome {
         let callbacks = {
             let state = self.state.read().expect("event registry poisoned");
@@ -1113,9 +1098,9 @@ impl EventDispatcher {
         false
     }
 
+    /// Routes a paste event only to the focused region's paste listeners; an
+    /// unfocused input never accepts it and there is no global paste route.
     pub(super) fn dispatch_paste(&self, value: PasteEvent) -> usize {
-        // Paste is a targeted edit command: an unfocused input must not accept
-        // it, and there is no application-global paste route.
         let callbacks = {
             let state = self.state.read().expect("event registry poisoned");
             state

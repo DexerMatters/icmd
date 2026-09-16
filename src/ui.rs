@@ -1,17 +1,34 @@
+//! The `ui!` macro: a declarative element syntax that expands to ordinary
+//! component calls and [`Node`](crate::Node) construction.
+
+/// Build a [`Node`](crate::Node) tree with element syntax.
+///
+/// Each tag is a component or element constructor; attributes become props, and
+/// `{expr}` splices a child. Component tags are ordinary components, so a
+/// user-defined one is written exactly like a built-in.
+///
+/// ```
+/// use icmd::ui;
+/// use icmd::widgets::{button, column};
+///
+/// let node = ui! {
+///     <column>
+///         "hello"
+///         <button on_press={|_| {}}>"press"</button>
+///     </column>
+/// };
+/// let _ = node;
+/// ```
 #[macro_export]
 macro_rules! ui {
-    // A fragment opening frame.
     (@parse [$($stack:tt)*] [$($nodes:tt)*] < > $($rest:tt)*) => {
         $crate::ui!(@parse [[<> [$($nodes)*]] $($stack)*] [] $($rest)*)
     };
 
-    // A fragment closing frame.
     (@parse [[<> [$($saved:tt)*]] $($stack:tt)*] [$($children:tt)*] < / > $($rest:tt)*) => {
         $crate::ui!(@append_frame [$($stack)*] [$($saved)*] ($crate::fragment::<_, $crate::Node>(vec![$($children)*])) $($rest)*)
     };
 
-    // Close an element frame. A const string comparison below gives matching
-    // identifiers a focused compile-time diagnostic.
     (@parse [[$tag:ident [$($attrs:tt)*] [$($saved:tt)*]] $($stack:tt)*] [$($children:tt)*] < / $close:ident > $($rest:tt)*) => {
         $crate::ui!(@check_close $tag $close {
             $crate::ui!(@append_frame [$($stack)*] [$($saved)*]
@@ -19,13 +36,10 @@ macro_rules! ui {
         })
     };
 
-    // An element opening frame is parsed separately so `>` and `/>` can be
-    // recognized without trying to parse arbitrary Rust tokens.
     (@parse [$($stack:tt)*] [$($nodes:tt)*] < $tag:ident $($rest:tt)*) => {
         $crate::ui!(@open [$($stack)*] [$($nodes)*] $tag [] $($rest)*)
     };
 
-    // Child expressions and string literals.
     (@parse [$($stack:tt)*] [$($nodes:tt)*] { $expr:expr } $($rest:tt)*) => {
         $crate::ui!(@parse [$($stack)*] [$($nodes)* ($expr).into(),] $($rest)*)
     };
@@ -33,9 +47,6 @@ macro_rules! ui {
         $crate::ui!(@parse [$($stack)*] [$($nodes)* ($text).into(),] $($rest)*)
     };
 
-    // End of the root tree. Preserve a single root component so it can be
-    // sent directly to the runtime; multiple roots and empty input become
-    // fragments.
     (@parse [] []) => {
         $crate::fragment::<_, $crate::Node>(vec![])
     };
@@ -46,8 +57,6 @@ macro_rules! ui {
         $crate::fragment::<_, $crate::Node>(vec![$($nodes)+])
     };
 
-    // A closing tag without an opening frame, or an unclosed frame, is a
-    // syntax error. Mismatched names are diagnosed by @check_close above.
     (@parse [] [$($nodes:tt)*] < / $($rest:tt)*) => {
         compile_error!("ui!: unexpected closing tag")
     };
@@ -58,7 +67,6 @@ macro_rules! ui {
         compile_error!("ui!: expected an element, fragment, string literal, or {expression}")
     };
 
-    // Opening-tag parser: self-closing elements and paired elements.
     (@open [$($stack:tt)*] [$($nodes:tt)*] $tag:ident [$($attrs:tt)*] / > $($rest:tt)*) => {
         $crate::ui!(@parse [$($stack)*] [$($nodes)* ($crate::ui!(@build $tag [$($attrs)*] [])),] $($rest)*)
     };
@@ -78,7 +86,6 @@ macro_rules! ui {
         compile_error!("ui!: malformed opening tag")
     };
 
-    // Pop a frame and append its completed node to the saved parent children.
     (@append_frame [] [$($saved:tt)*] ($node:expr) $($rest:tt)*) => {
         $crate::ui!(@parse [] [$($saved)* ($node),] $($rest)*)
     };
@@ -93,8 +100,6 @@ macro_rules! ui {
             [$($parent_nodes)* ($node),] $($rest)*)
     };
 
-    // Match closing identifiers in a const context so a mismatch gets a
-    // stable, focused diagnostic while remaining entirely declarative.
     (@check_close $expected:ident $actual:ident { $($continuation:tt)* }) => {{
         const _: () = if !$crate::__private::__ui_tag_names_equal(
             stringify!($expected),
@@ -111,8 +116,6 @@ macro_rules! ui {
         $($continuation)*
     }};
 
-    // Build one component after the parser has collected its attributes and
-    // children. The component and props types are inferred by `apply`.
     (@build $component:ident [$($attrs:tt)*] [$($children:tt)*]) => {{
         $crate::__private::__ui_apply($component, move |__icmd_ui_props| {
             let mut __icmd_ui_key: Option<$crate::Key> = None;

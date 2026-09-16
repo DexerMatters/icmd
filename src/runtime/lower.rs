@@ -1,3 +1,7 @@
+//! Logical-tree lowering: validates depth and node budgets, reconciles the
+//! incoming tree against existing fibers, mounts components, and emits DOM
+//! nodes for the pipeline.
+
 use std::{
     any::{Any, TypeId},
     collections::{HashMap, HashSet, VecDeque},
@@ -13,35 +17,42 @@ use super::limits::{ConfigError, ResourceLimits};
 use super::pipeline::RuntimeError;
 use crate::basic::hooks::{FiberId, HookSlot, UpdateQueue};
 use crate::basic::{
-    DomId, DomNode, DomProps, Key, Node,
+    AppHandle, DomId, DomNode, DomProps, Key, Node,
     common::{NodeKind, RenderFn},
     context::{ComponentContext, ContextValues},
 };
 
 type FiberArena = SlotMap<FiberId, Fiber>;
 
-// Lowering is iterative over the logical tree, but a public tree can still be
-// arbitrarily deep or large. Both ceilings are checked before the recursive
-// work they bound, and reported as typed errors instead of aborting a worker.
+/// Rejection raised while lowering; both tree ceilings are checked before the
+/// recursive work they bound and reported as typed errors instead of aborting a
+/// worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LowerError {
+    /// The logical tree is deeper than the configured limit.
     TreeTooDeep {
+        /// Maximum permitted logical depth in nodes.
         limit: usize,
+        /// Smallest depth observed when the limit was exceeded, in nodes.
         observed_at_least: usize,
     },
+    /// The logical tree exceeds the configured node ceiling.
     TreeTooLarge {
+        /// Maximum permitted node count.
         limit: usize,
+        /// Node count observed when the limit was exceeded.
         observed: usize,
     },
-    // Two siblings shared one key. This is a caller error, not an internal
-    // invariant, so it is reported instead of panicking the worker.
+    /// Two siblings shared one key; the first occurrence wins and the duplicate
+    /// is skipped rather than panicking or silently migrating state.
     DuplicateKey {
+        /// The duplicated sibling key.
         key: String,
     },
-    // The configured resource policy was rejected. Reporting it as a typed
-    // stage error means an invalid limit cannot be applied silently or panic
-    // the worker.
+    /// The configured resource policy was rejected, so an invalid limit cannot
+    /// be applied silently or panic the worker.
     Config {
+        /// Human-readable reason the resource policy was rejected.
         detail: String,
     },
 }
@@ -103,8 +114,8 @@ enum FiberKind {
 
 struct Fiber {
     parent: Option<FiberId>,
-    // Logical depth from the root, kept on the fiber so the depth limit is a
-    // constant-time check instead of an ancestor walk per mount.
+    /// Logical depth from the root, kept on the fiber so the depth limit is a
+    /// constant-time check instead of an ancestor walk per mount.
     depth: usize,
     key: Option<Key>,
     kind: FiberKind,
@@ -129,22 +140,30 @@ impl Fiber {
     }
 }
 
+/// Owns the fiber arena and reconciliation state for lowering logical trees
+/// into DOM nodes for the pipeline.
 pub struct Lower {
     fibers: FiberArena,
     root: FiberId,
-    // Only whether a root is mounted matters; retaining the whole logical root
-    // duplicated the caller's tree for no observable behavior.
+    /// Whether a root is currently mounted; the whole logical root is not
+    /// retained, since only mount state is observable.
     mounted: bool,
     live_nodes: usize,
     limits: ResourceLimits,
-    // Set when a limit rejects a mount. Checked by `lower`/`rerender` so the
-    // caller receives one typed error instead of a silently truncated tree.
+    /// Set when a limit rejects a mount; checked by `lower`/`rerender` so the
+    /// caller receives one typed error instead of a silently truncated tree.
     pending_error: Option<LowerError>,
     next_dom_id: u64,
     updates: UpdateQueue,
     wake_tx: Sender<()>,
     wake_rx: Receiver<()>,
+    /// Fibers whose effects are pending, recorded post-order so
+    /// `commit_effects` runs mount and update bodies child-first.
     effect_fibers: Vec<FiberId>,
+    /// Session control handle handed to every component's `use_handle`;
+    /// `render_with` installs the handle its loop watches, while a pipeline
+    /// built directly keeps an inert one.
+    handle: AppHandle,
 }
 
 impl Default for Lower {
@@ -153,9 +172,9 @@ impl Default for Lower {
     }
 }
 
-// Iterative, allocation-bounded pre-pass over the logical tree. Component
-// children are not materialized here; expansion is rechecked by the live-node
-// counter during lowering, so a recursive component cannot escape the ceiling.
+/// Iterative, allocation-bounded pre-pass over the logical tree; component
+/// children are not materialized here and are rechecked by the live-node counter
+/// during lowering, so a recursive component cannot escape the ceiling.
 fn validate_tree(root: &Node, limits: &ResourceLimits) -> Result<(), LowerError> {
     let mut stack: Vec<(&Node, usize)> = vec![(root, 1)];
     let mut count = 0usize;
@@ -204,31 +223,37 @@ impl Lower {
             wake_tx,
             wake_rx,
             effect_fibers: Vec::new(),
+            handle: AppHandle::default(),
         }
     }
 
+    /// Installs the session control handle that components read with
+    /// `cx.use_handle()`, so a pipeline owning its own loop can watch the same
+    /// handle and stop when the application requests an exit.
+    pub fn with_handle(mut self, handle: AppHandle) -> Self {
+        self.handle = handle;
+        self
+    }
+
+    /// Builds a lowerer with the given resource limits.
     pub fn with_limits(limits: ResourceLimits) -> Self {
         let mut lower = Self::new();
         lower.limits = limits;
         lower
     }
 
-    // Construction that rejects an invalid policy up front, for callers that
-    // would rather handle the error than have it surface on the first frame.
+    /// Builds a lowerer after validating `limits`, for callers that would rather
+    /// handle an invalid policy up front than on the first frame.
     pub fn try_with_limits(limits: ResourceLimits) -> Result<Self, ConfigError> {
         limits.validate()?;
         Ok(Self::with_limits(limits))
     }
 
     fn lower(&mut self, node: Node) -> Result<DomNode, LowerError> {
-        // A policy that never validated is refused here, so an out-of-range
-        // limit is a typed error rather than a silently unusable bound.
         self.limits.validate().map_err(|error| LowerError::Config {
             detail: error.to_string(),
         })?;
         let _ = self.apply_updates();
-        // Validate the incoming root iteratively, before any recursive
-        // traversal, so an over-deep tree cannot reach the recursive code.
         validate_tree(&node, &self.limits)?;
         self.pending_error = None;
         self.mounted = true;
@@ -366,11 +391,6 @@ impl Lower {
         let mut children = Vec::with_capacity(nodes.len());
         let mut seen_keys = HashSet::new();
 
-        // Per-parent key index built in one pass, so matching a keyed new child
-        // is a lookup rather than a scan of every old sibling. Without this,
-        // reordering N keyed children costs O(N^2) comparisons.
-        // The key is cloned into the index so reconciliation can mutate the
-        // fiber arena while the index is alive.
         let mut keyed_old: HashMap<Key, FiberId> = HashMap::with_capacity(old.len());
         for candidate in &old {
             if let Some(key) = self.fibers[*candidate].key.clone() {
@@ -400,8 +420,6 @@ impl Lower {
             if let Some(key) = node.node_key()
                 && !seen_keys.insert(key.clone())
             {
-                // Deterministic first-wins: report the duplicate and skip it
-                // rather than panicking or silently migrating state.
                 self.pending_error = Some(LowerError::DuplicateKey {
                     key: key.as_str().to_string(),
                 });
@@ -643,24 +661,28 @@ impl Lower {
             self.updates.clone(),
             self.wake_tx.clone(),
             inherited_context,
+            self.handle.clone(),
         );
         let child = render(&mut context, props.as_ref());
         let (hooks, provided_context) = context.finish();
         self.fibers[fiber].hooks = hooks;
         self.fibers[fiber].provided_context = provided_context;
-        self.effect_fibers.push(fiber);
         self.reconcile_children(fiber, vec![child]);
+        self.effect_fibers.push(fiber);
     }
 
+    /// Removes `fiber` and its descendants, running hook cleanups
+    /// parent-before-child; children are captured before the arena entry is
+    /// dropped.
     fn remove_subtree(&mut self, fiber: FiberId) {
         let children = self.fibers[fiber].children.clone();
-        for child in children {
-            self.remove_subtree(child);
-        }
         let removed = self.fibers.remove(fiber).expect("fiber already removed");
         self.live_nodes = self.live_nodes.saturating_sub(1);
         for hook in removed.hooks {
             hook.cleanup();
+        }
+        for child in children {
+            self.remove_subtree(child);
         }
     }
 
@@ -726,9 +748,6 @@ impl super::pipeline::PipelineComponent for Lower {
             crossbeam_channel::select! {
                 recv(input) -> message => {
                     let Ok(node) = message else { break; };
-                    // A rejected tree is a typed, recoverable error: the caller
-                    // is told exactly which budget was exceeded and the worker
-                    // keeps serving later valid roots.
                     match self.lower(node) {
                         Ok(dom) => {
                             if output.send(dom).is_err() { break; }

@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use icmd::__private::{ByteBudget, ImageLoader, ImageManager, SourceRequest, SourceState};
+use icmd::ImageSource;
 use icmd::advanced::ResourceLimits;
-use icmd::image::ImageSource;
 
 fn source(name: &str) -> ImageSource {
     ImageSource::file(format!("/nonexistent/icmd-test/{name}.png"))

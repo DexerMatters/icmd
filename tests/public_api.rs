@@ -8,16 +8,15 @@ use icmd::events::{
     DispatchOutcome, EventHandlers, EventListener, FocusEvent, KeyboardEvent, PasteEvent,
     PointerButton, PointerEvent, ScrollEvent, TerminalFocusEvent, WheelEvent,
 };
-use icmd::image::{
-    ImageMode, ImageProtocol, ImageSource, RasterImage, RasterImageError, RasterPlacement,
-};
-use icmd::style::{
-    Align, Attributes, BorderKind, BorderStyle, Dimension, Fill, FillError, Justify, Layout,
-    Overflow, Style, TextAlign, TextStyle, TextWrap,
-};
 use icmd::theme::{Theme, ThemeColors, ThemeMode, ThemePreset};
-use icmd::widgets::{column, input, raster_image, scroll_area, text, view};
-use icmd::{Component, ComponentContext, Node, Props, RuntimeConfig, Size, run};
+use icmd::widgets::{column, input, raster_image, scroll_area, selection_area, text, view};
+use icmd::{
+    Align, AppHandle, AppLifecycle, AppPhase, Attributes, BorderKind, BorderStyle, Component,
+    ComponentContext, Dimension, ExitReason, Fill, FillError, ImageMode, ImageProtocol,
+    ImageSource, Justify, Layout, Node, Overflow, Props, RasterImage, RasterImageError,
+    RasterPlacement, RuntimeConfig, SelectionAreaProps, Size, Style, TextAlign,
+    TextClipboardAction, TextClipboardEvent, TextSelectionEvent, TextStyle, TextWrap, render_with,
+};
 use std::time::Duration;
 
 // Helper: build the standard three-stage pipeline and return its handle.
@@ -48,8 +47,44 @@ fn high_level_facade_resolves_and_renders() {
     let _ = node;
 }
 
+// The lifecycle tier is a high-level facility: an application can register
+// startup and exit hooks, and call the lifecycle-aware entry point, without
+// naming anything from `advanced`.
+#[test]
+fn the_lifecycle_tier_is_usable_from_the_high_level_facade() {
+    let lifecycle = AppLifecycle::new()
+        .on_boot(|_session| {})
+        .on_ready(|_session| {})
+        .on_unmount(|_session| {})
+        .on_exit(|_session| {});
+    assert!(!lifecycle.is_empty());
+    assert!(AppLifecycle::default().is_empty());
+    assert_eq!(AppPhase::Exit.to_string(), "exit");
+    assert_eq!(ExitReason::ExitKey.to_string(), "exit key");
+
+    // Monomorphizing the call proves the signature is reachable from the high
+    // level; the function is never run, so no terminal is needed.
+    fn entry(node: Node, config: RuntimeConfig) -> Result<(), icmd::RenderError> {
+        render_with(node, config, AppLifecycle::new().on_exit(|_session| {}))
+    }
+    let _ = entry as fn(Node, RuntimeConfig) -> Result<(), icmd::RenderError>;
+
+    // The session handle is high-level too: an event handler can stop the
+    // application without naming the runtime layer.
+    let handle = AppHandle::default();
+    assert!(!handle.exit_requested());
+    handle.request_exit();
+    assert!(handle.exit_requested());
+    handle.cancel_exit_request();
+    assert!(!handle.exit_requested());
+    assert_eq!(ExitReason::Requested.to_string(), "exit requested");
+}
+
 #[test]
 fn style_and_event_tiers_are_constructible() {
+    // The style vocabulary and the event types are root exports; only the
+    // genuinely tiered surfaces (`widgets`, `events`, `theme`, `advanced`,
+    // `prelude`) have their own module paths.
     let style = Style::default();
     let dim = Dimension::Cells(3);
     let _fill = Fill::new("█").expect("a block glyph is a valid fill");

@@ -1,3 +1,6 @@
+//! Shared activation mechanics for the interactive controls: focus policy,
+//! disabled gate, and the mapping from physical input to one semantic
+//! activation.
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::{
@@ -5,17 +8,20 @@ use crate::{
     basic::events::PointerEventKind, ui, view,
 };
 
-// Shared private activation mechanics for the interactive controls. It owns the
-// focus policy, the disabled gate, and the mapping from physical input
-// (primary click, Space, Enter) to one semantic activation. Domain components
-// keep their own policy: what activation means is still theirs to decide.
+/// Private activation state a control shares: its disabled gate, autofocus
+/// request, and the optional callback fired once per activation. What
+/// activation means stays the control's own policy.
 pub(crate) struct Activation {
+    /// Blocks activation and clears focusability when set.
     pub(crate) disabled: bool,
+    /// Requests focus on mount when the control is enabled.
     pub(crate) autofocus: bool,
+    /// Fired on each accepted activation.
     pub(crate) on_activate: Option<Box<dyn FnMut() + Send + 'static>>,
 }
 
 impl Activation {
+    /// Creates an activation with no callback.
     pub(crate) fn new(disabled: bool, autofocus: bool) -> Self {
         Self {
             disabled,
@@ -24,16 +30,18 @@ impl Activation {
         }
     }
 
+    /// Installs the callback fired on each accepted activation.
     pub(crate) fn on_activate(mut self, callback: impl FnMut() + Send + 'static) -> Self {
         self.on_activate = Some(Box::new(callback));
         self
     }
 }
 
-// Builds the interactive host node. The control's own defaults are merged with
-// the caller's DOM props exactly once, and focusability plus autofocus are
-// derived from the activation policy. The listeners live on this same node, so
-// it is also the painted and hit-tested node.
+/// Builds the interactive host node: merges the control's defaults with the
+/// caller's DOM props exactly once, derives focusability and autofocus from
+/// `activation`, and composes the caller's click and key listeners rather than
+/// replacing them. The listeners live on this same node, so it is also the
+/// painted and hit-tested node.
 pub(crate) fn interactive(
     defaults: DomProps,
     caller: &DomProps,
@@ -48,8 +56,6 @@ pub(crate) fn interactive(
     let callback: SharedActivate =
         std::sync::Arc::new(std::sync::Mutex::new(activation.on_activate));
 
-    // The caller's own listeners are composed rather than replaced, so an
-    // application can observe the same click it made interactive.
     let caller_click = dom.events.click.as_ref().cloned();
     let caller_key = dom.events.key_down.as_ref().cloned();
 
@@ -60,7 +66,6 @@ pub(crate) fn interactive(
                 if disabled {
                     return;
                 }
-                // Only a primary-button click activates, once per press.
                 if event.kind == PointerEventKind::Click && event.is_primary_button() {
                     fire(&callback);
                 }
@@ -89,8 +94,6 @@ pub(crate) fn interactive(
         )
     };
 
-    // Assign the composed listeners directly. Rebuilding the node through the
-    // macro would re-merge the caller props and double-apply their style.
     dom.events.click = Attr::Set(click);
     dom.events.key_down = Attr::Set(key);
 
@@ -100,10 +103,11 @@ pub(crate) fn interactive(
     }
 }
 
-// Shared activation callback: boxed so a control can own an arbitrary handler
-// while remaining `Send`.
+/// Shared activation callback: boxed so a control can own an arbitrary handler
+/// while remaining `Send`.
 type SharedActivate = std::sync::Arc<std::sync::Mutex<Option<Box<dyn FnMut() + Send>>>>;
 
+/// Invokes the installed callback once, if any.
 fn fire(callback: &SharedActivate) {
     if let Ok(mut guard) = callback.lock()
         && let Some(callback) = guard.as_mut()

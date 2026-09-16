@@ -796,3 +796,58 @@ fn clamp_snaps_to_the_nearest_grapheme_boundary() {
     assert_eq!(model.clamp(4), 4);
     assert_eq!(model.clamp(usize::MAX), 4);
 }
+
+#[test]
+fn a_controlled_owner_catching_up_does_not_reset_the_caret() {
+    // A controlled owner republishes asynchronously, so a render can carry an
+    // earlier link of the emitted chain while the owner is still behind.
+    // Treating that as a rejection reverted the value and clamped the caret to
+    // the shorter string, which is what made a fast typist - or a paste - land
+    // behind the caret.
+    let mut model = controlled("a", false);
+    assert_eq!(model.caret().cursor, 1);
+
+    // Several edits land before the owner's first answer.
+    insert(&mut model, "x", false);
+    insert(&mut model, "y", false);
+    insert(&mut model, "z", false);
+    assert_eq!(model.value(), "axyz");
+    assert_eq!(model.caret().cursor, 4);
+
+    // The owner answers one render behind, with the first emission.
+    model.render(Some("ax"), None, false, EmojiMerging::Merge);
+    assert_eq!(
+        model.value(),
+        "axyz",
+        "a catch-up echo must not revert the optimistic value"
+    );
+    assert_eq!(
+        model.caret().cursor,
+        4,
+        "a catch-up echo must not clamp the caret"
+    );
+
+    // The owner republishes the latest emission: accepted, caret kept.
+    model.render(Some("axyz"), None, false, EmojiMerging::Merge);
+    assert_eq!(model.value(), "axyz");
+    assert_eq!(model.caret().cursor, 4);
+
+    // The next keystroke lands at the end rather than behind the caret.
+    insert(&mut model, "X", false);
+    assert_eq!(model.value(), "axyzX");
+    assert_eq!(model.caret().cursor, 5);
+}
+
+#[test]
+fn a_controlled_value_the_model_never_emitted_is_still_applied() {
+    // A rejection or an external replacement is a value the model never
+    // produced, so it must still win over the optimistic draft.
+    let mut model = controlled("a", false);
+    insert(&mut model, "x", false);
+    insert(&mut model, "y", false);
+    assert_eq!(model.value(), "axy");
+
+    model.render(Some("a!"), None, false, EmojiMerging::Merge);
+    assert_eq!(model.value(), "a!");
+    assert_eq!(model.caret().cursor, 2);
+}

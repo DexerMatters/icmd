@@ -1,8 +1,15 @@
+//! Raw text editor surface: caret, selection, scrolling, and clipboard
+//! handling shared by `input` and `textarea`.
+
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::basic::editor_surface::{EditorSurface, LayoutProbe};
+use crate::basic::selection::{
+    ClipboardIntent, DocPoint, SelectionDocument, SelectionMotion, clipboard_intent,
+    clipboard_load, clipboard_store, motion_for,
+};
 use crate::basic::text_layout::{self, ComputedText, HitBias};
 use crate::{
     Attr, Dimension, DomProps, EmojiMerging, EventListener, FocusEvent, KeyboardEvent, Node,
@@ -13,19 +20,29 @@ use crate::{
 use super::model::{EditAction, EditIntent, EditModel, EditPolicy};
 use super::{TextClipboardAction, TextClipboardEvent, TextValueEvent};
 
+/// Editing mode for [`raw_input`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RawInputMode {
+    /// One logical line; no wrapping, scrolls horizontally.
     #[default]
     SingleLine,
+    /// Multiple logical lines, optionally wrapped.
     Multiline,
 }
 
+/// Visual style configuration for [`raw_input`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawInputAppearance {
+    /// Style for placeholder text.
     pub placeholder: TextStyle,
+    /// Style for the focused selection.
     pub selection: TextStyle,
+    /// Style for the selection while unfocused.
     pub selection_inactive: TextStyle,
+    /// Style for the caret.
     pub caret: TextStyle,
+    /// Optional border color applied while focused; `None` leaves the host
+    /// border unchanged.
     pub focused_border: Option<crossterm::style::Color>,
 }
 
@@ -41,20 +58,37 @@ impl Default for RawInputAppearance {
     }
 }
 
+/// Configuration for [`raw_input`].
 #[derive(Clone, Default)]
 pub struct RawInputProps {
+    /// Editing mode; defaults to [`RawInputMode::SingleLine`].
     pub mode: Attr<RawInputMode>,
+    /// Controlled value; when set, the control renders it and requests changes
+    /// instead of mutating itself.
     pub value: Attr<String>,
+    /// Initial value for an uncontrolled control.
     pub default_value: Attr<String>,
+    /// Text shown while the value is empty.
     pub placeholder: Attr<String>,
+    /// Line wrapping for multi-line mode; defaults to [`TextWrap::Soft`] and is
+    /// ignored for single-line mode.
     pub wrap: Attr<TextWrap>,
+    /// Maximum value length in display units; unbounded when unset.
     pub max_length: Attr<usize>,
+    /// Whether editing and focus are refused; defaults to `false`.
     pub disabled: Attr<bool>,
+    /// Whether the value may be selected and copied but not edited; defaults
+    /// to `false`.
     pub read_only: Attr<bool>,
+    /// Whether the control requests focus on mount; defaults to `false`.
     pub autofocus: Attr<bool>,
+    /// Visual styles; defaults to [`RawInputAppearance::default`].
     pub appearance: Attr<RawInputAppearance>,
+    /// Listener for each committed value change.
     pub on_change: Attr<EventListener<TextValueEvent>>,
+    /// Listener for Enter in single-line mode.
     pub on_submit: Attr<EventListener<TextValueEvent>>,
+    /// Listener for copy and cut operations answered by the control.
     pub on_clipboard: Attr<EventListener<TextClipboardEvent>>,
 }
 
@@ -73,42 +107,68 @@ impl std::fmt::Debug for RawInputProps {
     }
 }
 
+/// Mutable interaction state owned by one raw input across renders.
 #[derive(Default)]
 struct InputState {
+    /// The editing model: value, caret, and draft reconciliation.
     model: EditModel,
+    /// Whether the control currently holds focus.
     focused: bool,
+    /// Whether a pointer drag is selecting.
     dragging: bool,
+    /// The offset the press landed on, so a drag resolves the glyph under the
+    /// pointer inclusively in both directions - the same rule a selectable
+    /// region uses.
+    pressed: usize,
+    /// Horizontal scroll offset in cells.
     scroll_x: usize,
+    /// Vertical scroll offset in rows.
     scroll_y: usize,
+    /// Whether the next reconcile should scroll the caret into view.
     reveal_caret: bool,
 }
 
+/// Resolved per-frame configuration derived from props and the committed
+/// layout.
 struct Config {
+    /// Whether the control is multi-line.
     multiline: bool,
+    /// Resolved wrap mode.
     wrap: TextWrap,
+    /// Bootstrap content width in cells before the first commit.
     width: usize,
+    /// Bootstrap content height in rows before the first commit.
     height: usize,
+    /// Editing policy forwarded to the model.
     policy: EditPolicy,
+    /// Resolved visual styles.
     appearance: RawInputAppearance,
+    /// Placeholder text.
     placeholder: String,
 }
 
 impl Config {
+    /// Axes this configuration scrolls on.
+    ///
+    /// A single logical line never wraps, so the viewport pans across it;
+    /// unwrapped multiline content can overflow both axes; wrapped multiline
+    /// rows are built at the granted width, so only the vertical axis scrolls.
     fn scroll_axes(&self) -> ScrollAxes {
         if !self.multiline {
-            // A single logical line never wraps, so the viewport pans across it.
             ScrollAxes::Horizontal
         } else if self.wrap == TextWrap::NoWrap {
-            // Unwrapped multiline content can overflow both axes.
             ScrollAxes::Both
         } else {
-            // Wrapped multiline rows are built at the granted width, so only
-            // the vertical axis scrolls.
             ScrollAxes::Vertical
         }
     }
 }
 
+/// Resolve the per-frame configuration from props.
+///
+/// The requested size only bootstraps the first frame before the commit pass
+/// has published a content box; the editor never derives its own content
+/// geometry, so padding and borders are never subtracted here.
 fn config_from(props: &Props<RawInputProps>, emoji_merging: EmojiMerging) -> Config {
     let mode = props.mode | RawInputMode::SingleLine;
     let multiline = matches!(mode, RawInputMode::Multiline);
@@ -125,10 +185,6 @@ fn config_from(props: &Props<RawInputProps>, emoji_merging: EmojiMerging) -> Con
         Attr::Set(Dimension::Cells(value)) => value as usize,
         _ => 1,
     };
-    // These are only the *requested* size, used to bootstrap the first frame
-    // before the commit pass has published a content box. The editor never
-    // derives its own content geometry: the committed box is authoritative, so
-    // padding and borders are never subtracted here.
     Config {
         multiline,
         wrap,
@@ -146,21 +202,22 @@ fn config_from(props: &Props<RawInputProps>, emoji_merging: EmojiMerging) -> Con
     }
 }
 
+/// Raw single- or multi-line text editor; see [`RawInputProps`] for its
+/// configuration.
+///
+/// The editor never infers focus from receiving a key: the dispatcher routes a
+/// targeted key here only when this region is the focused target, and the
+/// `focus_event` listener records the transition.
 pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Node {
     let state_ref = cx.use_ref(InputState::default);
     let (_, redraw) = cx.use_state(|| 0_u64);
 
-    // The commit pass publishes the layout it painted here; this component only
-    // reads it, so wrapping never needs a feedback render. The emoji-merging
-    // mode it records also decides the units the model edits on.
     let probe = {
         let cell = cx.use_ref(LayoutProbe::new);
         cell.lock().expect("layout probe poisoned").clone()
     };
     let config = Arc::new(config_from(props, probe.emoji_merging()));
 
-    // Reconcile the owner's value, then bring the caret into view using the
-    // layout of the last painted frame.
     let (scroll_offset, text) = {
         let mut state = state_ref.lock().expect("input state poisoned");
         state.model.render(
@@ -173,17 +230,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
             state.dragging = false;
             state.reveal_caret = false;
         }
-        // The caret and scroll position belong to the model's current (possibly
-        // optimistic) value, and the geometry must be exactly what the last
-        // committed frame painted. The commit pass publishes that content box;
-        // the requested size only bootstraps the very first frame.
-        // A single unwrapped line is horizontally scrollable, so its viewport
-        // width is the granted box rather than the document's own width; a
-        // wrapped or multiline document scrolls vertically inside the viewport
-        // the commit pass actually painted.
         let committed = probe.committed();
-        // The committed frame's emoji-merging mode is authoritative; before the
-        // first frame the bootstrap falls back to the default cluster measure.
         let merging = committed
             .as_ref()
             .map_or(EmojiMerging::Merge, |committed| committed.emoji_merging);
@@ -207,11 +254,10 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let scroll_offset = ScrollOffset::new(state.scroll_x as u32, state.scroll_y as u32);
         let surface = EditorSurface {
             value: state.model.value.clone(),
-            selection: if state.model.caret().is_collapsed() {
-                None
-            } else {
-                Some(state.model.caret().range())
-            },
+            selection: state
+                .model
+                .caret()
+                .local_range(0, state.model.value().len()),
             caret: state.model.caret().cursor,
             focused,
             placeholder: config.placeholder.clone(),
@@ -230,7 +276,6 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         (scroll_offset, text)
     };
 
-    // Compose internal behavior with caller observers on one host.
     let caller = props.dom.events.clone();
     let on_change = props.on_change.as_ref().cloned();
     let on_submit = props.on_submit.as_ref().cloned();
@@ -258,13 +303,10 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 let mut clipboard_event = None;
                 let mut submit_event = None;
                 let mut caret_moved = false;
-                let copy_selection = is_copy(&event);
+                let clipboard = clipboard_intent(&event);
+                let copy_selection = clipboard == Some(ClipboardIntent::Copy);
                 {
                     let mut state = state_ref.lock().expect("input state poisoned");
-                    // Focus is owned by the dispatcher. A widget never infers
-                    // it from receiving a key; the dispatcher only routes a
-                    // targeted key here when this region is the focused target,
-                    // and the `focus_event` listener records the transition.
                     if !config.multiline
                         && event.key.code == KeyCode::Enter
                         && !event.key.modifiers.contains(KeyModifiers::CONTROL)
@@ -273,9 +315,9 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                         submit_event = Some(TextValueEvent {
                             value: state.model.value().to_string(),
                         });
-                    } else if is_cut(&event) && !state.model.caret().is_collapsed() {
-                        // Cut removes the selection and is the only action that
-                        // may surface the removed text as a clipboard Cut.
+                    } else if clipboard == Some(ClipboardIntent::Cut)
+                        && !state.model.caret().is_collapsed()
+                    {
                         event.stop_propagation();
                         let outcome = state.model.reduce(EditAction::Cut, policy);
                         if outcome.changed {
@@ -285,20 +327,25 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                         if outcome.intent == EditIntent::Cut
                             && let Some(text) = outcome.removed_text
                         {
+                            clipboard_store(&text);
                             clipboard_event = Some(TextClipboardEvent {
                                 action: TextClipboardAction::Cut,
                                 text,
                             });
                         }
+                    } else if clipboard == Some(ClipboardIntent::Paste) {
+                        event.stop_propagation();
+                        if let Some(text) = clipboard_load() {
+                            let outcome = state.model.reduce(EditAction::Paste(text), policy);
+                            if outcome.changed {
+                                state.reveal_caret = true;
+                                value_event = outcome.value.map(|value| TextValueEvent { value });
+                            }
+                        }
                     } else if let Some(action) = key_action(&event, &config) {
                         event.stop_propagation();
-                        // Vertical movement is resolved from the same row table
-                        // the pointer and the painter use, so a caret crossing
-                        // wrapped rows lands where the user sees it.
                         let outcome = if let Some((direction, steps)) = vertical_steps(&action) {
-                            let layout = committed_layout(&probe, &state, &config);
-                            // A page is the viewport the layout actually
-                            // painted, not the requested border box.
+                            let document = committed_document(&probe, &state, &config);
                             let steps = if matches!(
                                 action,
                                 EditAction::PageUp { .. } | EditAction::PageDown { .. }
@@ -312,7 +359,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                             let extend = event.key.modifiers.contains(KeyModifiers::SHIFT);
                             state
                                 .model
-                                .vertical_move(&layout, direction, steps, extend, policy)
+                                .vertical_move(&document, direction, steps, extend, policy)
                         } else {
                             state.model.reduce(action, policy)
                         };
@@ -329,16 +376,13 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                                 text,
                             });
                         }
-                    } else if copy_selection {
-                        let caret = state.model.caret();
-                        if !caret.is_collapsed() {
-                            let (start, end) = caret.range();
-                            event.stop_propagation();
-                            clipboard_event = Some(TextClipboardEvent {
-                                action: TextClipboardAction::Copy,
-                                text: state.model.value()[start..end].to_string(),
-                            });
-                        }
+                    } else if copy_selection && let Some(text) = state.model.selected_text() {
+                        event.stop_propagation();
+                        clipboard_store(&text);
+                        clipboard_event = Some(TextClipboardEvent {
+                            action: TextClipboardAction::Copy,
+                            text,
+                        });
                     }
                 }
                 if let Some(listener) = &on_clipboard
@@ -382,7 +426,6 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 }
                 let (changed, value_event) = {
                     let mut state = state_ref.lock().expect("input state poisoned");
-                    // The model needs owned text; the event itself is shared.
                     let outcome = state
                         .model
                         .reduce(EditAction::Paste(event.text.to_string()), policy);
@@ -394,9 +437,6 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                         outcome.value.map(|value| TextValueEvent { value }),
                     )
                 };
-                // Redraw is driven by the committed edit result, never by the
-                // presence of a caller observer: an uncontrolled input without
-                // `on_change` must still repaint the pasted value.
                 if changed {
                     redraw.update(|value| *value += 1);
                 }
@@ -427,15 +467,14 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 }
                 {
                     let mut state = state_ref.lock().expect("input state poisoned");
-                    // A press does not fabricate widget focus either: the
-                    // dispatcher's own focus-on-press transition reaches this
-                    // component through the `focus_event` listener.
-                    let layout = committed_layout(&probe, &state, &config);
-                    let offset = hit_offset(&layout, event.local_position, probe.committed());
+                    let offset = pointer_offset(&probe, &state, &config, event.local_position);
                     let extend = event.modifiers.contains(KeyModifiers::SHIFT);
                     state
                         .model
                         .reduce(EditAction::PlaceCaret { offset, extend }, policy);
+                    if !extend {
+                        state.pressed = offset;
+                    }
                     state.dragging = true;
                 }
                 redraw.update(|value| *value += 1);
@@ -460,15 +499,11 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 if !state.dragging {
                     return;
                 }
-                let layout = committed_layout(&probe, &state, &config);
-                let offset = hit_offset(&layout, event.local_position, probe.committed());
-                state.model.reduce(
-                    EditAction::PlaceCaret {
-                        offset,
-                        extend: true,
-                    },
-                    policy,
-                );
+                let committed = committed_document(&probe, &state, &config);
+                let point = document_point(&probe, event.local_position);
+                let pressed = state.pressed;
+                state.model.drag_selection(&committed, point, pressed);
+                let _ = policy;
                 state.reveal_caret = false;
                 drop(state);
                 redraw.update(|value| *value += 1);
@@ -530,8 +565,6 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                     let mut state = state_ref.lock().expect("input state poisoned");
                     state.scroll_x = event.offset.x as usize;
                     state.scroll_y = event.offset.y as usize;
-                    // Physical scrolling never re-centers on the caret; only a
-                    // later edit or navigation action requests reveal.
                     state.reveal_caret = false;
                 }
                 redraw.update(|value| *value += 1);
@@ -540,15 +573,8 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         )
     };
 
-    // The editor's single semantic host: caller DOM props and explicit
-    // focusability. The caller's observers are composed inside each internal
-    // listener, so the host's own event slots stay free for the `ui!`
-    // attributes below, and the scroll area nested inside it provides scrolling
-    // without introducing a second event or focus identity.
     let mut scroll_host = props.host_props(DomProps::default());
     scroll_host.focusable = Attr::Set(!config.policy.disabled);
-    // Autofocus is an explicit runtime focus request processed after the region
-    // is published; the editor never claims focus merely by receiving a key.
     scroll_host.autofocus = (props.autofocus | false) && !config.policy.disabled;
     if focus_active(&state_ref, &config)
         && let Some(color) = config.appearance.focused_border
@@ -557,16 +583,16 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
     }
     let scroll_axes = config.scroll_axes();
     let disabled = config.policy.disabled;
-    // The editor host owns caller DOM props, focus (via `focusable`), and the
-    // composed listeners, and it is the node that `scroll_area` wraps. The
-    // scroll area supplies the scrolling mechanism and the content box the
-    // surface wraps to, so pointer coordinates and painted rows share one
-    // content space even though the scroll engine lives on the inner node.
+    let host_height = if config.multiline {
+        Dimension::Max
+    } else {
+        Dimension::Cells(1)
+    };
     let scrollable = if disabled {
         ui! {
-            <view style={|style| {
+            <view style={move |style| {
                 style.width /= Dimension::Max;
-                style.height /= Dimension::Max;
+                style.height /= host_height;
             }}>
                 {text}
             </view>
@@ -578,9 +604,9 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 scrollbar_visibility={ScrollbarVisibility::Hidden}
                 offset={scroll_offset}
                 enable_keyboard={false}
-                style={|style| {
+                style={move |style| {
                     style.width /= Dimension::Max;
-                    style.height /= Dimension::Max;
+                    style.height /= host_height;
                 }}
             >
                 {text}
@@ -588,9 +614,6 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         }
     };
 
-    // A disabled control must not retain focus. Rendering the enabled host
-    // under a distinct key removes its DOM id from the region set, which is
-    // what makes the runtime deliver exactly one `Lost` focus event.
     if disabled {
         ui! {
             <view key="raw-input-disabled" dom={scroll_host}>{scrollable}</view>
@@ -613,11 +636,13 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
     }
 }
 
+/// Whether the control currently holds focus and is enabled.
 fn focus_active(state_ref: &crate::basic::Ref<InputState>, config: &Config) -> bool {
     let state = state_ref.lock().expect("input state poisoned");
     state.focused && !config.policy.disabled
 }
 
+/// Lay `value` out at an explicit width with the given emoji-merging mode.
 fn build_layout_at(
     value: &str,
     config: &Config,
@@ -634,12 +659,34 @@ fn build_layout_at(
     )
 }
 
+/// Lay `value` out at the configuration's bootstrap width.
 fn build_layout(value: &str, config: &Config, merging: EmojiMerging) -> text_layout::TextLayout {
     build_layout_at(value, config, config.width, merging)
 }
 
-// The committed layout is shared, not copied: pointer and vertical queries only
-// read it, and deep-cloning a layout per event scaled with the document.
+/// Describe the committed frame as the selection engine's one-segment document,
+/// so vertical motion and pointer hit testing share the engine's rows with
+/// every other selectable surface.
+fn committed_document(
+    probe: &LayoutProbe,
+    state: &InputState,
+    config: &Config,
+) -> SelectionDocument {
+    let layout = committed_layout(probe, state, config);
+    let viewport = probe.committed().map_or(config.height.max(1), |committed| {
+        committed.viewport_height.max(1)
+    });
+    SelectionDocument::single(
+        Arc::from(state.model.value()),
+        layout,
+        probe.emoji_merging(),
+        viewport,
+    )
+}
+
+/// The committed layout, shared rather than copied: pointer and vertical
+/// queries only read it, and deep-cloning a layout per event scaled with the
+/// document.
 fn committed_layout(
     probe: &LayoutProbe,
     state: &InputState,
@@ -657,6 +704,12 @@ fn committed_layout(
         })
 }
 
+/// Bring the caret into view and clamp the offset to the extent the runtime
+/// will actually apply.
+///
+/// The extent is a property of the layout, the viewport, and the axes the host
+/// actually scrolls on; requesting an offset on a disabled axis would be
+/// silently refused and leave requested and painted offsets out of step.
 fn reconcile_scroll(
     state: &mut InputState,
     layout: &text_layout::TextLayout,
@@ -666,11 +719,6 @@ fn reconcile_scroll(
 ) {
     let view_width = view_width.max(1);
     let view_height = view_height.max(1);
-    // The extent is a property of the layout, the viewport, and the axes the
-    // host actually scrolls on. This component owns the offset, so it clamps to
-    // exactly what the runtime will apply: requesting an offset on a disabled
-    // axis would be silently refused and leave the requested and painted offsets
-    // out of step, which puts pointer coordinates in the wrong space.
     let horizontal = matches!(axes, ScrollAxes::Horizontal | ScrollAxes::Both);
     let vertical = matches!(axes, ScrollAxes::Vertical | ScrollAxes::Both);
     let max_x = if horizontal {
@@ -696,35 +744,26 @@ fn reconcile_scroll(
         if cell < state.scroll_x {
             state.scroll_x = cell;
         } else {
-            // The caret's cells must be visible; the offset is clamped to the
-            // extent again so a caret at the very end cannot ask for a scroll
-            // the runtime will refuse.
             let caret_end = cell.saturating_add(caret_width.max(1));
             if caret_end > state.scroll_x.saturating_add(view_width) {
                 state.scroll_x = caret_end - view_width;
             }
         }
     }
-    // Final clamp: reveal may have pushed past the extent, and the painted frame
-    // is what the pointer will be mapped against.
     state.scroll_x = state.scroll_x.min(max_x);
     state.scroll_y = state.scroll_y.min(max_y);
 }
 
+/// Style for the editor's text leaf.
+///
+/// The leaf keeps its own text extent: the scroll host pans a single unwrapped
+/// line by exactly that extent, and pointer mapping, wrapping and hit testing
+/// all read the same box.
 fn surface_style() -> Style {
     Style::default()
 }
 
-fn is_cut(event: &KeyboardEvent) -> bool {
-    event.key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(event.key.code, KeyCode::Char('x' | 'X'))
-}
-
-fn is_copy(event: &KeyboardEvent) -> bool {
-    event.key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(event.key.code, KeyCode::Char('c' | 'C'))
-}
-
+/// Map a vertical navigation action to a direction and step count.
 fn vertical_steps(action: &EditAction) -> Option<(i32, usize)> {
     match action {
         EditAction::MoveUp { .. } => Some((-1, 1)),
@@ -735,38 +774,71 @@ fn vertical_steps(action: &EditAction) -> Option<(i32, usize)> {
     }
 }
 
+/// Derive the editor's action vocabulary from the selection engine's one
+/// keymap.
+///
+/// The component contributes only the policy the engine has no opinion on: a
+/// single-line control has no row or page motion, and Control means a word step
+/// here rather than any other editor convention.
 fn key_action(event: &KeyboardEvent, config: &Config) -> Option<EditAction> {
     let modifiers = event.key.modifiers;
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    if let Some(motion) = motion_for(event) {
+        return match motion {
+            SelectionMotion::CharLeft => Some(EditAction::MoveLeft {
+                extend: shift,
+                word: false,
+            }),
+            SelectionMotion::CharRight => Some(EditAction::MoveRight {
+                extend: shift,
+                word: false,
+            }),
+            SelectionMotion::WordLeft => Some(EditAction::MoveLeft {
+                extend: shift,
+                word: true,
+            }),
+            SelectionMotion::WordRight => Some(EditAction::MoveRight {
+                extend: shift,
+                word: true,
+            }),
+            SelectionMotion::RowStart => Some(EditAction::Home {
+                extend: shift,
+                document: false,
+            }),
+            SelectionMotion::RowEnd => Some(EditAction::End {
+                extend: shift,
+                document: false,
+            }),
+            SelectionMotion::DocStart => Some(EditAction::Home {
+                extend: shift,
+                document: true,
+            }),
+            SelectionMotion::DocEnd => Some(EditAction::End {
+                extend: shift,
+                document: true,
+            }),
+            SelectionMotion::RowUp if config.multiline => {
+                Some(EditAction::MoveUp { extend: shift })
+            }
+            SelectionMotion::RowDown if config.multiline => {
+                Some(EditAction::MoveDown { extend: shift })
+            }
+            SelectionMotion::PageUp if config.multiline => Some(EditAction::PageUp {
+                extend: shift,
+                rows: config.height,
+            }),
+            SelectionMotion::PageDown if config.multiline => Some(EditAction::PageDown {
+                extend: shift,
+                rows: config.height,
+            }),
+            _ => None,
+        };
+    }
+    if clipboard_intent(event) == Some(ClipboardIntent::SelectAll) {
+        return Some(EditAction::SelectAll);
+    }
     match event.key.code {
-        KeyCode::Left => Some(EditAction::MoveLeft {
-            extend: shift,
-            word: ctrl,
-        }),
-        KeyCode::Right => Some(EditAction::MoveRight {
-            extend: shift,
-            word: ctrl,
-        }),
-        KeyCode::Home => Some(EditAction::Home {
-            extend: shift,
-            document: ctrl,
-        }),
-        KeyCode::End => Some(EditAction::End {
-            extend: shift,
-            document: ctrl,
-        }),
-        KeyCode::Up if config.multiline => Some(EditAction::MoveUp { extend: shift }),
-        KeyCode::Down if config.multiline => Some(EditAction::MoveDown { extend: shift }),
-        KeyCode::PageUp if config.multiline => Some(EditAction::PageUp {
-            extend: shift,
-            rows: config.height,
-        }),
-        KeyCode::PageDown if config.multiline => Some(EditAction::PageDown {
-            extend: shift,
-            rows: config.height,
-        }),
-        KeyCode::Char('a' | 'A') if ctrl => Some(EditAction::SelectAll),
         KeyCode::Backspace => Some(EditAction::Backspace { word: ctrl }),
         KeyCode::Delete => Some(EditAction::Delete { word: ctrl }),
         KeyCode::Enter if config.multiline => Some(EditAction::InsertNewline),
@@ -786,25 +858,38 @@ fn key_action(event: &KeyboardEvent, config: &Config) -> Option<EditAction> {
     }
 }
 
-const POINTER_HIT_BIAS: HitBias = HitBias::Trailing;
-
-fn hit_offset(
-    layout: &text_layout::TextLayout,
-    local: crate::ScreenPosition,
-    committed: Option<crate::basic::editor_surface::CommittedLayout>,
-) -> usize {
-    // The runtime reports the pointer in the coordinates of the region it hit,
-    // which is the child as painted. That frame was laid out with exactly the
-    // committed applied offset, so adding that offset back once converts the
-    // pointer into the layout's unscrolled content coordinates. The requested
-    // offset is deliberately NOT consulted: the request and the frame that the
-    // user actually clicked on can differ, and the painted frame is the truth.
-    // Padding and borders are never subtracted by hand: the event system
-    // supplies content-box coordinates.
-    let (applied_x, applied_y) = committed.as_ref().map_or((0, 0), |committed| {
+/// Convert a pointer position into the document coordinates the selection
+/// engine hit tests in.
+///
+/// The runtime reports the pointer in the coordinates of the region it hit,
+/// which is the child as painted; that frame was laid out with exactly the
+/// committed applied offset, so adding that offset back once is the whole
+/// conversion. The press and every drag endpoint go through here, so a
+/// selection can never be expressed in a different space from the glyphs it
+/// covers.
+fn document_point(probe: &LayoutProbe, local: crate::ScreenPosition) -> DocPoint {
+    let (applied_x, applied_y) = probe.committed().map_or((0, 0), |committed| {
         (committed.applied_x, committed.applied_y)
     });
-    let row = (local.line.max(0) as usize + applied_y).min(layout.row_count().saturating_sub(1));
-    let cell = local.column.max(0) as usize + applied_x;
-    layout.hit(row, cell, POINTER_HIT_BIAS)
+    DocPoint::Point {
+        line: local.line.max(0) + applied_y as i32,
+        column: local.column.max(0) + applied_x as i32,
+    }
+}
+
+/// Resolve a pointer position to a document offset.
+///
+/// The row/cell math lives in the selection engine's document, so the editor
+/// and every other selectable surface hit test identically. Leading bias places
+/// the selection on the glyph the pointer is over, not after it, so clicking a
+/// cell and dragging over text behaves the same here and in a selectable
+/// region.
+fn pointer_offset(
+    probe: &LayoutProbe,
+    state: &InputState,
+    config: &Config,
+    local: crate::ScreenPosition,
+) -> usize {
+    let document = committed_document(probe, state, config);
+    document.hit(document_point(probe, local), HitBias::Leading)
 }

@@ -1,3 +1,6 @@
+//! Image source manager: worker pool, bounded queues, byte budget, and the source cache.
+//! Owns request scheduling, backpressure handling, result storage, and cache eviction bookkeeping.
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
@@ -12,13 +15,9 @@ use crate::{Cell, Image, ImageSource, RasterImage, RasterImageError, RasterPlace
 
 pub(crate) type LoadResult = (ImageSource, Result<RasterImage, RasterImageError>);
 
-// Bounded capacities, exposed through `ImageMetrics` so queue pressure and
-// result backlog are observable rather than implicit.
 pub(crate) const JOB_QUEUE_CAPACITY: usize = 32;
 pub(crate) const RESULT_QUEUE_CAPACITY: usize = 64;
 
-// Why a scheduling attempt did not (or did) enqueue work. A full worker queue is
-// backpressure, never a decode failure: the request stays pending and retryable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScheduleResult {
     Queued,
@@ -26,6 +25,7 @@ enum ScheduleResult {
     Closed,
 }
 
+/// Owns the image worker pool and its bounded job and result channels.
 #[derive(Debug)]
 pub struct ImageLoader {
     jobs: Sender<ImageSource>,
@@ -34,6 +34,7 @@ pub struct ImageLoader {
 }
 
 impl ImageLoader {
+    /// Spawns `workers` loader threads over a 32-job queue feeding a 64-result queue, sharing `budget`, the in-flight decoded-byte cap.
     pub fn with_workers(
         workers: usize,
         gate: Option<Receiver<()>>,
@@ -42,9 +43,6 @@ impl ImageLoader {
     ) -> Self {
         let high_water = Arc::new(QueueHighWater::default());
         let (jobs, job_rx) = crossbeam_channel::bounded::<ImageSource>(JOB_QUEUE_CAPACITY);
-        // Bounded results: decoded pixels cannot accumulate without limit while
-        // the renderer is busy. Workers block once the queue is full, which is
-        // exactly the backpressure the render loop drains.
         let (result_tx, results) = crossbeam_channel::bounded(RESULT_QUEUE_CAPACITY);
         for _ in 0..workers {
             let job_rx = job_rx.clone();
@@ -57,20 +55,14 @@ impl ImageLoader {
                 .spawn(move || {
                     while let Ok(source) = job_rx.recv() {
                         if let Some(gate) = &gate {
-                            // Test-only stall point: a disconnected gate
-                            // releases every present and future job.
                             let _ = gate.recv();
                         }
                         let result = source.load_with_limits(&limits);
-                        // The reservation is released as soon as the decoded
-                        // pixels leave this worker, on every return path.
                         let bytes = result
                             .as_ref()
                             .map(|image| image.rgba8().len())
                             .unwrap_or(0);
                         let _reservation = budget.reserve(bytes).ok();
-                        // Sampled before the send, which is the deepest this
-                        // worker can observe the result queue.
                         high_water.observe_results(result_tx.len().saturating_add(1));
                         if result_tx.send((source, result)).is_err() {
                             break;
@@ -87,7 +79,6 @@ impl ImageLoader {
     }
 
     fn schedule(&self, source: ImageSource) -> ScheduleResult {
-        // The depth after a successful send is the queue's high-water candidate.
         self.high_water
             .observe_jobs(self.jobs.len().saturating_add(1));
         match self.jobs.try_send(source) {
@@ -98,9 +89,6 @@ impl ImageLoader {
     }
 }
 
-// Peak observed queue depths. The plan asks for high-water marks rather than
-// instantaneous depth, because a transient saturation is the signal that a
-// capacity is too small.
 #[derive(Debug, Default)]
 pub(crate) struct QueueHighWater {
     job: std::sync::atomic::AtomicUsize,
@@ -127,9 +115,8 @@ impl QueueHighWater {
     }
 }
 
-// Concurrency-safe byte accounting shared by every image worker. A reservation
-// is RAII: capacity returns to the pool when the decoded buffer is dropped, on
-// both the success and failure paths.
+/// Concurrency-safe accounting of decoded image bytes in flight, shared by every worker.
+/// A reservation is RAII: capacity returns to the pool when the decoded buffer is dropped, on both success and failure.
 #[derive(Debug)]
 pub struct ByteBudget {
     limit: usize,
@@ -137,6 +124,7 @@ pub struct ByteBudget {
 }
 
 impl ByteBudget {
+    /// Creates a budget admitting at most `limit` decoded bytes in flight.
     pub fn new(limit: usize) -> Self {
         Self {
             limit,
@@ -147,8 +135,6 @@ impl ByteBudget {
     pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Result<ByteReservation, ()> {
         let mut current = self.used.load(std::sync::atomic::Ordering::SeqCst);
         loop {
-            // `checked_add` keeps an accounting overflow from wrapping into a
-            // silently small value.
             let Some(next) = current.checked_add(bytes) else {
                 return Err(());
             };
@@ -190,43 +176,49 @@ impl Drop for ByteReservation {
     }
 }
 
+/// Cached load state and last-use accounting for one image source.
 #[derive(Debug)]
 pub struct SourceCacheEntry {
+    /// Current load state of the source.
     pub state: SourceState,
     bytes: usize,
     used: u64,
 }
 
+/// Load state of a cached image source.
 #[derive(Debug)]
 pub enum SourceState {
+    /// A worker is decoding the source, or the request is queued for one.
     Loading,
+    /// Decoded pixels are available.
     Ready(RasterImage),
+    /// Decoding failed for this source.
     Failed,
 }
 
+/// Outcome of asking the manager to load an image source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceRequest {
+    /// The source is already loaded or cached, so no work was scheduled.
     AlreadyAvailable,
+    /// The source was handed to a worker or is pending for one.
     Queued,
-    // The worker queue is momentarily full. The request is retained and retried;
-    // it is not an error and never poisons the cache.
+    /// The worker queue is momentarily full; the request stays pending and retryable, never a cache-poisoning error.
     Backpressured,
-    // The worker queue is gone. This is a terminal runtime condition, not an
-    // image-decode failure.
+    /// The worker queue is gone, a terminal runtime condition rather than an image-decode failure.
     Closed,
 }
 
+/// Owns image-source loading, the source cache, and the deferred request queues.
 #[derive(Debug)]
 pub struct ImageManager {
     loader: ImageLoader,
     budget: Arc<ByteBudget>,
-    // Keyed by cache identity, so two spellings of the same opened file share
-    // one load and one entry.
+    /// Cache keyed by cache identity, so two spellings of the same opened file share one load and one entry.
     pub source_cache: HashMap<ImageSourceKey, SourceCacheEntry>,
     source_cache_bytes: usize,
+    /// Keys currently requested or in flight, used to deduplicate loads.
     pub loading: HashSet<ImageSourceKey>,
-    // Deduplicated queue of sources that could not be handed to a worker yet.
-    // The source travels with its key so a retry can still load it.
     pending: VecDeque<(ImageSourceKey, ImageSource)>,
     pending_loads: VecDeque<LoadResult>,
     cache_tick: u64,
@@ -239,6 +231,7 @@ impl ImageManager {
         Self::with_loader(loader, budget)
     }
 
+    /// Creates a manager over an existing `loader` and `budget`.
     pub fn with_loader(loader: ImageLoader, budget: Arc<ByteBudget>) -> Self {
         Self {
             loader,
@@ -260,6 +253,7 @@ impl ImageManager {
         self.pending_loads.push_back(result);
     }
 
+    /// Drains every completed load result and retries requests deferred by earlier backpressure.
     pub fn take_results(&mut self) -> Vec<LoadResult> {
         let mut results = Vec::new();
         while let Some(result) = self
@@ -269,12 +263,11 @@ impl ImageManager {
         {
             results.push(result);
         }
-        // Draining results frees worker capacity, so retry anything deferred by
-        // earlier backpressure before the caller renders again.
         self.pump();
         results
     }
 
+    /// Returns decoded pixels for `source` when it is loaded directly or cached as ready.
     pub fn source_image(&self, source: &ImageSource) -> Option<RasterImage> {
         match source {
             ImageSource::Loaded(image) => Some(image.clone()),
@@ -306,6 +299,7 @@ impl ImageManager {
         placeholder(raster.width, raster.height, symbol)
     }
 
+    /// Requests a load for `source`, reusing any cached, in-flight, or pending entry.
     pub fn request(&mut self, source: &ImageSource) -> SourceRequest {
         let key = source.cache_key();
         if source.loaded_image().is_some() || self.source_cache.contains_key(&key) {
@@ -316,7 +310,6 @@ impl ImageManager {
             return SourceRequest::AlreadyAvailable;
         }
         if !self.loading.insert(key.clone()) {
-            // Already in flight or waiting for a worker: still not an error.
             return SourceRequest::AlreadyAvailable;
         }
         self.cache_tick = self.cache_tick.saturating_add(1);
@@ -330,7 +323,6 @@ impl ImageManager {
         }
     }
 
-    // Move as many deferred sources into the worker queue as capacity allows.
     fn pump(&mut self) -> ScheduleResult {
         while let Some((key, source)) = self.pending.front().cloned() {
             match self.loader.schedule(source) {
@@ -348,9 +340,6 @@ impl ImageManager {
                 }
                 ScheduleResult::Backpressured => return ScheduleResult::Backpressured,
                 ScheduleResult::Closed => {
-                    // Do not convert a closed queue into a per-source decode
-                    // failure: the cache stays untouched so the runtime can
-                    // surface a terminal error instead.
                     self.pending.clear();
                     self.loading.clear();
                     return ScheduleResult::Closed;
@@ -369,6 +358,7 @@ impl ImageManager {
         }
     }
 
+    /// Stores a completed load result in the source cache and returns whether it is ready.
     pub fn store_result(
         &mut self,
         source: ImageSource,
@@ -429,6 +419,7 @@ impl ImageManager {
             .saturating_add(self.pending_loads.len())
     }
 
+    /// Number of sources waiting for worker queue capacity.
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }

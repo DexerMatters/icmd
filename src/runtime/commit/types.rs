@@ -1,3 +1,6 @@
+//! Shared commit-pass types: computed styles and the text payload a painted
+//! leaf carries.
+
 use std::collections::HashMap;
 
 use crossterm::style::{Attributes, Color};

@@ -1,5 +1,5 @@
-// Terminal diff encoding: the changed-cell scan and the ANSI run writer.
-// It owns output assembly and knows nothing about scene retention.
+//! Terminal diff encoding: the changed-cell scan and the ANSI run writer.
+//! It owns output assembly and knows nothing about scene retention.
 #![allow(unused_imports)]
 
 use super::*;
@@ -28,6 +28,8 @@ fn unreliable_advancement(cell: &Cell, merging: EmojiMerging) -> bool {
             .any(crate::data::is_emoji_sequence_mark)
 }
 
+/// Encodes the ANSI diff for one frame, returning `None` when no cell changed.
+/// Unless `full` is set, only the rows named in `damage_rows` are scanned.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_diff(
     old: &[CellSlot],
@@ -55,8 +57,6 @@ pub fn encode_diff(
         changed.resize(desired.len(), true);
         *cells_examined = cells_examined.saturating_add(desired.len() as u64);
     } else {
-        // Clear and re-scan only the rows this frame touches. A one-cell patch
-        // therefore examines a handful of cells, not the whole viewport.
         if changed.len() != desired.len() {
             changed.clear();
             changed.resize(desired.len(), false);
@@ -123,11 +123,6 @@ pub fn encode_diff(
             |slot| matches!(slot, CellSlot::Lead(cell) if unreliable_advancement(cell, merging)),
         );
         let isolate_row = row_has_unreliable || isolate_next_row;
-        // Isolate every write on rows containing (or immediately following)
-        // an emoji sequence. This is a deliberately narrow compatibility path:
-        // terminals disagree on cursor advancement for these graphemes, while
-        // ordinary rows retain the allocation-free contiguous-run encoder.
-        // Plain CJK wide cells and single-codepoint emoji stay batched.
         while column < width {
             let index = line * width + column;
             let can_write = changed[index] && (!full || !desired[index].is_default());
@@ -152,9 +147,6 @@ pub fn encode_diff(
                 let cell = desired[index].cell();
                 let cell_width = cell.width().max(1);
                 let cell_unreliable = unreliable_advancement(cell, merging);
-                // Some terminals apply an emoji sequence's width while
-                // consuming the preceding write, so rows around one are
-                // addressed one cell at a time below.
                 if isolate_row && column > run_start {
                     break;
                 }
@@ -185,12 +177,6 @@ pub fn encode_diff(
                 }
                 write!(output, "{}", cell.symbol).unwrap();
                 column += cell_width;
-                // Emoji sequences are the class of grapheme for which
-                // terminal cursor advancement still differs across emulators.
-                // End the run after one so the following cell is addressed
-                // with an explicit cursor position instead of inheriting a
-                // potentially drifted cursor. Ordinary CJK wide cells stay
-                // batched, keeping ANSI size and throughput unchanged.
                 if isolate_row || cell_unreliable {
                     break;
                 }

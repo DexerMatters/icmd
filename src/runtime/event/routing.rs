@@ -1,26 +1,39 @@
-// Routing, hit testing, and the pointer/scroll bookkeeping that the
-// dispatcher delegates to. They live beside the dispatcher so it stays
-// focused on state transitions and public API.
+//! Routing, hit testing, and the pointer/scroll bookkeeping the dispatcher
+//! delegates to. These live beside the dispatcher so it stays focused on state
+//! transitions and public API.
 #![allow(unused_imports)]
 
 use super::*;
 
+/// Pointer handler slot a routing lookup resolves, one per pointer event kind.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum PointerHandler {
+    /// Pointer pressed.
     Down,
+    /// Pointer released.
     Up,
+    /// Pointer moved.
     Move,
+    /// Pointer interaction cancelled.
     Cancel,
+    /// Pointer entered the node's box without yet being over it.
     Over,
+    /// Pointer left the node's box.
     Out,
+    /// Pointer entered the node and its subtree.
     Enter,
+    /// Pointer left the node and its subtree.
     Leave,
+    /// Node gained pointer capture.
     GotCapture,
+    /// Node lost pointer capture.
     LostCapture,
+    /// Primary-button click completed.
     Click,
 }
 
 impl PointerHandler {
+    /// Maps a pointer event kind to its handler slot.
     pub(super) fn for_kind(kind: PointerEventKind) -> Self {
         match kind {
             PointerEventKind::Down => Self::Down,
@@ -38,6 +51,7 @@ impl PointerHandler {
     }
 }
 
+/// Appends every bubble-phase pointer listener from `target` to the root.
 pub(super) fn queue_pointer(
     state: &EventState,
     target: DomId,
@@ -50,6 +64,7 @@ pub(super) fn queue_pointer(
     }
 }
 
+/// Appends only the listener on `target` itself, skipping ancestors.
 pub(super) fn queue_pointer_direct(
     state: &EventState,
     target: DomId,
@@ -62,6 +77,8 @@ pub(super) fn queue_pointer_direct(
     }
 }
 
+/// Maps a mouse wheel kind to a `(columns, rows)` delta, or `None` for
+/// non-scroll kinds.
 pub(super) fn wheel_delta(kind: MouseEventKind) -> Option<(i16, i16)> {
     match kind {
         MouseEventKind::ScrollUp => Some((0, -1)),
@@ -72,12 +89,16 @@ pub(super) fn wheel_delta(kind: MouseEventKind) -> Option<(i16, i16)> {
     }
 }
 
+/// Which end of a scroll range a key press jumps to.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ScrollEdge {
+    /// Jump to the start of the range.
     Start,
+    /// Jump to the end of the range.
     End,
 }
 
+/// Maps a key to `(x, y, edge, pages)` scroll intent; at most one field is set.
 pub(super) fn key_scroll(
     code: crossterm::event::KeyCode,
 ) -> (i32, i32, Option<ScrollEdge>, Option<i32>) {
@@ -95,15 +116,19 @@ pub(super) fn key_scroll(
     }
 }
 
+/// Clamps `offset + delta` into `0..=max` and returns the new offset together
+/// with the delta actually consumed.
 pub(super) fn consume_scroll(offset: i32, delta: i32, max: i32) -> (i32, i32) {
     let next = offset.saturating_add(delta).clamp(0, max.max(0));
     (next, next - offset)
 }
 
+/// Extracts a listener from an attribute slot, yielding `None` when unset.
 pub(super) fn listener<T: Clone>(slot: &Attr<T>) -> Option<T> {
     slot.clone().into()
 }
 
+/// Appends every bubble-phase scroll listener from `target` to the root.
 pub(super) fn queue_scroll_event(
     state: &EventState,
     target: DomId,
@@ -115,6 +140,8 @@ pub(super) fn queue_scroll_event(
     }
 }
 
+/// Builds a scroll event from the committed offset, the maxima, and the offset
+/// before the change.
 pub(super) fn make_scroll_event(
     offset: RuntimeScrollOffset,
     max_x: i32,
@@ -137,6 +164,7 @@ pub(super) fn make_scroll_event(
     }
 }
 
+/// Returns the listener registered for one pointer handler in `handlers`.
 pub(super) fn pointer_slot(
     handlers: &EventHandlers,
     handler: PointerHandler,
@@ -158,7 +186,8 @@ pub(super) fn pointer_slot(
 }
 
 impl EventState {
-    // Indexed lookup: routing walks ancestors and must not rescan every region.
+    /// Indexed lookup of a region by DOM id, counting the probe; routing walks
+    /// ancestors and must not rescan every region.
     pub(super) fn region(&self, id: DomId) -> Option<&EventRegion> {
         self.id_probes
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -167,6 +196,8 @@ impl EventState {
             .and_then(|index| self.regions.get(*index))
     }
 
+    /// Returns the topmost region containing `position`, ranked by level then
+    /// order.
     pub(super) fn hit_target(&self, position: ScreenPosition) -> Option<DomId> {
         self.regions
             .iter()
@@ -175,6 +206,7 @@ impl EventState {
             .map(|region| region.id)
     }
 
+    /// Returns the pointer listener on `target` for one handler.
     pub(super) fn pointer_listener(
         &self,
         target: DomId,
@@ -184,6 +216,7 @@ impl EventState {
             .and_then(|region| pointer_slot(&region.handlers, handler))
     }
 
+    /// Returns the bubble-phase pointer listeners from `target` to the root.
     pub(super) fn route_pointer(
         &self,
         target: DomId,
@@ -192,14 +225,18 @@ impl EventState {
         self.route(target, |handlers| pointer_slot(handlers, handler))
     }
 
+    /// Returns the bubble-phase wheel listeners from `target` to the root.
     pub(super) fn route_wheel(&self, target: DomId) -> Vec<EventListener<WheelEvent>> {
         self.route(target, |handlers| listener(&handlers.wheel))
     }
 
+    /// Returns the bubble-phase scroll listeners from `target` to the root.
     pub(super) fn route_scroll(&self, target: DomId) -> Vec<EventListener<ScrollEvent>> {
         self.route(target, |handlers| listener(&handlers.scroll))
     }
 
+    /// Walks from `target` to the root and returns the nearest focusable region,
+    /// or the nearest scrollable one when none is focusable.
     pub(super) fn focus_target_for(&self, target: DomId) -> Option<DomId> {
         let mut current = Some(target);
         let mut visited = HashSet::new();
@@ -222,6 +259,8 @@ impl EventState {
         first_focusable
     }
 
+    /// Reports whether `target` has any pointer listener or a scrollable
+    /// ancestor.
     pub(super) fn is_pointer_interactive(&self, target: DomId) -> bool {
         [
             PointerHandler::Down,
@@ -235,6 +274,7 @@ impl EventState {
             || self.has_scroll_ancestor(target)
     }
 
+    /// Reports whether `target` or one of its ancestors is scrollable.
     pub(super) fn has_scroll_ancestor(&self, target: DomId) -> bool {
         let mut current = Some(target);
         let mut visited = HashSet::new();
@@ -253,6 +293,8 @@ impl EventState {
         false
     }
 
+    /// Walks from `target` to the root and returns the first scrollbar whose
+    /// track contains `position`.
     pub(super) fn scrollbar_at(
         &self,
         target: DomId,
@@ -286,6 +328,7 @@ impl EventState {
         None
     }
 
+    /// Returns listeners in bubble order, from `target` to the root.
     pub(super) fn route<T>(
         &self,
         target: DomId,
@@ -296,8 +339,8 @@ impl EventState {
         callbacks
     }
 
-    // Root-to-target order, which is the order capture listeners run in. The
-    // bubble pass is the same route reversed, so both share one traversal.
+    /// Returns listeners in capture order, from the root to `target`. The bubble
+    /// pass is the same route reversed, so both share one traversal.
     pub(super) fn route_capture<T>(
         &self,
         target: DomId,
@@ -317,7 +360,6 @@ impl EventState {
             chain.push(id);
             current = region.parent;
         }
-        // `chain` is target-to-root; capture runs the other way.
         for id in chain.into_iter().rev() {
             let Some(region) = self.region(id) else {
                 continue;

@@ -1,3 +1,6 @@
+//! Surface renderer: retained scene state, image pipeline accounting, and frame
+//! diff encoding for cell and native raster surfaces.
+
 use super::image::Passthrough;
 use super::image::{
     ImageManager, KittyBackend, NativeTile, PreparedRaster, ScreenRect, TileKey, TransformKey,
@@ -30,38 +33,45 @@ use std::time::{Duration, Instant};
 
 const ADAPTIVE_REPLAY_DELAY: Duration = Duration::from_millis(80);
 
-// Which representation a retained surface holds. Validation tracks it so an
-// operation aimed at the wrong representation is rejected instead of silently
-// doing nothing.
-// Bounded-cardinality image pipeline metrics.
+/// Bounded-cardinality image pipeline metrics; byte fields are bytes and queue fields are counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ImageMetrics {
+    /// Bytes currently held by in-flight decode jobs.
     pub in_flight_bytes: usize,
+    /// Bytes held by the decoded source cache.
     pub cached_source_bytes: usize,
+    /// Bytes held by prepared raster transforms.
     pub prepared_bytes: usize,
+    /// Bytes held by the native encode cache.
     pub native_cache_bytes: usize,
+    /// Sources awaiting a decode result.
     pub pending_sources: usize,
+    /// Configured ceiling in bytes on in-flight decode work.
     pub max_in_flight_bytes: usize,
-    // The enforced eviction target. Active/pinned entries may legitimately keep
-    // the total above it, so it is named as a target rather than a hard cap;
-    // `cache_over_target_bytes` makes any such excess explicit.
+    /// Enforced eviction target in bytes; active or pinned entries may keep the total above it.
     pub evictable_cache_target_bytes: usize,
+    /// Total bytes held across every retained cache.
     pub cache_total_bytes: usize,
+    /// Bytes by which `cache_total_bytes` exceeds the eviction target.
     pub cache_over_target_bytes: usize,
-    // Bounded queue capacities and the current undelivered result backlog, so
-    // queue pressure is visible without inspecting internals.
+    /// Bounded capacity of the decode job queue, in jobs.
     pub job_queue_capacity: usize,
+    /// Bounded capacity of the decode result queue, in results.
     pub result_queue_capacity: usize,
+    /// Decoded results not yet drained by the renderer.
     pub result_backlog: usize,
-    // Peak observed depths. A high-water mark equal to the capacity is the
-    // signal that the queue saturated at least once.
+    /// Peak observed job queue depth; equal to capacity means it saturated at least once.
     pub job_queue_high_water: usize,
+    /// Peak observed result queue depth; equal to capacity means it saturated at least once.
     pub result_queue_high_water: usize,
 }
 
+/// Which representation a retained surface holds; a mismatched operation is rejected, not ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceKind {
+    /// A terminal cell grid.
     Cells,
+    /// A raster placement driven through a native protocol.
     Raster,
 }
 
@@ -74,48 +84,62 @@ impl fmt::Display for SurfaceKind {
     }
 }
 
+/// Validation and resource failures reported while applying or encoding a frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
+    /// An image ID already exists in the retained scene.
     DuplicateImage(ImageId),
+    /// An image ID is absent from the retained scene.
     UnknownImage(ImageId),
-    // An operation named the wrong kind of surface. The operation index and
-    // surface ID make the offending entry unambiguous.
+    /// An operation named the wrong surface kind; the fields identify the entry unambiguously.
     WrongSurface {
+        /// Zero-based index of the offending operation in the frame.
         operation: usize,
+        /// Image the operation targeted.
         id: ImageId,
+        /// Surface kind the operation required.
         expected: SurfaceKind,
+        /// Surface kind the image actually holds.
         actual: SurfaceKind,
     },
+    /// A cell patch failed validation.
     InvalidPatch {
+        /// Image the patch targeted.
         image: ImageId,
+        /// Validation failure reported by the image.
         error: ImageError,
     },
+    /// A viewport exceeds `MAX_SURFACE_CELLS`.
     SurfaceTooLarge {
+        /// Viewport width in cells.
         width: u16,
+        /// Viewport height in cells.
         height: u16,
+        /// Requested cell count.
         cells: usize,
     },
-    // The requested raster protocol needs the `native-raster` feature. Emitted
-    // before any worker or terminal resource exists, so capability is reported
-    // deterministically instead of degrading silently.
+    /// The requested raster protocol needs the `native-raster` feature.
     UnsupportedProtocol {
+        /// Protocol with no encoder in this build.
         protocol: ImageProtocol,
     },
-    // The renderer configuration was rejected before resource creation.
+    /// The renderer configuration was rejected before any resource was created.
     Config {
+        /// Human-readable rejection detail.
         detail: Box<str>,
-        // Present when the rejection came from the typed resource policy, so
-        // the original error stays reachable through `Error::source` instead of
-        // being flattened into a message.
+        /// Typed resource-policy error, reachable through `Error::source`, when one caused the rejection.
         source: Option<ConfigError>,
     },
-    // One frame's assembled terminal payload exceeded the configured output
-    // budget. Nothing was written and the previously presented frame stands.
+    /// One frame's assembled terminal payload exceeded the output budget; nothing was written.
     OutputTooLarge {
+        /// Configured per-frame output budget in bytes.
         limit: usize,
+        /// Assembled payload size in bytes.
         requested: usize,
     },
+    /// Cell allocation for a surface failed.
     AllocationFailed {
+        /// Requested cell count.
         cells: usize,
     },
 }
@@ -178,31 +202,48 @@ struct ValidatedSurface {
     kind: SurfaceKind,
 }
 
+/// Retained representation of one scene node: a cell image or a raster placement.
 #[derive(Debug, Clone)]
 pub enum Surface {
+    /// Cell image surface.
     Cells(Image),
+    /// Raster placement surface.
     Raster(RasterPlacement),
 }
 
+/// One retained scene node with its surface, fallback, geometry, and ordering keys.
 #[derive(Debug, Clone)]
 pub struct ImageNode {
+    /// Cell or raster representation currently owned by the node.
     pub surface: Surface,
+    /// Cell image shown until a raster source is ready.
     pub fallback: Option<Image>,
+    /// Top-left placement in cells.
     pub position: ScreenPosition,
+    /// Optional raster clip rectangle in surface-local cells.
     pub raster_clip: Option<Rect>,
+    /// Stacking level; higher levels draw above lower ones.
     pub level: i32,
+    /// Explicit ordering key within a level.
     pub order: u64,
+    /// Monotonic mutation counter that invalidates cached raster encodings.
     pub mutation: u64,
 }
 
+/// Renderer configuration; validated before any cell or native resource is allocated.
 #[derive(Debug, Clone)]
 pub struct RendererConfig {
+    /// Requested image protocol; `Auto` detects from the terminal.
     pub image_protocol: ImageProtocol,
+    /// Image cache ceiling in bytes.
     pub image_cache_bytes: usize,
+    /// Policy controlling native raster replay.
     pub image_update_policy: ImageUpdatePolicy,
+    /// Pixel size of one character cell, or `None` to detect it.
     pub cell_pixel_size: Option<Size>,
+    /// Emoji grapheme merging mode.
     pub emoji_merging: EmojiMerging,
-    // One validated budget for decode, transform, cache, and output work.
+    /// One validated budget for decode, transform, cache, and output work.
     pub limits: ResourceLimits,
 }
 
@@ -228,16 +269,10 @@ struct CachedPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct LayerKey(i32, u64, u64, u64);
 
-// SAFETY/invariants for this wrapper:
-// * It is created and dropped inside `detect_terminal`, which runs on the
-//   calling thread before the renderer worker starts; the pointer never
-//   outlives that function. Only the derived `Passthrough` value crosses into
-//   the worker, so no foreign object needs a thread-transfer guarantee.
-// * `chafa_term_db_get_default` returns a borrowed, library-owned database and
-//   `chafa_term_db_detect` transfers one reference to the caller. `Drop`
-//   releases exactly that reference and is the only release path.
-// * Every use null-checks the pointer and holds no other borrow across the
-//   unref.
+/// Owns one Chafa term-info reference; created and dropped inside `detect_terminal` on the
+/// calling thread, so the pointer never outlives that function and no foreign object crosses
+/// a thread boundary. `Drop` releases exactly the one reference transferred by
+/// `chafa_term_db_detect`, and every use null-checks the pointer.
 #[cfg(feature = "native-raster")]
 struct TermInfo(*mut chafa_sys::ChafaTermInfo);
 
@@ -287,40 +322,39 @@ impl Damage {
     }
 }
 
+/// Retained renderer state: scene graph, presented-frame mirror, and image pipeline.
 pub struct Renderer {
     pub(super) viewport: Size,
-    // Retained scene nodes remain protocol-independent; image-specific state
-    // lives in the manager/backend fields below.
+    /// Retained scene nodes keyed by image ID; image-specific state lives in the manager.
     pub images: HashMap<ImageId, ImageNode>,
     next_order: u64,
     next_mutation: u64,
+    /// Presented cell frame that every diff is computed against.
     pub last: Vec<CellSlot>,
     scratch: Vec<CellSlot>,
     dirty: Vec<bool>,
-    // Which cells `dirty` currently marks, so it can be cleared in O(damage)
-    // instead of a viewport-wide fill every frame.
+    /// Row spans `dirty` currently marks, cleared in O(damage) instead of a viewport fill.
     dirty_marks: Vec<(usize, Range<usize>)>,
-    // Counter: cells compared by the last frame encode. A one-cell patch must
-    // keep this bounded by damage, independent of viewport area.
+    /// Cells compared by the last frame encode; bounded by damage, not viewport area.
     cells_examined: u64,
     changed: Vec<bool>,
     damage: Vec<Damage>,
-    // Damage is normalized into row spans before composition. `owners` stores
-    // the one-based ordinal of the surface that supplied each scratch cell.
-    // It makes wide-glyph validation constant-time without another scene walk.
+    /// Normalized damage row spans; `owners` holds the one-based surface ordinal per scratch cell.
     damage_rows: Vec<Vec<Range<usize>>>,
     owners: Vec<usize>,
+    /// Image IDs in ascending draw order.
     pub layers: Vec<ImageId>,
     layers_dirty: bool,
     full_redraw: bool,
     pub(super) protocol: ImageProtocol,
     passthrough: Passthrough,
-    // Shared resource policy: decode/transform/cache/output ceilings.
+    /// Shared resource policy: decode, transform, cache, and output ceilings.
     pub(super) limits: ResourceLimits,
-    // Source I/O and fallback transitions are shared by every output mode.
+    /// Source I/O and fallback transitions shared by every output mode.
     pub(super) image_manager: ImageManager,
     native_cache: HashMap<NativeKey, CachedPayload>,
     native_cache_bytes: usize,
+    /// Effective native cache target in bytes: the stricter of `image_cache_bytes` and the runtime policy.
     native_cache_limit: usize,
     prepared: HashMap<TransformKey, PreparedRaster>,
     prepared_bytes: usize,
@@ -337,14 +371,13 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// Creates a renderer for `viewport` in cells with default configuration.
     pub fn new(viewport: Size) -> Result<Self, FrameError> {
         Self::with_config(viewport, RendererConfig::default())
     }
 
+    /// Creates a renderer for `viewport` in cells with `config`, rejecting invalid limits before allocating resources.
     pub fn with_config(viewport: Size, config: RendererConfig) -> Result<Self, FrameError> {
-        // Validate the configuration before allocating any cell or native
-        // resource. A cell pixel size that can never satisfy the transform
-        // budget is rejected here rather than failing later during a resize.
         config
             .limits
             .validate()
@@ -365,10 +398,6 @@ impl Renderer {
                     source: None,
                 });
             }
-            // The renderer must be able to transform a raster that fills the
-            // viewport; that is the geometry every frame can actually request.
-            // A single oversized source is refused later, per transform, by
-            // the same budget.
             let viewport_pixels = u64::from(viewport.width)
                 .saturating_mul(u64::from(viewport.height))
                 .saturating_mul(u64::from(size.width))
@@ -420,9 +449,6 @@ impl Renderer {
             image_manager: ImageManager::with_limits(config.limits),
             native_cache: HashMap::new(),
             native_cache_bytes: 0,
-            // The runtime policy may lower the renderer's own cache wish; the
-            // effective target is the stricter of the two, so the configured
-            // ceiling is actually enforced rather than merely reported.
             native_cache_limit: config.image_cache_bytes.min(config.limits.max_cache_bytes),
             prepared: HashMap::new(),
             prepared_bytes: 0,
@@ -439,10 +465,8 @@ impl Renderer {
         })
     }
 
-    // Structured, bounded observability for the image pipeline. Labels are
-    // stage/kind only; no path or text content is exposed.
-    // Cells compared by the most recent frame encode, and the viewport size it
-    // was compared against. Bounded-cardinality renderer metrics.
+    /// Returns cells compared by the most recent frame encode and resets the counter, paired
+    /// with the viewport size in cells.
     pub fn take_cells_examined(&mut self) -> (u64, usize) {
         let examined = self.cells_examined;
         self.cells_examined = 0;
@@ -452,6 +476,7 @@ impl Renderer {
         )
     }
 
+    /// Snapshots bounded image pipeline metrics; byte fields are bytes and queue fields are counts.
     pub fn image_metrics(&self) -> ImageMetrics {
         ImageMetrics {
             in_flight_bytes: self.image_manager.bytes_in_flight(),
@@ -471,13 +496,13 @@ impl Renderer {
         }
     }
 
-    // Test-only hook so a budget rejection can be observed followed by a
-    // successful render on the same renderer.
+    /// Test-only hook so a budget rejection can be observed followed by a successful render on the same renderer.
     #[doc(hidden)]
     pub fn set_output_budget_for_test(&mut self, bytes: usize) {
         self.limits.max_output_bytes_per_frame = bytes;
     }
 
+    /// Returns the current viewport size in cells.
     pub fn viewport(&self) -> Size {
         self.viewport
     }
@@ -502,6 +527,7 @@ impl Renderer {
         }
     }
 
+    /// Applies every operation in `frame` to the retained scene after transactional validation.
     pub fn apply_frame(&mut self, frame: Frame) -> Result<(), FrameError> {
         self.validate_frame(&frame)?;
         if let Some(viewport) = frame.viewport
@@ -531,9 +557,6 @@ impl Renderer {
         }
 
         for operation in frame.operations {
-            // Cell patches preserve a fragment's footprint, so they cannot
-            // change native visibility. Every other operation can change
-            // ownership, geometry, or source content.
             if !matches!(
                 operation,
                 Operation::PatchRect { .. } | Operation::PatchCells { .. }
@@ -701,9 +724,6 @@ impl Renderer {
         if let Some(viewport) = frame.viewport {
             validate_viewport(viewport)?;
         }
-        // Keep only frame-local overrides. Cloning the dimensions of every
-        // retained image made validating a one-cell patch scale with scene
-        // size even though validation is otherwise purely transactional.
         let mut dimensions: HashMap<ImageId, Option<ValidatedSurface>> = HashMap::new();
         let lookup = |id: &ImageId, changes: &HashMap<ImageId, Option<ValidatedSurface>>| {
             changes.get(id).copied().flatten().or_else(|| {
@@ -719,9 +739,6 @@ impl Renderer {
                     })
             })
         };
-        // Reject an operation whose required surface kind differs from what the
-        // ID currently holds. `require` keeps transactional behavior: every
-        // mismatch is found before the renderer is mutated.
         let require = |id: &ImageId,
                        expected: SurfaceKind,
                        operation: usize,
@@ -891,6 +908,8 @@ impl Renderer {
         })
     }
 
+    /// Encodes the pending diff within the frame output budget, returning the terminal payload or
+    /// `None` when nothing changed; over-budget frames fail without changing presented state.
     pub fn render_diff(&mut self) -> Result<Option<String>, FrameError> {
         let load_changed = self.drain_load_results();
         let replay_due = self.native_replay_at.is_some_and(|at| at <= Instant::now());
@@ -924,15 +943,10 @@ impl Renderer {
             self.prepare_visible_rasters();
             native_tiles.clear();
         } else if self.symbols_for_native && self.raster_scene_dirty {
-            // A new mutation arrived before the quiet period elapsed. Render
-            // the cached symbol scene now and restart the single replay timer.
             self.native_replay_at = Some(Instant::now() + ADAPTIVE_REPLAY_DELAY);
             native_tiles.clear();
         }
         let full_redraw = self.full_redraw || replay_due || (replay_only && native_changed);
-        // Everything below is staged: `self.last` and every retained cache is
-        // mutated only after the complete payload fits the frame output budget.
-        // An over-budget frame therefore leaves the presented state untouched.
         let mut desired = std::mem::take(&mut self.scratch);
         if desired.capacity() < self.last.len()
             && desired
@@ -945,10 +959,6 @@ impl Renderer {
             });
         }
         self.normalize_damage(full_redraw);
-        // Refresh only the rows this frame will touch. The scratch buffer keeps
-        // a mirror of the presented frame for every row it is about to read, so
-        // a one-cell change no longer copies the entire viewport. A viewport
-        // change or full redraw touches every row and therefore rebuilds it.
         if desired.len() != self.last.len() {
             desired.clear();
             desired.extend_from_slice(&self.last);
@@ -981,27 +991,18 @@ impl Renderer {
         } else {
             self.native_output(native_tiles, full_redraw)
         };
-        // Bound the assembled payload before it can reach the terminal. A
-        // single valid render that exceeds the budget fails here, so no partial
-        // escape sequence is ever written and presented state stays unchanged.
         let total = ansi
             .as_ref()
             .map_or(0usize, String::len)
             .saturating_add(native.len());
         super::metrics::note_output_bytes(total);
         if total > self.limits.max_output_bytes_per_frame {
-            // Pending damage is deliberately retained so a later attempt with a
-            // larger budget (or smaller scene) can re-encode it. Only the
-            // staged buffers are returned; nothing presented changes.
             self.scratch = desired;
             return Err(FrameError::OutputTooLarge {
                 limit: self.limits.max_output_bytes_per_frame,
                 requested: total,
             });
         }
-        // Apply only the rows that changed, then keep the composed buffer as
-        // scratch. Non-damaged rows of the scratch buffer are refreshed from
-        // the presented frame before they are next read.
         self.apply_desired_rows(&desired);
         self.scratch = desired;
         self.clear_dirty_marks();
@@ -1052,9 +1053,6 @@ impl NativeKey {
 }
 
 fn merge_rectangles(spans: Vec<ScreenRect>) -> Vec<ScreenRect> {
-    // A row can contain many independent spans. Keep only rectangles that
-    // touched the preceding row active, keyed by their horizontal extent.
-    // This yields maximal, stable rectangles in linear time after span scan.
     let mut rectangles: Vec<ScreenRect> = Vec::new();
     let mut active: HashMap<(i32, i32), usize> = HashMap::new();
     let mut next: HashMap<(i32, i32), usize> = HashMap::new();
@@ -1093,10 +1091,6 @@ fn surface_size(surface: &Surface) -> (usize, usize) {
     }
 }
 
-// Pure-Rust terminal capability detection. Without the native backend the
-// framework still selects a correct protocol from the environment, so a build
-// with no Chafa, pkg-config, or libclang remains fully functional for cell
-// output and reports raster capability honestly.
 #[cfg(not(feature = "native-raster"))]
 fn detect_terminal(requested: ImageProtocol) -> (ImageProtocol, Passthrough) {
     let term = std::env::var("TERM").unwrap_or_default();
@@ -1165,8 +1159,6 @@ fn detect_terminal(requested: ImageProtocol) -> (ImageProtocol, Passthrough) {
         } else {
             Passthrough::from_chafa(chafa_sys::chafa_term_info_get_passthrough_type(info))
         };
-        // The term-info reference is released here; only the plain passthrough
-        // value survives, so nothing native crosses a thread boundary.
         drop(TermInfo(info));
         (protocol, passthrough)
     }
@@ -1182,9 +1174,6 @@ fn live_cell_pixels() -> Option<Size> {
     })
 }
 
-// Without the native backend there is no encoder for Kitty/Sixel/iTerm2
-// payloads, so those protocols report unsupported instead of emitting a
-// malformed escape sequence. Symbols output is pure Rust and unaffected.
 #[cfg(not(feature = "native-raster"))]
 #[allow(clippy::too_many_arguments)]
 fn encode_native_slice(
@@ -1260,18 +1249,11 @@ fn encode_native_slice(
             pixel_height,
             row_stride.min(i32::MAX as usize) as i32,
         );
-        // `build_ansi` does not depend on a terminfo entry that happens to
-        // advertise the requested protocol. This matters for explicit
-        // overrides in SSH/multiplexer sessions; the config still carries
-        // Chafa passthrough when detection provided it.
         let value = chafa_sys::chafa_canvas_build_ansi(canvas);
         chafa_sys::chafa_canvas_unref(canvas);
         if value.is_null() {
             return None;
         }
-        // chafa-sys currently makes GLib's public GString layout opaque, so
-        // mirror that stable C ABI locally instead of assuming NUL-terminated
-        // payloads (native graphics output is a byte stream).
         let string = &*(value as *const GStringLayout);
         let bytes = std::slice::from_raw_parts(string.data as *const u8, string.len);
         let output = String::from_utf8_lossy(bytes).into_owned();
@@ -1403,16 +1385,17 @@ impl Renderer {
     }
 }
 
-// A renderer whose output already carries the terminal payload. This is the
-// shape the pipeline uses internally; it is exposed so a component that
-// replaces the commit stage can still drive a real renderer.
+/// Renderer whose output already carries the terminal payload, exposed so a component that
+/// replaces the commit stage can still drive a real renderer.
 pub struct ChannelRenderer(pub(crate) Renderer);
 
 impl ChannelRenderer {
+    /// Creates a channel renderer for `viewport` in cells with default configuration.
     pub fn new(viewport: Size) -> Result<Self, FrameError> {
         Ok(Self(Renderer::new(viewport)?))
     }
 
+    /// Creates a channel renderer for `viewport` in cells with `config`.
     pub fn with_config(viewport: Size, config: RendererConfig) -> Result<Self, FrameError> {
         Ok(Self(Renderer::with_config(viewport, config)?))
     }

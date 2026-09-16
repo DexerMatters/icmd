@@ -1,3 +1,6 @@
+//! Image load lifecycle for the renderer: requests visible sources, drains results, and prepares rasters.
+//! Owns source-request fallbacks, raster visibility checks, and native/symbol preparation.
+
 use std::collections::HashSet;
 
 use crate::runtime::renderer::{ImageNode, Renderer, Surface};
@@ -40,8 +43,6 @@ impl Renderer {
     fn request_source(&mut self, source: &ImageSource) {
         match self.image_manager.request(source) {
             SourceRequest::Queued => self.set_source_fallback(source, "…"),
-            // Temporary queue pressure keeps the pending placeholder; the
-            // request is retried on the next drain rather than failed.
             SourceRequest::Backpressured => {}
             SourceRequest::Closed => self.set_source_fallback(source, "×"),
             SourceRequest::AlreadyAvailable => {}

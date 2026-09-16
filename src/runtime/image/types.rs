@@ -1,3 +1,6 @@
+//! Image identities, source keys, and the decoded payloads the scheduler
+//! moves between stages.
+
 use crate::raster::RasterPixels;
 use crate::{Image, ImageId, ImageRenderOptions, Size};
 

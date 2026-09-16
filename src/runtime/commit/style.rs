@@ -1,3 +1,6 @@
+//! Style resolution for the commit pass: turning declared style slots into the
+//! concrete text and fill the painter uses.
+
 use crossterm::style::{Attributes, Color};
 
 use crate::basic::common::Attr;

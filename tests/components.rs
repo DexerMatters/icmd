@@ -4,9 +4,10 @@ use crossterm::style::Color;
 use icmd::advanced::{Commit, Lower, Renderer, Runtime};
 use icmd::{
     AlertProps, Attr, BadgeProps, CheckboxProps, Component, ComponentContext, Dimension, DomProps,
-    Fill, Layout, Node, Overflow, Percent, Props, RadioProps, ScrollAreaProps, ScrollAxes,
-    ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Size, SkeletonProps, SpinnerProps, Style,
-    SwitchProps, canvas, column, empty, fragment, progress_bar, scroll_area, style_patch, text,
+    Fill, Layout, LinkProps, Node, Overflow, Percent, Props, RadioProps, ScrollAreaProps,
+    ScrollAxes, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Size, SkeletonProps,
+    SpinnerProps, Style, SwitchProps, canvas, column, empty, fragment, link, progress_bar,
+    scroll_area, style_patch, text,
     theme::{Theme, ThemeMode, ThemePreset, theme},
     theme_provider, ui, view,
 };
@@ -155,6 +156,25 @@ fn progress_bar_uses_the_nearest_theme() {
     let frame = render(node, Size::new(8, 1));
     assert_eq!(frame.matches('█').count(), 2, "{frame:?}");
     assert_eq!(frame.matches('░').count(), 2, "{frame:?}");
+}
+
+#[test]
+fn link_paints_its_href_when_no_label_or_children_are_given() {
+    // A bare link shows the target it points at, so `<link href="..."/>` is not
+    // an invisible hit target.
+    let node = link
+        .props(LinkProps {
+            href: Attr::Set("https://example.com/icmd".into()),
+            ..LinkProps::default()
+        })
+        .node();
+    let frame = render(node, Size::new(32, 1));
+    assert!(frame.contains("example.com"), "{frame:?}");
+    // The underline is the non-colour affordance; it must reach the terminal.
+    assert!(
+        frame.contains("\u{1b}[4m"),
+        "a link must be underlined: {frame:?}"
+    );
 }
 
 #[test]

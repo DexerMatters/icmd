@@ -5,10 +5,11 @@
 use std::{sync::Arc, thread, time::Duration};
 
 use icmd::advanced::{Commit, Lower, Renderer, RendererConfig, Runtime};
+use icmd::widgets::raster_image;
 use icmd::{
     Attr, Cell, Component, Dimension, DomProps, Frame, Image, ImageMode, ImageProtocol,
     ImageSource, ImageUpdatePolicy, Layout, Node, Operation, RasterImage, RasterImageError,
-    RasterPlacement, Size, Style, canvas, raster_image, ui,
+    RasterPlacement, Size, Style, canvas, ui,
 };
 
 fn render(node: Node) -> String {

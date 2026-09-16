@@ -1,42 +1,73 @@
+//! A retained, terminal-native UI framework.
+//!
+//! An application builds one tree of [`Node`]s from ordinary components and
+//! hands it to [`render`]. The runtime lowers the tree into a DOM, commits it to
+//! a frame, and paints only the cells that changed; terminal input is routed
+//! back through the tree as [`events`].
+//!
+//! ```no_run
+//! # use icmd::{Component, ComponentContext, Node, Props};
+//! fn app(_cx: &mut ComponentContext, _props: &Props<()>) -> Node {
+//!     icmd::text("Hello, terminal")
+//! }
+//!
+//! # fn main() -> Result<(), icmd::RenderError> {
+//! icmd::render(app.apply(()), icmd::RuntimeConfig::default())?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The example is marked to compile but not run: a session needs a real
+//! terminal.
+//!
+//! # Where things live
+//!
+//! - The crate root holds the vocabulary an application names directly:
+//!   components, [`Node`], [`Props`], style, layout, text, and the event types.
+//! - [`widgets`] names the built-in widgets.
+//! - [`events`] adds the live event-stream types on top of the root event types.
+//! - [`theme`] owns palettes and providers.
+//! - [`advanced`] exposes the renderer protocol and runtime ownership; a
+//!   high-level application never needs it.
+#![deny(missing_docs)]
+
 mod app;
-pub mod basic;
-pub mod data;
-pub mod elements;
+mod basic;
+mod data;
+mod elements;
 mod frame_builder;
 mod glyph;
+pub mod lifecycle;
 mod raster;
 mod runtime;
 pub mod theme;
 mod ui;
 
-pub use app::{RenderError, RuntimeConfig, render};
+pub use app::{RenderError, RuntimeConfig, render, render_with};
+pub use lifecycle::{AppLifecycle, AppPhase, AppSession, ExitReason};
 pub use theme::{ThemeBuilder, ThemeProviderProps, theme_context, theme_provider};
 
 pub use elements::{
     AlertProps, AlertVariant, BadgeProps, BadgeVariant, ButtonProps, ButtonVariant, CanvasContext,
-    CanvasDraw, CanvasError, CanvasProps, CheckboxProps, ImageProps, InputProps, ProgressBarProps,
-    RadioProps, RawInputAppearance, RawInputMode, RawInputProps, ScrollAreaProps, SkeletonProps,
-    SpinnerProps, SwitchProps, TextClipboardAction, TextClipboardEvent, TextValueEvent,
-    TextareaProps, alert, badge, blockquote, button, canvas, card, center, checkbox, code, column,
-    container, divider, footer, heading, input, kbd, label, muted, paragraph, progress_bar, radio,
-    raw_input, row, scroll_area, section, skeleton, spacer, spinner, switch, textarea,
+    CanvasDraw, CanvasError, CanvasProps, CheckboxProps, ImageProps, InputProps, LinkProps,
+    ProgressBarProps, RadioProps, RawInputAppearance, RawInputMode, RawInputProps, ScrollAreaProps,
+    SelectionAreaProps, SkeletonProps, SpinnerProps, SwitchProps, TextClipboardAction,
+    TextClipboardEvent, TextSelectionEvent, TextValueEvent, TextareaProps, alert, badge,
+    blockquote, button, canvas, card, center, checkbox, code, column, container, divider, footer,
+    heading, input, kbd, label, link, muted, paragraph, progress_bar, radio, raw_input, row,
+    scroll_area, section, selection_area, skeleton, spacer, spinner, switch, textarea,
 };
 
-// Canonical raster widget constructor. The historical `image` spelling was
-// removed because it collided with both the `image` facade module and the
-// decoded-pixel `RasterImage` type. Use `widgets::raster_image`.
-pub use elements::image::image as raster_image;
-
 pub use basic::{
-    Align, Attr, Attributes, AxisPosition, BorderKind, BorderStyle, Component, ComponentContext,
-    ContextKey, Dimension, DomId, DomNode, DomProps, Edges, EffectResult, EventHandlers,
-    EventListener, Fill, FillError, FocusEvent, Forward, Justify, Key, KeyboardEvent, Layout, Node,
-    Overflow, PasteEvent, Percent, PercentBasis, Point, PointerButton, PointerEvent,
-    PointerEventKind, PointerId, PointerType, Props, PropsTransform, Ref, ResizeEvent, ScrollAxes,
-    ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility,
-    Span, StateError, StateRef, StateSetter, Style, StylePatch, TerminalFocusEvent, Text,
-    TextAlign, TextOverflow, TextStyle, TextWrap, Visibility, WheelEvent, create_context, empty,
-    fragment, style, style_patch, text, view,
+    Align, AppHandle, Attr, Attributes, AxisPosition, BorderKind, BorderStyle, Component,
+    ComponentContext, ContextKey, Dimension, DomId, DomNode, DomProps, Edges, EffectResult,
+    EventHandlers, EventListener, Fill, FillError, FocusEvent, Forward, Justify, Key,
+    KeyboardEvent, Layout, Node, Overflow, PasteEvent, Percent, PercentBasis, Point, PointerButton,
+    PointerEvent, PointerEventKind, PointerId, PointerType, Props, PropsTransform, Ref,
+    ResizeEvent, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph,
+    ScrollbarStyle, ScrollbarVisibility, Span, StateError, StateRef, StateSetter, Style,
+    StylePatch, TerminalFocusEvent, Text, TextAlign, TextOverflow, TextStyle, TextWrap, Visibility,
+    WheelEvent, create_context, empty, fragment, style, style_patch, text, view,
 };
 pub use data::{
     Cell, CellEdit, CellError, EmojiMerging, Frame, Image, ImageError, ImageId, ImagePosition,
@@ -50,41 +81,34 @@ pub use raster::{
     ImageUpdatePolicy, RasterImage, RasterImageError, RasterPlacement,
 };
 
+/// Common imports for an application: components, layout keywords, and the
+/// widgets most programs name.
 pub mod prelude {
     pub use crate::{
-        Attr, Component, ComponentContext, Dimension, DomProps, Edges, EmojiMerging, ImageLoading,
-        ImageSource, InputProps, Layout, Node, Props, RawInputAppearance, RawInputMode,
-        RawInputProps, Ref, ScrollAreaProps, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset,
-        ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Style, StylePatch,
-        TextClipboardAction, TextClipboardEvent, TextValueEvent, TextWrap, TextareaProps,
-        ThemeProviderProps, column, heading, input, progress_bar, raw_input, row, scroll_area,
-        style, style_patch, text, textarea, theme_context, theme_provider, ui, view,
+        AppHandle, AppLifecycle, AppPhase, Attr, Component, ComponentContext, Dimension, DomProps,
+        Edges, EmojiMerging, ExitReason, ImageLoading, ImageSource, InputProps, Layout, Node,
+        Props, RawInputAppearance, RawInputMode, RawInputProps, Ref, ScrollAreaProps, ScrollAxes,
+        ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph, ScrollbarStyle,
+        ScrollbarVisibility, Style, StylePatch, TextClipboardAction, TextClipboardEvent,
+        TextValueEvent, TextWrap, TextareaProps, ThemeProviderProps, column, heading, input,
+        progress_bar, raw_input, row, scroll_area, style, style_patch, text, textarea,
+        theme_context, theme_provider, ui, view,
     };
 }
 
-// Stable high-level facade tiers. The root re-exports above remain for source
-// compatibility during the transition; new code should import from these
-// modules so the implementation protocol in `advanced` is explicit.
+/// The built-in widgets, each an ordinary component constructor.
 pub mod widgets {
-    // Canonical raster widget name, kept beside the other high-level widgets.
     pub use crate::elements::image::image as raster_image;
 
     pub use crate::{
         alert, badge, blockquote, button, canvas, card, center, checkbox, code, column, container,
-        divider, empty, footer, fragment, heading, input, kbd, label, muted, paragraph,
-        progress_bar, radio, raw_input, row, scroll_area, section, skeleton, spacer, spinner,
-        switch, text, textarea, view,
+        divider, empty, footer, fragment, heading, input, kbd, label, link, muted, paragraph,
+        progress_bar, radio, raw_input, row, scroll_area, section, selection_area, skeleton,
+        spacer, spinner, switch, text, textarea, view,
     };
 }
 
-pub mod style {
-    pub use crate::{
-        Align, Attributes, AxisPosition, BorderKind, BorderStyle, Dimension, Edges, Fill,
-        FillError, Justify, Layout, Overflow, Percent, PercentBasis, Point, Style, StylePatch,
-        TextAlign, TextOverflow, TextStyle, TextWrap, Visibility, style, style_patch,
-    };
-}
-
+/// Live event types, plus the raw terminal events an application can read.
 pub mod events {
     pub use crate::basic::{
         EventHandlers, EventListener, EventPhase, FocusEvent, KeyboardEvent, PasteEvent,
@@ -92,30 +116,18 @@ pub mod events {
         ScrollEvent, TerminalFocusEvent, WheelEvent,
     };
     pub use crate::runtime::{DispatchOutcome, FocusError, FocusOutcome};
-    // Raw terminal event types, for applications that read the event stream.
     pub use crossterm::event::{KeyEvent, MouseEvent};
 }
 
-pub mod image {
-    pub use crate::{
-        ImageAlign, ImageFit, ImageLoading, ImageMode, ImageProtocol, ImageRenderOptions,
-        ImageSource, ImageUpdatePolicy, RasterImage, RasterImageError, RasterPlacement,
-    };
-
-    // Canonical raster widget name. The historical `image` spelling stays at the
-    // crate root for one transition release.
-    pub use crate::elements::image::image as raster_image;
-}
-
-// Explicitly advanced tier: renderer protocol, runtime ownership, and raw
-// frame operations. A high-level application should not need to import this.
+/// The pipeline protocol, runtime ownership, and raw frame operations.
+///
+/// A high-level application never needs this tier; it is for code that builds
+/// its own pipeline or frame.
 pub mod advanced {
     pub use crate::basic::DomNode;
     pub use crate::data::{
         Cell, CellEdit, CellError, Frame, ImageId, Operation, Rect, ScreenPosition, Size,
     };
-    // Typed frame construction belongs to the advanced tier: a high-level
-    // application never builds a frame by hand.
     pub use crate::frame_builder::{
         BuildError, CellSurfaceHandle, FrameBuilder, RasterSurfaceHandle, SurfaceHandle,
     };
@@ -126,63 +138,49 @@ pub mod advanced {
         RendererConfigError, ResourceLimits, Runtime, RuntimeError, RuntimeHandle, RuntimeMetrics,
         ShutdownPolicy, Stage, SurfaceKind, ViewportSetter, live_worker_count, runtime_metrics,
     };
-
-    // The terminal-cell surface keeps its historical `Image` name at the root
-    // for one transition release; the advanced tier names the layer explicitly.
-    pub type CellSurface = crate::Image;
 }
 
-// Macro expansion support. Public only so external `ui!` expansions compile;
-// nothing here is a stable interface.
-#[doc(hidden)]
 #[doc(hidden)]
 pub mod __private {
-    // Macro expansion helpers and test-only layout access. Reachable only
-    // through this hidden module so they never pollute the crate root.
+    pub use crate::app::{
+        MAX_RENDER_WAIT, coalesce_event, drive_session, drive_session_with, run_session, teardown,
+        terminal_clipboard_sequence,
+    };
+    pub use crate::basic::editor_surface::{CommittedLayout, EditorSurface};
+    pub use crate::basic::selection::{
+        CaretPoint, ClipboardIntent, CommittedSelection, DocPoint, DocumentBuilder, Run, Segment,
+        Selection, SelectionConfig, SelectionDocument, SelectionMotion, SelectionOverlay,
+        SelectionProbe, SelectionStyles, block_separator, clipboard_clear, clipboard_intent,
+        clipboard_load, clipboard_store, extends_selection, motion_for, set_system_writer,
+        value_layout,
+    };
+    pub use crate::basic::text_layout::{
+        ComputedText, HitBias, Item, ItemKind, Row, ShapedGlyph, TAB_WIDTH, TextLayout, layout_text,
+    };
     pub use crate::basic::{
         __ui_apply, __ui_events, __ui_tag_names_equal, TextLayoutForTest, indexed_layout_for_test,
     };
-    pub use crate::elements::normalize_for_test;
-    // Event-loop mechanics. The loop runs inside the crate, so its coalescing
-    // rule and terminal teardown order are verified from outside through here.
-    pub use crate::app::{MAX_RENDER_WAIT, coalesce_event, teardown};
-    // Image scheduling. The manager runs on the runtime's workers, so its
-    // saturation behaviour and byte accounting are driven from outside here.
-    pub use crate::runtime::image::manager::{
-        ByteBudget, ImageLoader, ImageManager, SourceCacheEntry, SourceRequest, SourceState,
-    };
-    // Raster decode and transform entry points. The widget drives them from
-    // inside the crate, so their budgets are verified from outside through here.
-    pub use crate::basic::editor_surface::{CommittedLayout, EditorSurface};
-    // Editor model. The input component owns it, so its editing rules are
-    // verified from outside through here.
+    pub use crate::data::CellSlot;
     pub use crate::elements::input::model::{
         Caret, EditAction, EditIntent, EditModel, EditOutcome, EditPolicy, Outcome, ValueOwnership,
         normalize,
     };
-    // Text layout internals: the shared shaping and measurement surface.
-    pub use crate::basic::text_layout::{
-        ComputedText, HitBias, Item, ItemKind, Row, ShapedGlyph, TAB_WIDTH, TextLayout, layout_text,
+    pub use crate::elements::normalize_for_test;
+    pub use crate::glyph::{
+        AllowedGlyphWidth, GlyphError, ValidatedTerminalGlyph, validate_terminal_glyph,
     };
-    pub use crate::data::CellSlot;
+    pub use crate::lifecycle::PhaseRunner;
     pub use crate::raster::{ImageSourceKey, render_rgba_with_cell_size};
     pub use crate::runtime::commit::geometry::RectI;
     pub use crate::runtime::commit::text::{
         cell_symbol, editor_raster, layout, layout_for, surface_layout, text_measure,
     };
-    pub use crate::runtime::renderer::{Surface, encode_diff};
-    // Canonical glyph policy. The public wrappers (Cell, Fill, ScrollbarGlyph)
-    // delegate to it, and the characterization table drives it directly.
-    pub use crate::glyph::{
-        AllowedGlyphWidth, GlyphError, ValidatedTerminalGlyph, validate_terminal_glyph,
+    pub use crate::runtime::image::manager::{
+        ByteBudget, ImageLoader, ImageManager, SourceCacheEntry, SourceRequest, SourceState,
     };
-    // Runtime counters record work performed on worker threads. Tests drive
-    // them directly because the producers run inside the pipeline.
     pub use crate::runtime::metrics::{
         note_event_dispatched, note_frame_presented, note_node_lowered, note_output_bytes,
         note_text_shaping,
     };
+    pub use crate::runtime::renderer::{Surface, encode_diff};
 }
-
-// High-level alias for the common entry point.
-pub use app::render as run;

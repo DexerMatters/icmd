@@ -1,10 +1,18 @@
+//! The component layer: node and prop types, the rendering context, hooks,
+//! DOM bookkeeping, the text layout engine, and the selection engine.
+//!
+//! Nothing here is public on its own; the crate root re-exports the curated
+//! subset.
+
 pub(crate) mod common;
 pub(crate) mod context;
 mod dom;
 pub(crate) mod editor_surface;
 pub(crate) mod events;
 pub(crate) mod hooks;
+pub(crate) mod lifetime;
 pub(crate) mod props;
+pub(crate) mod selection;
 mod text;
 pub(crate) mod text_layout;
 
@@ -22,6 +30,7 @@ pub use events::{
     PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent, ScrollEvent,
     TerminalFocusEvent, WheelEvent,
 };
+pub use lifetime::AppHandle;
 pub use props::{
     Align, Attributes, AxisPosition, BorderKind, BorderStyle, Dimension, DomProps, Edges, Fill,
     FillError, Justify, Layout, Overflow, Percent, PercentBasis, Point, Props, ScrollAxes,

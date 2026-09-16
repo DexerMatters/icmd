@@ -1,5 +1,5 @@
-// Native tile planning: which raster tiles a frame needs, their cached
-// payloads, replay timing, and Kitty shutdown cleanup.
+//! Native tile planning: which raster tiles a frame needs, their cached
+//! payloads, replay timing, and Kitty shutdown cleanup.
 #![allow(unused_imports)]
 
 use super::*;

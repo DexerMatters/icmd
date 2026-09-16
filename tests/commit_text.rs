@@ -209,8 +209,8 @@ fn editor_rows(surface: &EditorSurface, width: usize, height: usize) -> Vec<Stri
         .map(|row| {
             (0..image.width())
                 .map(|column| match image.cell_at(row, column) {
-                    icmd::data::CellSlot::Continuation(_) => " ".to_string(),
-                    icmd::data::CellSlot::Lead(cell) => cell.symbol().to_string(),
+                    icmd::__private::CellSlot::Continuation(_) => " ".to_string(),
+                    icmd::__private::CellSlot::Lead(cell) => cell.symbol().to_string(),
                 })
                 .collect::<String>()
         })
@@ -292,8 +292,8 @@ fn editor_window_rows(
         .map(|row| {
             (0..image.width())
                 .map(|column| match image.cell_at(row, column) {
-                    icmd::data::CellSlot::Continuation(_) => " ".to_string(),
-                    icmd::data::CellSlot::Lead(cell) => cell.symbol().to_string(),
+                    icmd::__private::CellSlot::Continuation(_) => " ".to_string(),
+                    icmd::__private::CellSlot::Lead(cell) => cell.symbol().to_string(),
                 })
                 .collect::<String>()
         })

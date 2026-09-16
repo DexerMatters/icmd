@@ -1,10 +1,12 @@
-// Retained-scene geometry: which surface owns each viewport cell, and the
-// visible raster tile decomposition a frame needs.
+//! Retained-scene geometry: which surface owns each viewport cell, and the
+//! visible raster tile decomposition a frame needs.
 #![allow(unused_imports)]
 
 use super::*;
 
 impl Renderer {
+    /// Builds the viewport-sized ownership map, keeping the highest-ranked layer
+    /// that paints each cell; raster cells respect the clip rect and alpha mask.
     pub(super) fn cell_owners(&self) -> Vec<Option<LayerKey>> {
         let mut owners =
             vec![None; usize::from(self.viewport.width) * usize::from(self.viewport.height)];
@@ -53,6 +55,8 @@ impl Renderer {
         owners
     }
 
+    /// Returns the cell surface a node contributes to composition: its own cells,
+    /// or prepared symbols and fallback for a raster when symbols are forced.
     pub(super) fn cell_surface<'a>(&'a self, node: &'a ImageNode) -> Option<&'a Image> {
         match &node.surface {
             Surface::Cells(image) => Some(image),
@@ -70,6 +74,8 @@ impl Renderer {
         }
     }
 
+    /// Decomposes the visible part of a raster node into single-row spans, then
+    /// merges them into minimal screen rectangles.
     pub(super) fn raster_tiles(
         &self,
         id: ImageId,
@@ -136,6 +142,8 @@ impl Renderer {
         merge_rectangles(spans)
     }
 
+    /// Reports whether one cell of a raster is non-transparent and not covered by
+    /// a higher-ranked layer.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn raster_cell_visible(
         &self,

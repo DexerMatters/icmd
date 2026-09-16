@@ -570,7 +570,10 @@ fn read_only_raw_input_is_focusable_and_selectable_but_does_not_mutate() {
     interact(
         &output,
         &dispatcher,
-        Some(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        Some(key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )),
     );
     assert_eq!(
         clipboard.lock().unwrap().as_slice(),
@@ -903,7 +906,10 @@ fn drag_selection_extends_and_release_keeps_the_selection() {
     interact(
         &output,
         &dispatcher,
-        Some(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        Some(key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )),
     );
     let copied = clipboard.lock().unwrap().clone();
     assert_eq!(copied.len(), 1, "a drag must produce a copyable selection");
@@ -918,6 +924,270 @@ fn drag_selection_extends_and_release_keeps_the_selection() {
             .iter()
             .any(|value| value != "abcdefgh"),
         "selection alone must not change the value"
+    );
+}
+
+#[test]
+fn the_clipboard_chords_round_trip_through_the_editor() {
+    // Ctrl+Shift+C must fill the framework clipboard and Ctrl+Shift+V must paste
+    // it back, with no system clipboard involved.
+    icmd::__private::clipboard_clear();
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("hello".into()),
+            on_change: Attr::Set(EventListener::new({
+                let values = values.clone();
+                move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(20))
+        .node();
+    let viewport = Size::new(24, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    // Select the whole value, copy it, move to the end, and paste it.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )),
+    );
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("hellohello"),
+        "copy then paste must round trip through the framework clipboard"
+    );
+}
+
+#[test]
+fn copy_works_when_the_terminal_drops_the_shift_modifier() {
+    // Terminals disagree on whether Ctrl+Shift+C reports the SHIFT bit next to
+    // the uppercase letter. Both spellings must copy, and plain Ctrl+C must stay
+    // the runtime's exit key rather than becoming a copy.
+    icmd::__private::clipboard_clear();
+    let clipboard = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("hello".into()),
+            on_clipboard: Attr::Set(EventListener::new({
+                let clipboard = clipboard.clone();
+                move |event: icmd::TextClipboardEvent| clipboard.lock().unwrap().push(event.text)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(20))
+        .node();
+    let viewport = Size::new(24, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+    );
+    // Uppercase `C` with only CONTROL: the shape that used to be ignored.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('C'), KeyModifiers::CONTROL)),
+    );
+    assert_eq!(
+        clipboard.lock().unwrap().as_slice(),
+        ["hello"],
+        "an uppercase chord letter must copy even without the SHIFT bit"
+    );
+    assert_eq!(
+        icmd::__private::clipboard_load().as_deref(),
+        Some("hello"),
+        "the copy must reach the framework clipboard"
+    );
+
+    // Plain Ctrl+C is the exit key and never a copy.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+    );
+    assert_eq!(
+        clipboard.lock().unwrap().len(),
+        1,
+        "plain Ctrl+C must not copy"
+    );
+}
+
+#[test]
+fn a_copy_is_mirrored_into_the_terminal_clipboard() {
+    // The framework buffer alone is invisible to the terminal, whose paste
+    // shortcut reads the system clipboard. Every copy must also reach the writer
+    // the session installs, which is the OSC 52 write.
+    use icmd::__private::{clipboard_store, set_system_writer};
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorder = {
+        let seen = seen.clone();
+        Arc::new(move |text: &str| seen.lock().unwrap().push(text.to_string()))
+    };
+    set_system_writer(Some(recorder));
+    clipboard_store("mirrored text");
+    // Clearing the clipboard must not mirror an empty copy.
+    clipboard_store("");
+    set_system_writer(None);
+
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|text| text == "mirrored text"),
+        "a copy must reach the terminal clipboard writer: {seen:?}"
+    );
+    assert!(
+        seen.iter().all(|text| !text.is_empty()),
+        "an empty copy is not mirrored: {seen:?}"
+    );
+}
+
+#[test]
+fn the_terminal_clipboard_sequence_is_osc52() {
+    // The exact bytes matter: a terminal only sets its clipboard from a complete
+    // OSC 52 sequence, and the payload is base64.
+    assert_eq!(
+        icmd::__private::terminal_clipboard_sequence("foo"),
+        "\u{1b}]52;c;Zm9v\u{1b}\\"
+    );
+}
+
+#[test]
+fn the_caret_stays_visible_at_the_end_of_the_value() {
+    // The editor leaf is only as wide as its own text, so the caret one position
+    // past the last glyph had no cell of its own and simply vanished once the
+    // caret reached the end of the value. The editor reserves one column for it,
+    // so the end cursor is a highlighted blank after the text: "apple " with the
+    // trailing space reversed.
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("hello".into()),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(10))
+        .node();
+    let viewport = Size::new(12, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    // Move to the end, nudge left, then right: the frame from the right move
+    // draws the caret at the end of the value.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Left, KeyModifiers::empty())),
+    );
+    dispatcher.dispatch(key(KeyCode::Right, KeyModifiers::empty()));
+    let frame = output
+        .recv_timeout(Duration::from_secs(1))
+        .expect("a frame arrives")
+        .expect("the renderer succeeds");
+    assert!(
+        frame.contains("\u{1b}[7m "),
+        "the caret at the end must be a highlighted blank after the text: {frame:?}"
+    );
+}
+
+#[test]
+fn a_drag_selects_the_visible_text_after_the_field_scrolls() {
+    // The pointer arrives in the coordinates of the painted frame. A drag that
+    // read it as a document coordinate selected glyphs from the start of the
+    // value, so a selection made after the field had scrolled - a long value or
+    // a paste - appeared offset by exactly the scroll amount.
+    let clipboard = Arc::new(Mutex::new(Vec::new()));
+    let node = raw_input
+        .props(RawInputProps {
+            default_value: Attr::Set("0123456789".into()),
+            on_clipboard: Attr::Set(EventListener::new({
+                let clipboard = clipboard.clone();
+                move |event: icmd::TextClipboardEvent| clipboard.lock().unwrap().push(event.text)
+            })),
+            ..RawInputProps::default()
+        })
+        .style(|style| style.width /= icmd::Dimension::Cells(4))
+        .node();
+    let viewport = Size::new(8, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    // Move the caret to the end so the field scrolls to the value's tail.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+
+    // Drag across the first visible cells, then copy the selection.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 3,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 3,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    }));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )),
+    );
+
+    let copied = clipboard.lock().unwrap().clone();
+    assert_eq!(
+        copied.len(),
+        1,
+        "the drag must produce a copyable selection: {copied:?}"
+    );
+    let copied = &copied[0];
+    let start = "0123456789".find(copied.as_str());
+    assert!(
+        start.is_some_and(|start| start >= 4),
+        "a drag on the scrolled field must select the visible text, not the \
+         document start: {copied:?}"
     );
 }
 
@@ -999,10 +1269,10 @@ fn every_painted_character_round_trips_through_a_pointer_click() {
         );
         let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
         let position = emitted.find('#').expect("the click must place a caret");
-        // A pointer lands inside a cell, so the caret belongs *after* that
-        // cell's character - never a cell earlier or later. Cell 0 of the first
-        // row is therefore boundary 1.
-        let expected = cell as usize + 1;
+        // A pointer lands on a cell, and the caret belongs on the character it
+        // landed on - never a cell earlier or later. Cell 0 of the first row is
+        // therefore boundary 0. This is the same rule a selectable region uses.
+        let expected = cell as usize;
         assert_eq!(
             position, expected,
             "clicking cell {cell} must insert at {expected}, got {position} in {emitted:?}"
@@ -1268,9 +1538,9 @@ fn a_dropped_separator_does_not_shift_later_graphemes() {
         raw.escape_debug()
     );
 
-    // Click the first cell of the 'efgh' row and type. A pointer lands *inside*
-    // a cell, so the caret belongs just after that cell's grapheme - the row's
-    // own second boundary, which is what makes the click position predictable.
+    // Click the first cell of the 'efgh' row and type. The caret belongs on the
+    // grapheme the pointer landed on - the row's own first boundary - and no
+    // later character may be shifted.
     interact(&output, &dispatcher, Some(click(1, 0)));
     interact(
         &output,
@@ -1279,8 +1549,8 @@ fn a_dropped_separator_does_not_shift_later_graphemes() {
     );
     let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
     assert_eq!(
-        emitted, "ab cd e#fgh",
-        "a click on the wrapped row places the caret after exactly one grapheme, \
+        emitted, "ab cd #efgh",
+        "a click on the wrapped row places the caret on the clicked grapheme, \
          so no later character is shifted"
     );
 }
@@ -1491,7 +1761,7 @@ fn clicking_after_a_scroll_maps_to_the_painted_cell() {
     );
     let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
     assert_eq!(
-        emitted, "abc#def",
+        emitted, "ab#cdef",
         "the click must map to the first painted grapheme of the scrolled \
          viewport, not one cell past it"
     );
@@ -1724,8 +1994,8 @@ fn a_real_tab_in_multiline_keeps_later_cells_in_place() {
         "the glyph after a tab must keep its expanded column: {}",
         raw.escape_debug()
     );
-    // Clicking the cell that paints 'b' places the caret just after it, which is
-    // the same trailing bias every other grapheme gets.
+    // Clicking the cell that paints 'b' places the caret on 'b', which is the
+    // same rule every other grapheme gets.
     interact(&output, &dispatcher, Some(click(0, 4)));
     interact(
         &output,
@@ -1734,8 +2004,8 @@ fn a_real_tab_in_multiline_keeps_later_cells_in_place() {
     );
     let emitted = values.lock().unwrap().last().cloned().unwrap_or_default();
     assert_eq!(
-        emitted, "a\tb#",
-        "a click on the painted glyph must place the caret after it, and the tab \
+        emitted, "a\t#b",
+        "a click on the painted glyph must place the caret on it, and the tab \
          must keep its expanded width"
     );
 }
@@ -2005,7 +2275,8 @@ fn a_pointer_click_after_a_resize_maps_to_the_painted_cell() {
     resize.set(Size::new(12, 3));
     let _ = collect_frames(&output, &dispatcher, None);
 
-    // Click the first painted cell, which is document column 6 ('g').
+    // Click the first painted cell, which is the clamped scroll origin, so the
+    // caret lands on that painted cell.
     interact(&output, &dispatcher, Some(click(0, 0)));
     interact(
         &output,
@@ -2073,7 +2344,7 @@ fn a_pointer_click_after_a_vertical_resize_maps_to_the_painted_row() {
     let values = values.lock().unwrap();
     let last = values.last().map(String::as_str).unwrap_or_default();
     assert_eq!(
-        last, "0#\n1\n2\n3\n4\n5\n6\n7\n8\n9",
+        last, "#0\n1\n2\n3\n4\n5\n6\n7\n8\n9",
         "the click must land on the row the resized frame painted first: {values:?}"
     );
 }
@@ -2129,7 +2400,7 @@ fn a_pointer_click_survives_a_resize_that_does_not_clamp() {
     let values = values.lock().unwrap();
     let last = values.last().map(String::as_str).unwrap_or_default();
     assert_eq!(
-        last, "abcdefg#hijklmnop界",
+        last, "abcdef#ghijklmnop界",
         "the click must land on the cell the resized frame painted: {values:?}"
     );
 }

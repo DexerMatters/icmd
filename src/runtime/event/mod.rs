@@ -1,3 +1,7 @@
+//! Event dispatch state and public result types for the runtime event system.
+//! Owns the region registry, focus and pointer-capture state, and the scroll
+//! offsets shared across pointer, keyboard, paste, and resize routing.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -15,21 +19,24 @@ use crate::{
 use super::commit::ViewportSetter;
 use super::commit::layout::ScrollbarMetrics;
 
-// The observable result of one dispatch. It replaces a bare delivery count,
-// whose meaning varied by route, with explicit propagation, default-action, and
-// redraw signals a caller can act on.
-// The result of an accepted focus request: how many listeners observed the
-// transition and which region now owns focus.
+/// Result of an accepted focus request: the number of focus listeners that
+/// observed the transition and the region that now owns focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusOutcome {
+    /// Count of focus listeners that observed the transition.
     pub delivered: usize,
+    /// DOM id of the region that now owns focus.
     pub focused: DomId,
 }
 
+/// Reason a programmatic focus request was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusError {
+    /// No published region carries the requested DOM id.
     UnknownTarget(DomId),
+    /// The region with this DOM id exists but is not focusable.
     NotFocusable(DomId),
+    /// The region with this DOM id already owns focus.
     AlreadyFocused(DomId),
 }
 
@@ -45,11 +52,17 @@ impl std::fmt::Display for FocusError {
 
 impl std::error::Error for FocusError {}
 
+/// Observable result of one dispatch, replacing a bare delivery count with
+/// explicit propagation, default-action, and redraw signals a caller can act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DispatchOutcome {
+    /// Count of listeners that received the event.
     pub delivered: usize,
+    /// Whether a listener stopped propagation.
     pub propagation_stopped: bool,
+    /// Whether a listener prevented the built-in default action.
     pub default_prevented: bool,
+    /// Whether a scroll changed and a redraw was requested.
     pub redraw_requested: bool,
 }
 
@@ -215,10 +228,7 @@ pub(crate) struct RuntimeScrollOffset {
 #[derive(Default)]
 struct EventState {
     regions: Vec<EventRegion>,
-    // Published ID index. Without it, every ancestry step during routing was a
-    // linear scan of all regions, making a deep route O(depth * regions).
     by_id: HashMap<DomId, usize>,
-    // Test/diagnostic probe counter for the ID index.
     id_probes: std::sync::atomic::AtomicU64,
     focused: Option<DomId>,
     captured: Option<PointerCapture>,
@@ -226,10 +236,6 @@ struct EventState {
     buttons: u16,
     last_position: ScreenPosition,
     drag: Option<ScrollDrag>,
-    // Focus requested before the target existed. A caller can only name a
-    // target once the runtime has published it, so a request is held here and
-    // granted at the next publication. Taken once so it cannot re-focus a
-    // target the user has since moved away from.
     pending_focus: Option<DomId>,
 }
 
@@ -253,6 +259,8 @@ enum ScrollInput {
     Keyboard,
 }
 
+/// Shared handle to the event registry, viewport, and per-region scroll
+/// offsets; routes events and owns DOM focus and pointer capture.
 #[derive(Clone)]
 pub struct EventDispatcher {
     state: Arc<RwLock<EventState>>,
@@ -344,8 +352,6 @@ impl EventDispatcher {
                 .map(|(index, region)| (region.id, index))
                 .collect();
             state.regions = regions;
-            // A pending focus request is granted now that the published region
-            // set is known, but only while nothing else owns focus.
             let gained_focus = match state.pending_focus.take() {
                 Some(pending)
                     if state.focused.is_none()

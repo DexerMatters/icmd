@@ -1,3 +1,7 @@
+//! Frame-local box layout for the commit stage: intrinsic sizing, child
+//! placement, scroll content sizing with scrollbar metrics, and the scroll-id
+//! collection that retains scroll state across frames.
+
 use std::collections::HashSet;
 
 use crate::{
@@ -190,7 +194,7 @@ impl Commit {
                     definite_dimension(value, offered_height, self.viewport.height as i32)
                 });
                 let border = style.border.insets();
-                let inner_w = explicit_width.map(|value| {
+                let inner_w = explicit_width.or(offered_width).map(|value| {
                     (value
                         - border.left as i32
                         - border.right as i32
@@ -198,7 +202,7 @@ impl Commit {
                         - style.padding.right as i32)
                         .max(0)
                 });
-                let inner_h = explicit_height.map(|value| {
+                let inner_h = explicit_height.or(offered_height).map(|value| {
                     (value
                         - border.top as i32
                         - border.bottom as i32

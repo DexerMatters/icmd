@@ -7,13 +7,12 @@
 
 use std::{error::Error, path::PathBuf, sync::OnceLock};
 
+use icmd::widgets::raster_image;
 use icmd::{
     Align, Component, ComponentContext, Dimension, Edges, ImageFit, ImageSource, Layout, Node,
     Percent, Props, RuntimeConfig, ScrollAxes, ScrollbarVisibility, Text, render, ui,
 };
-use icmd::{
-    badge, card, column, container, heading, label, muted, raster_image, row, scroll_area, view,
-};
+use icmd::{badge, card, column, container, heading, label, muted, row, scroll_area, view};
 
 struct Pin {
     image: ImageSource,

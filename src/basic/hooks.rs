@@ -1,3 +1,8 @@
+//! Hook storage: the per-fiber hook slots a component's render fills.
+//!
+//! Slots are positional, so a component must call its hooks in the same order
+//! on every render.
+
 use std::{
     any::Any,
     collections::VecDeque,

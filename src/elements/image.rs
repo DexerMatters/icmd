@@ -1,21 +1,35 @@
+//! Raster image widget that places an image in a cell box.
+
 use crate::{
     Align, Attr, Dimension, DomProps, ImageAlign, ImageFit, ImageLoading, ImageMode,
     ImageRenderOptions, Justify, Node, Props, RasterImage, RasterPlacement, Text,
     basic::ComponentContext,
 };
 
+/// Configuration for the raster widget, [`raster_image`](crate::widgets::raster_image).
 #[derive(Debug, Clone, Default)]
 pub struct ImageProps {
+    /// Image source; when unset the widget renders an empty element.
     pub src: Attr<crate::ImageSource>,
+    /// Requested width in terminal cells; `0` (default) derives it from the
+    /// source when loaded, otherwise falls back to `1`.
     pub width: Attr<u16>,
+    /// Requested height in terminal cells; `0` (default) derives it from the
+    /// source when loaded, otherwise falls back to `1`.
     pub height: Attr<u16>,
+    /// When the source is loaded; defaults to [`ImageLoading::Lazy`].
     pub loading: Attr<ImageLoading>,
+    /// How the image fits its box; defaults to [`ImageFit::Contain`].
     pub fit: Attr<ImageFit>,
+    /// Horizontal placement inside the box; defaults to [`ImageAlign::Center`].
     pub horizontal_align: Attr<ImageAlign>,
+    /// Vertical placement inside the box; defaults to [`ImageAlign::Center`].
     pub vertical_align: Attr<ImageAlign>,
+    /// Raster render mode; defaults to [`ImageMode::Auto`].
     pub mode: Attr<ImageMode>,
 }
 
+/// Raster image widget; see [`ImageProps`] for its configuration.
 pub fn image(_cx: &mut ComponentContext, props: &Props<ImageProps>) -> Node {
     let Some(src) = Option::<crate::ImageSource>::from(props.src.clone()) else {
         return Node::element(props.dom.clone(), []);
@@ -52,6 +66,7 @@ pub fn image(_cx: &mut ComponentContext, props: &Props<ImageProps>) -> Node {
     )
 }
 
+/// Placeholder for an unloaded source that lacks an explicit width or height.
 fn invalid_source(props: &Props<ImageProps>, width: u16, height: u16) -> Node {
     let defaults = DomProps {
         style: crate::Style {
@@ -67,9 +82,12 @@ fn invalid_source(props: &Props<ImageProps>, width: u16, height: u16) -> Node {
     Node::element(props.host_props(defaults), [Text::new("×").into()])
 }
 
+/// Derive the cell box from the requested size and the source's pixel size,
+/// preserving the aspect ratio on the unconstrained axis.
+///
+/// 8x16 is only an intrinsic-size estimate. The renderer uses its actual
+/// terminal cell geometry when it emits native pixels.
 fn dimensions(source: &RasterImage, requested_width: u16, requested_height: u16) -> (u16, u16) {
-    // 8x16 is only an intrinsic-size estimate. The renderer uses its actual
-    // terminal cell geometry when it emits native pixels.
     let natural_width = (source.width().saturating_add(7) / 8).clamp(1, u16::MAX as u32) as u16;
     let natural_height = (source.height().saturating_add(15) / 16).clamp(1, u16::MAX as u32) as u16;
     match (requested_width, requested_height) {
