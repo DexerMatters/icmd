@@ -10,6 +10,7 @@ use std::{
 };
 
 use crossterm::style::{Attribute, Attributes as CrosstermAttributes, Color};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{Node, data::MAX_GLYPH_BYTES};
 
@@ -331,12 +332,16 @@ impl TryFrom<String> for Fill {
     }
 }
 
-/// A validated one-column glyph used to draw a scrollbar track or thumb.
+/// A validated one-column glyph used wherever a widget paints one cell at a
+/// time: a scrollbar track or thumb, a progress bar's filled or empty cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ScrollbarGlyph(Fill);
+pub struct Glyph(Fill);
 
-impl ScrollbarGlyph {
+impl Glyph {
     /// Validates `symbol` as a one-column terminal glyph.
+    ///
+    /// The shared validator owns the terminal-glyph invariant; the one-column
+    /// policy is what makes a glyph safe for cell-by-cell arithmetic.
     pub fn new(symbol: impl Into<String>) -> Result<Self, FillError> {
         let glyph = crate::glyph::validate_terminal_glyph(
             symbol.into().as_str(),
@@ -355,7 +360,7 @@ impl ScrollbarGlyph {
     }
 }
 
-impl TryFrom<&str> for ScrollbarGlyph {
+impl TryFrom<&str> for Glyph {
     type Error = FillError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
@@ -363,7 +368,84 @@ impl TryFrom<&str> for ScrollbarGlyph {
     }
 }
 
-impl TryFrom<String> for ScrollbarGlyph {
+impl TryFrom<String> for Glyph {
+    type Error = FillError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+/// A validated one-column glyph used to draw a scrollbar track or thumb.
+///
+/// A scrollbar glyph is exactly [`Glyph`]; the alias keeps the scrollbar-facing
+/// name for the theme and props that describe scrollbars.
+pub type ScrollbarGlyph = Glyph;
+
+/// An ordered sequence of one-column glyphs spanning a cell's fill from the
+/// least to the most filled.
+///
+/// A progress bar uses the sequence for its fractional cell: element `i` is
+/// painted for the fill band `(i / len, (i + 1) / len]` of that cell, so the
+/// last element represents an almost-full cell. An empty sequence is valid and
+/// means the bar has no fractional cell, falling back to a rounded count.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GlyphRamp(Arc<[Arc<str>]>);
+
+impl GlyphRamp {
+    /// Validates every grapheme of `symbols` as a one-column terminal glyph.
+    ///
+    /// An empty string is accepted and yields the empty ramp.
+    pub fn new(symbols: impl Into<String>) -> Result<Self, FillError> {
+        let symbols = symbols.into();
+        let mut ramp = Vec::new();
+        for grapheme in symbols.graphemes(true) {
+            let glyph = crate::glyph::validate_terminal_glyph(
+                grapheme,
+                crate::glyph::AllowedGlyphWidth::One,
+            )
+            .map_err(fill_error_from_glyph)?;
+            ramp.push(glyph.into_text());
+        }
+        Ok(Self(ramp.into()))
+    }
+
+    /// Returns the number of glyphs in the ramp.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns `true` when the ramp has no glyphs.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns the glyph at `index`, or `None` when out of range.
+    pub fn symbol(&self, index: usize) -> Option<&str> {
+        self.0.get(index).map(|symbol| &**symbol)
+    }
+
+    /// Iterates the ramp's glyphs from the least to the most filled.
+    pub fn symbols(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|symbol| &**symbol)
+    }
+}
+
+impl Default for GlyphRamp {
+    fn default() -> Self {
+        Self(Vec::<Arc<str>>::new().into())
+    }
+}
+
+impl TryFrom<&str> for GlyphRamp {
+    type Error = FillError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for GlyphRamp {
     type Error = FillError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
@@ -657,6 +739,56 @@ impl Default for ScrollbarStyle {
     }
 }
 
+/// Glyphs and text styles for a progress bar's filled, empty, and fractional
+/// cells.
+///
+/// The fractional sequence is ordered from the least to the most filled; see
+/// [`GlyphRamp`]. An empty sequence disables the fractional cell, and the bar
+/// falls back to rounding the filled cell count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressBarStyle {
+    /// Glyph for a fully filled cell.
+    pub filled: Glyph,
+    /// Glyph for an empty cell.
+    pub empty: Glyph,
+    /// Ordered glyphs for a partially filled cell.
+    pub partial: GlyphRamp,
+    /// Text style for filled and partially filled cells.
+    pub filled_style: TextStyle,
+    /// Text style for empty cells.
+    pub empty_style: TextStyle,
+}
+
+impl Default for ProgressBarStyle {
+    fn default() -> Self {
+        Self {
+            filled: Glyph::new("█").expect("default progress glyph is valid"),
+            empty: Glyph::new("░").expect("default progress glyph is valid"),
+            partial: GlyphRamp::new("▏▎▍▌▋▊▉█").expect("default progress ramp is valid"),
+            filled_style: TextStyle::default(),
+            empty_style: TextStyle::default(),
+        }
+    }
+}
+
+/// How a box's background composites with the layers painted beneath it.
+///
+/// A terminal cell has no alpha, so the mode decides what a transparent
+/// background means: whether it contributes nothing to the composite or paints
+/// the terminal's default over the layers below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BackgroundBlend {
+    /// The background is painted over the layers below. A transparent
+    /// background is opaque: it paints the terminal's default and culls
+    /// whatever was underneath.
+    #[default]
+    Cover,
+    /// The background contributes nothing to the composite. A transparent
+    /// background leaves the lower layer's own style visible, so the box reads
+    /// as part of the surface behind it; an opaque background still covers.
+    Blend,
+}
+
 /// The style tree applied to a node: layout, spacing, border, and text.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Style {
@@ -692,6 +824,9 @@ pub struct Style {
     pub z_index: Attr<i32>,
     /// Background color.
     pub background: Attr<Color>,
+    /// How the background composites with the layers below; defaults to
+    /// [`BackgroundBlend::Cover`].
+    pub background_blend: Attr<BackgroundBlend>,
     /// Glyph used to fill background cells.
     pub fill: Attr<Fill>,
     /// Border configuration.
@@ -771,8 +906,24 @@ impl Style {
             };
         }
         merge!(
-            layout, width, height, line, column, margin, padding, gap, justify, align, overflow,
-            overflow_x, overflow_y, visibility, z_index, background, fill,
+            layout,
+            width,
+            height,
+            line,
+            column,
+            margin,
+            padding,
+            gap,
+            justify,
+            align,
+            overflow,
+            overflow_x,
+            overflow_y,
+            visibility,
+            z_index,
+            background,
+            background_blend,
+            fill,
         );
         self.border = self.border.with_overrides(&overrides.border);
         self.text = self.text.with_overrides(&overrides.text);
@@ -793,6 +944,42 @@ impl ops::DivAssign<char> for Attr<Fill> {
     fn div_assign(&mut self, rhs: char) {
         if let Ok(fill) = Fill::new(rhs.to_string()) {
             self.overlay(&Attr::Set(fill));
+        }
+    }
+}
+
+/// Operator assignment ignores an invalid glyph instead of panicking; use
+/// [`Glyph::new`] for a fallible path.
+impl ops::DivAssign<&str> for Attr<Glyph> {
+    fn div_assign(&mut self, rhs: &str) {
+        if let Ok(glyph) = Glyph::new(rhs) {
+            self.overlay(&Attr::Set(glyph));
+        }
+    }
+}
+
+impl ops::DivAssign<char> for Attr<Glyph> {
+    fn div_assign(&mut self, rhs: char) {
+        if let Ok(glyph) = Glyph::new(rhs.to_string()) {
+            self.overlay(&Attr::Set(glyph));
+        }
+    }
+}
+
+/// Operator assignment ignores an invalid sequence instead of panicking; use
+/// [`GlyphRamp::new`] for a fallible path.
+impl ops::DivAssign<&str> for Attr<GlyphRamp> {
+    fn div_assign(&mut self, rhs: &str) {
+        if let Ok(ramp) = GlyphRamp::new(rhs) {
+            self.overlay(&Attr::Set(ramp));
+        }
+    }
+}
+
+impl ops::DivAssign<String> for Attr<GlyphRamp> {
+    fn div_assign(&mut self, rhs: String) {
+        if let Ok(ramp) = GlyphRamp::new(rhs) {
+            self.overlay(&Attr::Set(ramp));
         }
     }
 }
@@ -819,6 +1006,29 @@ pub fn style(f: impl FnOnce(&mut Style)) -> Style {
     let mut style = Style::default();
     f(&mut style);
     style
+}
+
+/// The terminal's own default color, for a foreground or background slot that
+/// should paint nothing and let the terminal's background show through.
+///
+/// Unlike leaving a slot [`Attr::Unset`], which inherits the surrounding
+/// backdrop, this is an explicit value that stops inheritance. It is exactly
+/// [`crossterm::style::Color::Reset`], which the renderer encodes as the
+/// terminal's default foreground (`39`) or background (`49`).
+///
+/// A transparent background composites with the layers below according to
+/// [`Style::background_blend`]: the default [`BackgroundBlend::Cover`] paints
+/// the terminal default over them, while [`BackgroundBlend::Blend`] adds
+/// nothing and leaves the lower layer's own style visible.
+///
+/// ```
+/// use icmd::{style, transparent};
+///
+/// let _ = style(|style| style.background /= transparent());
+/// let _ = style(|style| style.text.foreground /= transparent());
+/// ```
+pub const fn transparent() -> Color {
+    Color::Reset
 }
 
 impl ops::DivAssign<fn(&mut Self)> for Style {

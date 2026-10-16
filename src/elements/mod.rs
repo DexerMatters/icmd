@@ -45,8 +45,8 @@ pub use basic::{
 pub use canvas::{CanvasContext, CanvasDraw, CanvasError, CanvasProps, canvas};
 pub use controls::{CheckboxProps, RadioProps, SwitchProps, checkbox, radio, switch};
 pub use feedback::{
-    AlertProps, AlertVariant, BadgeProps, BadgeVariant, ProgressBarProps, SkeletonProps,
-    SpinnerProps, alert, badge, progress_bar, skeleton, spinner,
+    AlertProps, AlertVariant, BadgeProps, BadgeVariant, ProgressBarDragEvent, ProgressBarProps,
+    SkeletonProps, SpinnerProps, alert, badge, progress_bar, skeleton, spinner,
 };
 /// The raster widget constructor is published once, as `widgets::raster_image`;
 /// only its props type is part of the flat vocabulary.

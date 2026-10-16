@@ -43,6 +43,8 @@ mod task_list;
 mod test_commit;
 #[path = "../snippets/theme_customize.rs"]
 mod theme_customize;
+#[path = "../snippets/transparent_surface.rs"]
+mod transparent_surface;
 #[path = "../snippets/ui_syntax.rs"]
 mod ui_syntax;
 #[path = "../snippets/unicode_rows.rs"]

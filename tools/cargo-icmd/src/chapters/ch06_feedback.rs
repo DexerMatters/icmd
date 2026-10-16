@@ -13,8 +13,8 @@ use crossterm::style::{Attribute, Attributes};
 use icmd::theme::Theme;
 use icmd::{
     AlertVariant, Align, BadgeVariant, ButtonVariant, CanvasContext, Component, ComponentContext,
-    Dimension, Justify, Layout, Node, Props, Span, Text, TextWrap, alert, badge, button, canvas,
-    card, muted, progress_bar, row, skeleton, spinner, ui, view,
+    Dimension, Justify, Layout, Node, ProgressBarDragEvent, Props, Span, Text, TextWrap, alert,
+    badge, button, canvas, card, muted, progress_bar, row, skeleton, spinner, ui, view,
 };
 
 use super::{ChapterProps, document, masthead, route_card, section};
@@ -176,8 +176,12 @@ fn alerts_demo(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     }
 }
 
-/// Several progress values, including one past the maximum that clamps.
-fn progress_demo(_cx: &mut ComponentContext, _props: &Props<()>) -> Node {
+/// Several progress values, including one past the maximum that clamps, and a
+/// draggable bar whose value the caller still owns.
+fn progress_demo(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
+    let (dragged, set_dragged) = cx.use_state(|| 35_u64);
+    let drag = set_dragged.clone();
+    let end = set_dragged;
     ui! {
         <view style={|style| {
             style.layout /= Layout::Vertical;
@@ -193,6 +197,16 @@ fn progress_demo(_cx: &mut ComponentContext, _props: &Props<()>) -> Node {
             <progress_bar value={3_u64} max={7_u64} width={18_u16} label={"3 of 7"} />
             <progress_bar value={42_u64} max={100_u64} width={26_u16} label={"no percentage"} show_percentage={false} />
             <progress_bar value={50_u64} max={100_u64} width={6_u16} label={"width 6"} />
+            <muted>"drag this one: the bar reports, the caller decides"</muted>
+            <progress_bar
+                value={dragged}
+                max={100_u64}
+                width={26_u16}
+                label={"drag"}
+                draggable
+                on_drag={move |event: ProgressBarDragEvent| drag.set(event.value)}
+                on_drag_end={move |event: ProgressBarDragEvent| end.set(event.value)}
+            />
         </view>
     }
 }
@@ -520,13 +534,16 @@ pub(super) fn feedback_and_canvas(cx: &mut ComponentContext, props: &Props<Chapt
         2,
         &sections[2],
         ui! {
-            {docs::body("A progress bar renders a value; it does not own one. You pass value and max, and the component floors max at one, clamps value into 0..=max, rounds the filled cells to the nearest half cell, and prints the floored percentage right-aligned in three columns.")}
-            {docs::body("The width is a cell count, so the bar never depends on measured layout, and the optional label is drawn before the bar with the theme's label style. Setting show_percentage to false leaves the number to your own readout.")}
-            {docs::specimen(&theme, "progress values and widths", ui! { {progress_demo.apply(())} })}
+            {docs::body("A progress bar renders a value; it does not own one. You pass value and max, and the component floors max at one, clamps value into 0..=max, and prints the floored percentage right-aligned in three columns.")}
+            {docs::body("The width is a cell count, so the bar never depends on measured layout, and the optional label is drawn before the bar with the theme's label style. The filled and empty cells are validated one-column glyphs, and the fractional cell is chosen from an ordered ramp, so a value between two cells paints the nearest step instead of rounding away. Setting show_percentage to false leaves the number to your own readout.")}
+            {docs::body("A draggable bar answers the pointer and reports the value under it through on_drag_start, on_drag, and on_drag_end. It still owns no value: the demonstration below feeds those events back into its own state, which is why the bar follows the pointer.")}
+            {docs::specimen(&theme, "progress values, widths, and a draggable bar", ui! { {progress_demo.apply(())} })}
             {docs::notice(&theme, "Because the caller supplies the value, an indeterminate operation has no honest bar to show. Use a spinner while the total is unknown and switch to a bar once it is known.")}
             {docs::api_strip(&theme, &[
-                ApiRow { name: "progress_bar", purpose: "one-line bar filled in proportion to value / max", defaults: "value 0, max 100, width 20, show_percentage true", events: "none" },
-                ApiRow { name: "ProgressBarProps", purpose: "value, max, width, label, show_percentage", defaults: "max floored at 1, value clamped to max", events: "none" },
+                ApiRow { name: "progress_bar", purpose: "one-line bar filled in proportion to value / max", defaults: "value 0, max 100, width 20, show_percentage true", events: "on_drag_start, on_drag, on_drag_end" },
+                ApiRow { name: "ProgressBarProps", purpose: "value, max, width, label, show_percentage, filled, empty, partial, draggable", defaults: "max floored at 1, value clamped to max, theme progress glyphs", events: "drag listeners when draggable" },
+                ApiRow { name: "ProgressBarStyle", purpose: "filled, empty, and partial glyphs plus their text styles", defaults: "derived from the palette, with an eighth-block ramp", events: "none" },
+                ApiRow { name: "ProgressBarDragEvent", purpose: "value and max under the pointer", defaults: "value clamped to 0..=max", events: "none" },
             ])}
         },
     );

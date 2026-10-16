@@ -147,13 +147,13 @@ impl Commit {
                 if style.visibility != crate::Visibility::Visible {
                     return;
                 }
-                let current_backdrop = style.background.or(backdrop);
+                let current_backdrop = style.painted_background().or(backdrop);
                 let paint_level = level.saturating_add(style.z_index);
                 if style.visibility == crate::Visibility::Visible {
                     Self::paint_background(
                         scene,
                         *id,
-                        style.background,
+                        style.painted_background(),
                         style.fill.clone(),
                         style.text,
                         backdrop,
@@ -166,7 +166,7 @@ impl Commit {
                         scene,
                         *id,
                         style.border,
-                        style.background.or(backdrop),
+                        style.painted_background().or(backdrop),
                         rect,
                         paint_level,
                         clip,
@@ -261,14 +261,14 @@ impl Commit {
                 if style.visibility == crate::Visibility::Hidden {
                     return;
                 }
-                let current_backdrop = style.background.or(backdrop);
+                let current_backdrop = style.painted_background().or(backdrop);
                 let paint_level = level.saturating_add(style.z_index);
 
                 if style.visibility == crate::Visibility::Visible {
                     Self::paint_background(
                         scene,
                         *id,
-                        style.background,
+                        style.painted_background(),
                         style.fill.clone(),
                         style.text,
                         backdrop,
@@ -281,7 +281,7 @@ impl Commit {
                         scene,
                         *id,
                         style.border,
-                        style.background.or(backdrop),
+                        style.painted_background().or(backdrop),
                         rect,
                         paint_level,
                         clip,
@@ -340,6 +340,7 @@ impl Commit {
                         visibility: style.visibility,
                         z_index: style.z_index,
                         background: style.background,
+                        background_blend: style.background_blend,
                         fill: style.fill.clone(),
                         border: ResolvedBorderStyle {
                             kind: style.border.kind,

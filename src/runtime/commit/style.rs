@@ -48,6 +48,7 @@ impl ComputedStyle {
             visibility: slot(&style.visibility).unwrap_or_default(),
             z_index: slot(&style.z_index).unwrap_or_default(),
             background: slot(&style.background),
+            background_blend: slot(&style.background_blend).unwrap_or_default(),
             fill: slot(&style.fill),
             border: ComputedBorder {
                 kind: border_kind,

@@ -31,9 +31,10 @@ use crossterm::{event::KeyCode, style::Color};
 use icmd::{
     AlertVariant, Align, AppLifecycle, Attr, BadgeVariant, BorderKind, Component, ComponentContext,
     Dimension, Edges, EventListener, ExitReason, Justify, KeyboardEvent, Layout, Node, Percent,
-    Props, RawInputMode, RawInputProps, RuntimeConfig, ScrollAxes, ScrollEvent, ScrollOffset,
-    ScrollbarVisibility, Span, StateSetter, Text, TextAlign, TextClipboardEvent, TextOverflow,
-    TextSelectionEvent, TextValueEvent, TextWrap, raw_input, render_with, theme_provider, ui,
+    ProgressBarDragEvent, Props, RawInputMode, RawInputProps, RuntimeConfig, ScrollAxes,
+    ScrollEvent, ScrollOffset, ScrollbarVisibility, Span, StateSetter, Text, TextAlign,
+    TextClipboardEvent, TextOverflow, TextSelectionEvent, TextValueEvent, TextWrap, raw_input,
+    render_with, theme_provider, ui,
 };
 use icmd::{
     EmojiMerging,
@@ -224,12 +225,14 @@ pub fn command_field(cx: &mut ComponentContext, props: &Props<CommandFieldProps>
 // Pages
 // ---------------------------------------------------------------------------
 
-fn overview(theme: &Theme, tick: usize) -> Node {
+fn overview(theme: &Theme, tick: usize, dragged: u64, set_dragged: &StateSetter<u64>) -> Node {
     let progress_value = 38 + (tick as u64 * 3) % 60;
     let canvas_background = theme.colors.card;
     let grid = theme.colors.border;
     let accent = theme.colors.primary;
     let secondary = theme.colors.secondary;
+    let drag = set_dragged.clone();
+    let drag_end = set_dragged.clone();
 
     let hero = ui! {
         <card style={|style| style.width /= Dimension::Max}>
@@ -279,6 +282,15 @@ fn overview(theme: &Theme, tick: usize) -> Node {
             }}>
                 <progress_bar value={progress_value} max={100} width={26} label="commit" />
                 <progress_bar value={progress_value / 2} max={100} width={26} label="raster" />
+                <progress_bar
+                    value={dragged}
+                    max={100}
+                    width={26}
+                    label="drag me"
+                    draggable
+                    on_drag={move |event: ProgressBarDragEvent| drag.set(event.value)}
+                    on_drag_end={move |event: ProgressBarDragEvent| drag_end.set(event.value)}
+                />
                 <spinner frame={tick} label="streaming diff frames" />
                 <row>
                     <skeleton width={10} />
@@ -1279,7 +1291,7 @@ fn theme_page(
             style.width /= Dimension::Max;
             style.gap /= 1;
         }}>
-            {section_title("Theme", "Nineteen resolved tokens, eight presets")}
+            {section_title("Theme", "Nineteen resolved tokens, nine presets")}
             <card style={|style| style.width /= Dimension::Max}>
                 <view style={|style| {
                     style.layout /= Layout::Horizontal;
@@ -1395,6 +1407,7 @@ fn app(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     let (live, set_live) = cx.use_state(|| true);
     let (vertical_offset, set_vertical_offset) = cx.use_state(|| 4_u64);
     let (horizontal_offset, set_horizontal_offset) = cx.use_state(|| 12_u64);
+    let (dragged, set_dragged) = cx.use_state(|| 42_u64);
 
     // A cloneable session handle. The Quit button requests a graceful exit,
     // which runs the exit hooks registered in `main` and restores the terminal.
@@ -1525,7 +1538,7 @@ fn app(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     };
 
     let content = match page {
-        0 => overview(&theme, tick),
+        0 => overview(&theme, tick, dragged, &set_dragged),
         1 => controls_page(
             &theme,
             ControlState {

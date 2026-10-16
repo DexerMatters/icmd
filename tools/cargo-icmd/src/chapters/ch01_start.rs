@@ -24,7 +24,7 @@ fn release_card_demo(_cx: &mut ComponentContext, _props: &Props<()>) -> Node {
                 style.justify /= Justify::SpaceBetween;
                 style.gap /= 1;
             }}>
-                <heading>"icmd 0.2.0"</heading>
+                <heading>"icmd 0.3.0"</heading>
                 <badge text={"STABLE"} variant={BadgeVariant::Secondary} />
             </row>
             <paragraph>"A retained, terminal-native UI framework with cell-aware layout and Unicode text."</paragraph>
@@ -140,7 +140,7 @@ pub(super) fn start_here(cx: &mut ComponentContext, props: &Props<ChapterProps>)
                     {docs::feature_row(&theme, "markdown (opt-in)", "Turns CommonMark into ordinary, selectable components: headings, lists, tables, task lists, alerts, and footnotes.")}
                 },
                 ui! {
-                    {docs::source_block(&theme, "Cargo.toml", "[dependencies]\n# Default: pure Rust, cell output only.\nicmd = \"0.2\"\n\n# Terminal images and documents.\nicmd = { version = \"0.2\", features = [\"native-raster\", \"markdown\"] }\n\n# Documents only, still pure Rust.\nicmd = { version = \"0.2\", features = [\"markdown\"] }")}
+                    {docs::source_block(&theme, "Cargo.toml", "[dependencies]\n# Default: pure Rust, cell output only.\nicmd = \"0.3\"\n\n# Terminal images and documents.\nicmd = { version = \"0.3\", features = [\"native-raster\", \"markdown\"] }\n\n# Documents only, still pure Rust.\nicmd = { version = \"0.3\", features = [\"markdown\"] }")}
                 },
             )}
             {docs::callout(&theme, CalloutKind::Production, "The documentation browser itself enables native-raster and markdown, because it demonstrates images and documents. Your application only pays for the features it selects.")}
@@ -232,7 +232,7 @@ pub(super) fn start_here(cx: &mut ComponentContext, props: &Props<ChapterProps>)
                 {route_card(&theme, data, 4, "⌘", "05 · Controls and Events", "Buttons, selection controls, editors, focus, and event flow.")}
                 {route_card(&theme, data, 5, "◐", "06 · Feedback and Canvas", "Badges, alerts, progress, spinners, and direct cell drawing.")}
                 {route_card(&theme, data, 6, "▦", "07 · Scroll, Selection, and Raster Media", "Scroll ownership, selection in scroll, and terminal images.")}
-                {route_card(&theme, data, 7, "◆", "08 · Themes", "The nineteen roles, eight presets, derivation, and contrast.")}
+                {route_card(&theme, data, 7, "◆", "08 · Themes", "The nineteen roles, nine presets, derivation, and contrast.")}
                 {route_card(&theme, data, 8, "▸", "09 · Production", "Runtime configuration, lifecycle, exit, limits, tests, and release.")}
                 {route_card(&theme, data, 9, "≡", "10 · API Map", "Fast lookup for every shipped widget, hook, and type.")}
             </view>

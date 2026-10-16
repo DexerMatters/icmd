@@ -44,6 +44,8 @@ pub(crate) const CANVAS_CHART: &str = include_str!("../snippets/canvas_chart.rs"
 pub(crate) const IMAGE_GALLERY: &str = include_str!("../snippets/image_gallery.rs");
 /// Theme customization through the builder.
 pub(crate) const THEME_CUSTOMIZE: &str = include_str!("../snippets/theme_customize.rs");
+/// Transparent surfaces and background blending.
+pub(crate) const TRANSPARENT_SURFACE: &str = include_str!("../snippets/transparent_surface.rs");
 /// Lifecycle hooks in every phase.
 pub(crate) const LIFECYCLE_TIMELINE: &str = include_str!("../snippets/lifecycle_timeline.rs");
 /// Fixed-viewport commit test.
@@ -74,6 +76,7 @@ pub(crate) const ALL: &[(&str, &str)] = &[
     ("canvas_chart", CANVAS_CHART),
     ("image_gallery", IMAGE_GALLERY),
     ("theme_customize", THEME_CUSTOMIZE),
+    ("transparent_surface", TRANSPARENT_SURFACE),
     ("lifecycle_timeline", LIFECYCLE_TIMELINE),
     ("test_commit", TEST_COMMIT),
 ];

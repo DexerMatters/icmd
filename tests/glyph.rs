@@ -1,7 +1,7 @@
 // Glyph policy and cross-type characterization. The canonical validator lives
 // behind the hidden module; every public domain wrapper is exercised beside it.
 use icmd::__private::{AllowedGlyphWidth, GlyphError, validate_terminal_glyph};
-use icmd::{Cell, CellError, Fill, FillError, MAX_GLYPH_BYTES, ScrollbarGlyph};
+use icmd::{Cell, CellError, Fill, FillError, Glyph, GlyphRamp, MAX_GLYPH_BYTES, ScrollbarGlyph};
 
 mod tests {
     use super::*;
@@ -55,7 +55,7 @@ mod tests {
 
 mod characterization {
     use super::*;
-    use crate::{Cell, CellError, Fill, FillError, ScrollbarGlyph};
+    use crate::{Cell, CellError, Fill, FillError, Glyph, GlyphRamp, ScrollbarGlyph};
 
     // The plan's cross-type policy table: one input table drives the canonical
     // validator and every public domain wrapper, proving they agree on the
@@ -115,6 +115,7 @@ mod characterization {
             let cell = Cell::plain(case.input).err();
             let fill = Fill::new(case.input).err();
             let scrollbar = ScrollbarGlyph::new(case.input).err();
+            let glyph = Glyph::new(case.input).err();
 
             match case.shared {
                 None => {
@@ -160,7 +161,46 @@ mod characterization {
                 "scrollbar verdict for {:?}",
                 case.input
             );
+            assert_eq!(
+                glyph.is_none(),
+                case.scrollbar_accepts,
+                "glyph verdict for {:?}",
+                case.input
+            );
         }
+    }
+
+    #[test]
+    fn a_glyph_is_exactly_one_column() {
+        assert_eq!(Glyph::new("x").unwrap().symbol(), "x");
+        assert_eq!(Glyph::new("").err(), Some(FillError::Empty));
+        assert!(Glyph::new("ab").is_err());
+        assert_eq!(Glyph::new("界").err(), Some(FillError::UnsupportedWidth(2)));
+    }
+
+    #[test]
+    fn a_glyph_ramp_validates_every_grapheme_and_accepts_an_empty_sequence() {
+        let ramp = GlyphRamp::new("▏▎▍▌").unwrap();
+        assert_eq!(ramp.len(), 4);
+        assert_eq!(ramp.symbol(0), Some("▏"));
+        assert_eq!(ramp.symbol(3), Some("▌"));
+        assert_eq!(ramp.symbol(4), None);
+        assert_eq!(ramp.symbols().collect::<Vec<_>>(), vec!["▏", "▎", "▍", "▌"]);
+
+        // An empty sequence is meaningful: it disables the fractional cell.
+        let empty = GlyphRamp::new("").unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty, GlyphRamp::default());
+
+        // One bad grapheme rejects the whole sequence with the one-column policy.
+        assert_eq!(
+            GlyphRamp::new("a界").err(),
+            Some(FillError::UnsupportedWidth(2))
+        );
+        assert_eq!(
+            GlyphRamp::new("a\u{7}").err(),
+            Some(FillError::ControlCharacter)
+        );
     }
 
     #[test]

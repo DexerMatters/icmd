@@ -43,6 +43,20 @@ fn macro_assigns_props_style_and_evaluates_values_once() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let _ = node;
     let _checkbox = ui! { <checkbox checked disabled label="Accept" /> };
+
+    // The style parameters and the drag listeners are ordinary props, so the
+    // macro's generic attribute path reaches them with no special case.
+    let _styled = ui! {
+        <progress_bar
+            value={2_u64}
+            max={4_u64}
+            filled="="
+            empty='.'
+            partial="mno"
+            draggable
+            on_drag={move |_event: icmd::ProgressBarDragEvent| {}}
+        />
+    };
 }
 
 fn next_value(calls: &AtomicUsize) -> u64 {

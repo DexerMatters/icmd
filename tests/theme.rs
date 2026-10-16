@@ -101,7 +101,7 @@ fn text_level_style_paints_like_a_span_style() {
 }
 
 /// The bug this guards: with `Text`'s style dropped, every badge rendered with
-/// the inherited colour and all eight presets produced identical frames.
+/// the inherited colour and all nine presets produced identical frames.
 #[test]
 fn badges_differ_between_themes() {
     force_color();
@@ -534,6 +534,7 @@ fn themed_leaves_share_one_theme_instance() {
 #[test]
 fn theme_builder_precedence_is_deterministic() {
     use icmd::theme::{ThemeBuilder, ThemeColors, ThemeMode, ThemeTypography};
+    use icmd::{Glyph, GlyphRamp, ProgressBarStyle};
 
     let colors = ThemeColors::dark();
 
@@ -557,8 +558,67 @@ fn theme_builder_precedence_is_deterministic() {
     );
     assert_eq!(overridden.borders, derived.borders);
     assert_eq!(overridden.scrollbar, derived.scrollbar);
+    assert_eq!(overridden.progress, derived.progress);
+
+    // The palette-derived progress token carries the role colors.
+    assert_eq!(derived.progress.filled.symbol(), "█");
+    assert_eq!(
+        derived.progress.filled_style.foreground,
+        Attr::Set(colors.primary)
+    );
+    assert_eq!(
+        derived.progress.empty_style.foreground,
+        Attr::Set(colors.muted_foreground)
+    );
+
+    // A progress override replaces exactly that token too.
+    let custom_progress = ProgressBarStyle {
+        filled: Glyph::new("=").unwrap(),
+        empty: Glyph::new(".").unwrap(),
+        partial: GlyphRamp::new("ab").unwrap(),
+        ..derived.progress.clone()
+    };
+    let overridden = ThemeBuilder::from_palette(ThemeMode::Dark, colors.clone())
+        .progress(custom_progress.clone())
+        .build();
+    assert_eq!(overridden.progress, custom_progress);
+    assert_eq!(overridden.scrollbar, derived.scrollbar);
+    assert_eq!(overridden.colors, derived.colors);
 
     // Building twice from the same inputs is identical.
     let again = ThemeBuilder::from_palette(ThemeMode::Dark, colors).build();
     assert_eq!(again, derived);
+}
+
+/// Glass is the one preset whose page and overlays are transparent, so the
+/// terminal's own background shows through them. `contrast_ratio` reports
+/// infinity for `Color::Reset`, which means the readability gates cannot measure
+/// those surfaces: this test pins the transparency so the preset cannot drift
+/// opaque unnoticed, and pins the frosted panes that keep text measurable.
+#[test]
+fn glass_keeps_its_page_transparent_and_its_panes_opaque() {
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        let colors = ThemePreset::Glass.theme(mode).colors;
+        assert_eq!(
+            colors.background,
+            Color::Reset,
+            "the page must be transparent in {mode:?}"
+        );
+        assert_eq!(
+            colors.popover,
+            Color::Reset,
+            "overlays must be transparent in {mode:?}"
+        );
+        for (name, color) in [
+            ("card", colors.card),
+            ("muted", colors.muted),
+            ("input", colors.input),
+        ] {
+            assert_ne!(
+                color,
+                Color::Reset,
+                "the {name} pane must stay opaque in {mode:?}"
+            );
+        }
+    }
 }

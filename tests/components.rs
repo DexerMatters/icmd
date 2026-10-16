@@ -192,9 +192,10 @@ fn theme_starts_with_ansi_defaults_and_accepts_mutable_customization() {
 
 #[test]
 fn built_in_theme_presets_are_named_and_geek_is_matrix_green() {
-    assert_eq!(ThemePreset::ALL.len(), 8);
+    assert_eq!(ThemePreset::ALL.len(), 9);
     assert_eq!(ThemePreset::Geek.name(), "Geek");
     assert_eq!(ThemePreset::Nord.name(), "Nord");
+    assert_eq!(ThemePreset::Glass.name(), "Glass");
 
     let geek = ThemePreset::Geek.theme(ThemeMode::Dark);
     assert_eq!(
@@ -269,6 +270,13 @@ fn widget_props_are_unset_until_extra_modifies_them() {
     assert!(!progress.width.is_set());
     assert!(!progress.show_percentage.is_set());
     assert!(!progress.label.is_set());
+    assert!(!progress.filled.is_set());
+    assert!(!progress.empty.is_set());
+    assert!(!progress.partial.is_set());
+    assert!(!progress.draggable.is_set());
+    assert!(!progress.on_drag_start.is_set());
+    assert!(!progress.on_drag.is_set());
+    assert!(!progress.on_drag_end.is_set());
 
     let scroll: ScrollAreaProps = Default::default();
     assert!(!scroll.axes.is_set());

@@ -1,7 +1,8 @@
 //! Status feedback: progress bars, spinners, badges, alerts, and skeletons.
 
 use crate::{
-    Attr, DomProps, Edges, Layout, Node, Props, Span, Text,
+    Attr, Dimension, DomProps, Edges, EventListener, Glyph, GlyphRamp, Layout, Node, PointerEvent,
+    Props, Span, Text,
     basic::{ComponentContext, view},
     ui,
 };
@@ -18,34 +19,289 @@ pub struct ProgressBarProps {
     pub show_percentage: Attr<bool>,
     /// Optional text drawn before the bar; defaults to empty.
     pub label: Attr<String>,
+    /// Glyph for a fully filled cell; defaults to the theme's progress style.
+    pub filled: Attr<Glyph>,
+    /// Glyph for an empty cell; defaults to the theme's progress style.
+    pub empty: Attr<Glyph>,
+    /// Ordered glyphs for the fractional cell, from the least to the most
+    /// filled; defaults to the theme's progress style. An empty sequence
+    /// disables the fractional cell and rounds the filled count instead.
+    pub partial: Attr<GlyphRamp>,
+    /// Whether the bar answers pointer drags; defaults to `false`.
+    ///
+    /// A draggable bar stays caller-owned: it reports a proposed value through
+    /// [`ProgressBarProps::on_drag_start`], [`ProgressBarProps::on_drag`], and
+    /// [`ProgressBarProps::on_drag_end`] and never changes the value it renders.
+    pub draggable: Attr<bool>,
+    /// Listener for the value under the press that starts a drag.
+    pub on_drag_start: Attr<EventListener<ProgressBarDragEvent>>,
+    /// Listener for each distinct value while a drag is in progress.
+    pub on_drag: Attr<EventListener<ProgressBarDragEvent>>,
+    /// Listener for the final value when a drag ends.
+    pub on_drag_end: Attr<EventListener<ProgressBarDragEvent>>,
+}
+
+/// A value proposed by dragging a draggable [`progress_bar`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProgressBarDragEvent {
+    /// Value under the pointer, clamped to `0..=max`.
+    pub value: u64,
+    /// Maximum the bar was rendered with.
+    pub max: u64,
+}
+
+/// Interaction state a draggable bar keeps across frames: whether a drag is in
+/// progress and the value last reported, so an unchanged value is reported
+/// once. The rendered value stays the caller's.
+#[derive(Default)]
+struct ProgressDragState {
+    /// Whether a pointer drag is in progress.
+    dragging: bool,
+    /// The value most recently reported to the caller.
+    value: u64,
 }
 
 /// Horizontal progress bar filled in proportion to `value / max`; see
 /// [`ProgressBarProps`] for its configuration.
+///
+/// The bar is one horizontal row: an optional label, the bar itself, and an
+/// optional percentage. Only the bar is a drag target, so pressing the label or
+/// the percentage never starts a drag. The bar's cells are split into full
+/// cells, at most one fractional cell chosen from the partial sequence, and
+/// empty cells, so the painted width is always exactly `width`.
 pub fn progress_bar(cx: &mut ComponentContext, props: &Props<ProgressBarProps>) -> Node {
     let theme = cx.use_theme();
+    let drag_state = cx.use_ref(ProgressDragState::default);
     let max = (props.max | 100).max(1);
     let value = (props.value | 0).min(max);
     let width = usize::from(props.width | 20);
-    let filled =
-        ((u128::from(value) * width as u128 + u128::from(max) / 2) / u128::from(max)) as usize;
+    let filled_glyph = props.filled.clone() | theme.progress.filled.clone();
+    let empty_glyph = props.empty.clone() | theme.progress.empty.clone();
+    let partial = props.partial.clone() | theme.progress.partial.clone();
     let percentage = (u128::from(value) * 100 / u128::from(max)) as u64;
 
+    let (full, partial_index, empty) = split_cells(value, max, width, &partial);
+    let mut bar_spans = Vec::new();
+    if full > 0 {
+        bar_spans.push(
+            Span::new(filled_glyph.symbol().repeat(full))
+                .style(theme.progress.filled_style.clone()),
+        );
+    }
+    if let Some(index) = partial_index
+        && let Some(glyph) = partial.symbol(index)
+    {
+        bar_spans.push(Span::new(glyph.to_string()).style(theme.progress.filled_style.clone()));
+    }
+    if empty > 0 {
+        bar_spans.push(
+            Span::new(empty_glyph.symbol().repeat(empty)).style(theme.progress.empty_style.clone()),
+        );
+    }
+
+    let mut host = props.host_props(DomProps::default());
+    host.style.layout /= Layout::Horizontal;
+
     let label = props.label.clone() | String::new();
-    let mut spans = Vec::new();
+    let mut children = Vec::new();
     if !label.is_empty() {
-        spans.push(Span::new(format!("{label} ")).style(theme.typography.label.clone()));
+        children.push(
+            Text::new(format!("{label} "))
+                .text_style(theme.typography.label.clone())
+                .into(),
+        );
     }
-    if filled > 0 {
-        spans.push(Span::new("█".repeat(filled)).foreground(theme.colors.primary));
-    }
-    if filled < width {
-        spans.push(Span::new("░".repeat(width - filled)).foreground(theme.colors.muted));
+    if width > 0 {
+        let mut bar_dom = DomProps::default();
+        bar_dom.style.width /= Dimension::Cells(width as u16);
+        if props.draggable | false {
+            bar_dom.events.pointer_down = Attr::Set(drag_listener(
+                drag_state.clone(),
+                props.on_drag_start.as_ref().cloned(),
+                width,
+                max,
+                DragEdge::Start,
+            ));
+            bar_dom.events.pointer_move = Attr::Set(drag_listener(
+                drag_state.clone(),
+                props.on_drag.as_ref().cloned(),
+                width,
+                max,
+                DragEdge::Move,
+            ));
+            bar_dom.events.pointer_up = Attr::Set(end_listener(
+                drag_state.clone(),
+                props.on_drag.as_ref().cloned(),
+                props.on_drag_end.as_ref().cloned(),
+                width,
+                max,
+            ));
+            bar_dom.events.pointer_cancel = Attr::Set(cancel_listener(
+                drag_state.clone(),
+                props.on_drag_end.as_ref().cloned(),
+                max,
+            ));
+        }
+        children.push(ui! { <view dom={bar_dom}>{Text::from_spans(bar_spans)}</view> });
     }
     if props.show_percentage | true {
-        spans.push(Span::new(format!(" {percentage:>3}%")).style(theme.typography.muted.clone()));
+        children.push(
+            Text::new(format!(" {percentage:>3}%"))
+                .text_style(theme.typography.muted.clone())
+                .into(),
+        );
     }
-    ui! { <view dom={props.dom.clone()}>{Text::from_spans(spans)}</view> }
+    let children: Node = children.into_iter().collect();
+
+    ui! { <view dom={host}>{children}</view> }
+}
+
+/// Which edge of a drag a listener answers.
+#[derive(Clone, Copy)]
+enum DragEdge {
+    /// The press that begins a drag.
+    Start,
+    /// Pointer motion while a drag is in progress.
+    Move,
+}
+
+/// Builds the pointer listener for the press or the motion of a drag.
+///
+/// The listener is caller-owned: it reports the value under the pointer and
+/// leaves the rendered value untouched. A press consumes the event so an
+/// ancestor selection or scroll region does not also react, and motion reports
+/// only a value that actually changed.
+fn drag_listener(
+    drag_state: crate::Ref<ProgressDragState>,
+    listener: Option<EventListener<ProgressBarDragEvent>>,
+    width: usize,
+    max: u64,
+    edge: DragEdge,
+) -> EventListener<PointerEvent> {
+    EventListener::new(move |event: PointerEvent| {
+        if matches!(edge, DragEdge::Start) && !event.is_primary_button() {
+            return;
+        }
+        let mut state = drag_state.lock().expect("progress drag state poisoned");
+        match edge {
+            DragEdge::Start => {
+                event.stop_propagation();
+                let value = drag_value(event.local_position.column, width, max);
+                state.dragging = true;
+                state.value = value;
+                drop(state);
+                if let Some(listener) = &listener {
+                    listener.call(ProgressBarDragEvent { value, max });
+                }
+            }
+            DragEdge::Move => {
+                if !state.dragging {
+                    return;
+                }
+                event.stop_propagation();
+                let value = drag_value(event.local_position.column, width, max);
+                if value == state.value {
+                    return;
+                }
+                state.value = value;
+                drop(state);
+                if let Some(listener) = &listener {
+                    listener.call(ProgressBarDragEvent { value, max });
+                }
+            }
+        }
+    })
+}
+
+/// Builds the release listener: it reports a value that changed on the way up
+/// through `on_drag` and always reports the final value through `on_drag_end`.
+fn end_listener(
+    drag_state: crate::Ref<ProgressDragState>,
+    changed: Option<EventListener<ProgressBarDragEvent>>,
+    listener: Option<EventListener<ProgressBarDragEvent>>,
+    width: usize,
+    max: u64,
+) -> EventListener<PointerEvent> {
+    EventListener::new(move |event: PointerEvent| {
+        let mut state = drag_state.lock().expect("progress drag state poisoned");
+        if !state.dragging {
+            return;
+        }
+        state.dragging = false;
+        event.stop_propagation();
+        let value = drag_value(event.local_position.column, width, max);
+        let moved = value != state.value;
+        state.value = value;
+        drop(state);
+        if moved && let Some(changed) = &changed {
+            changed.call(ProgressBarDragEvent { value, max });
+        }
+        if let Some(listener) = &listener {
+            listener.call(ProgressBarDragEvent { value, max });
+        }
+    })
+}
+
+/// Builds the cancellation listener: a cancelled drag still ends, so the
+/// caller's own drag state cannot leak.
+fn cancel_listener(
+    drag_state: crate::Ref<ProgressDragState>,
+    listener: Option<EventListener<ProgressBarDragEvent>>,
+    max: u64,
+) -> EventListener<PointerEvent> {
+    EventListener::new(move |_event: PointerEvent| {
+        let value = {
+            let mut state = drag_state.lock().expect("progress drag state poisoned");
+            if !state.dragging {
+                return;
+            }
+            state.dragging = false;
+            state.value
+        };
+        if let Some(listener) = &listener {
+            listener.call(ProgressBarDragEvent { value, max });
+        }
+    })
+}
+
+/// Splits `width` cells into full cells, an optional fractional cell index, and
+/// empty cells for `value / max`.
+///
+/// With a non-empty ramp, the fractional index is `ceil(remainder * len / max) - 1`,
+/// so element `i` covers the fill band `(i / len, (i + 1) / len]` of the cell.
+/// With an empty ramp, the filled count is rounded to the nearest cell, the
+/// legacy behavior.
+fn split_cells(
+    value: u64,
+    max: u64,
+    width: usize,
+    partial: &GlyphRamp,
+) -> (usize, Option<usize>, usize) {
+    let numerator = u128::from(value) * width as u128;
+    let denominator = u128::from(max);
+    let whole = (numerator / denominator) as usize;
+    let remainder = numerator % denominator;
+    if !partial.is_empty() && remainder > 0 {
+        let len = partial.len() as u128;
+        let index = ((remainder * len).div_ceil(denominator) - 1) as usize;
+        let index = index.min(partial.len() - 1);
+        let full = whole.min(width);
+        (full, Some(index), width.saturating_sub(full + 1))
+    } else {
+        let filled = ((numerator + denominator / 2) / denominator) as usize;
+        let filled = filled.min(width);
+        (filled, None, width - filled)
+    }
+}
+
+/// Maps a bar-relative pointer column to the value at that cell's left edge.
+fn drag_value(column: i32, width: usize, max: u64) -> u64 {
+    if width == 0 {
+        return 0;
+    }
+    let column = column.clamp(0, width as i32) as u128;
+    let value = (column * u128::from(max) + width as u128 / 2) / width as u128;
+    value.min(u128::from(max)) as u64
 }
 
 /// Configuration for [`spinner`].

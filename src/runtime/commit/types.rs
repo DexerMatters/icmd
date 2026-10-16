@@ -6,8 +6,9 @@ use std::collections::HashMap;
 use crossterm::style::{Attributes, Color};
 
 use crate::{
-    Align, AxisPosition, BorderKind, Dimension, DomId, Edges, Fill, Image, Justify, Layout,
-    Overflow, RasterPlacement, ScreenPosition, ScrollOffset, ScrollbarStyle, Visibility,
+    Align, AxisPosition, BackgroundBlend, BorderKind, Dimension, DomId, Edges, Fill, Image,
+    Justify, Layout, Overflow, RasterPlacement, ScreenPosition, ScrollOffset, ScrollbarStyle,
+    Visibility,
 };
 
 use super::geometry::RectI;
@@ -62,9 +63,22 @@ pub(super) struct ComputedStyle {
     pub(super) visibility: Visibility,
     pub(super) z_index: i32,
     pub(super) background: Option<Color>,
+    pub(super) background_blend: BackgroundBlend,
     pub(super) fill: Option<Fill>,
     pub(super) border: ComputedBorder,
     pub(super) text: ComputedText,
+}
+
+impl ComputedStyle {
+    /// The background the painter actually draws. A transparent background
+    /// composited into the lower layer contributes nothing, so the layers below
+    /// keep their own style.
+    pub(super) fn painted_background(&self) -> Option<Color> {
+        match (self.background, self.background_blend) {
+            (Some(Color::Reset), BackgroundBlend::Blend) => None,
+            (color, _) => color,
+        }
+    }
 }
 
 pub(super) struct ScrollSpec<'a> {

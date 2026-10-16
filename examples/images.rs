@@ -2,15 +2,19 @@
 
 //! A small, scrollable masonry gallery for exercising the `<image>` component.
 //!
-//! Run with `cargo run --example images`. Native image-capable terminals use the
-//! best protocol Chafa detects; every other terminal gets its symbol fallback.
+//! Run with `cargo run --example images`. The default build renders symbol art on
+//! every terminal; add `--features native-raster` to let an image-capable
+//! terminal use the best protocol Chafa detects, and keep the symbol fallback
+//! everywhere else.
 
 use std::{error::Error, path::PathBuf, sync::OnceLock};
 
+use icmd::theme::{ThemeMode, ThemePreset};
 use icmd::widgets::raster_image;
 use icmd::{
     Align, Component, ComponentContext, Dimension, Edges, ImageFit, ImageSource, Layout, Node,
-    Percent, Props, RuntimeConfig, ScrollAxes, ScrollbarVisibility, Text, render, ui,
+    Percent, Props, RuntimeConfig, ScrollAxes, ScrollbarVisibility, Text, render, theme_provider,
+    ui,
 };
 use icmd::{badge, card, column, container, heading, label, muted, row, scroll_area, view};
 
@@ -103,24 +107,26 @@ fn app(_cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     };
 
     ui! {
-        <container style={|s| {
-            s.padding /= Edges::all(1);
-            s.gap /= 1;
-        }}>
-            <view style={|s| {
-                s.layout /= Layout::Horizontal;
-                s.width /= Dimension::Max;
-                s.align /= Align::Center;
+        <theme_provider value={ThemePreset::Dracula.theme(ThemeMode::Dark)}>
+            <container style={|s| {
+                s.padding /= Edges::all(1);
                 s.gap /= 1;
             }}>
-                <heading>{Text::new("Pinboard").bold()}</heading>
-                <badge text="FOR YOU" />
-                <muted>"A masonry image gallery"</muted>
-            </view>
-            <row><label>"Home"</label><muted>"Nature"</muted><muted>"Interiors"</muted><muted>"Weekend"</muted></row>
-            {gallery}
-            <muted>"Scroll with the wheel, arrows, PgUp/PgDn, or the scrollbar  ·  Ctrl+C quits"</muted>
-        </container>
+                <view style={|s| {
+                    s.layout /= Layout::Horizontal;
+                    s.width /= Dimension::Max;
+                    s.align /= Align::Center;
+                    s.gap /= 1;
+                }}>
+                    <heading>{Text::new("Pinboard").bold()}</heading>
+                    <badge text="FOR YOU" />
+                    <muted>"A masonry image gallery"</muted>
+                </view>
+                <row><label>"Home"</label><muted>"Nature"</muted><muted>"Interiors"</muted><muted>"Weekend"</muted></row>
+                {gallery}
+                <muted>"Scroll with the wheel, arrows, PgUp/PgDn, or the scrollbar  ·  Ctrl+C quits"</muted>
+            </container>
+        </theme_provider>
     }
 }
 

@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 use crossterm::style::Color;
 
 use crate::{
-    Attr, BorderKind, ComponentContext, ContextKey, Edges, Node, Props, ScrollbarStyle, Style,
-    TextStyle, create_context, style,
+    Attr, BorderKind, ComponentContext, ContextKey, Edges, Node, ProgressBarStyle, Props,
+    ScrollbarStyle, Style, TextStyle, create_context, style,
 };
 
 /// Light or dark palette selection.
@@ -41,11 +41,19 @@ pub enum ThemePreset {
     Solarized,
     /// Blue ocean palette.
     Ocean,
+    /// Aurora-ice glass: a transparent page and overlays over frosted panes.
+    ///
+    /// `background` and `popover` are the terminal's own default, so the page
+    /// shows whatever the terminal already has behind it. That makes the mode
+    /// matter twice: Glass light assumes a light terminal and Glass dark a dark
+    /// one. The card, muted, and input surfaces stay opaque so text keeps a
+    /// measurable surface to sit on.
+    Glass,
 }
 
 impl ThemePreset {
     /// Every preset in display order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Ansi,
         Self::Geek,
         Self::Mono,
@@ -54,6 +62,7 @@ impl ThemePreset {
         Self::Dracula,
         Self::Solarized,
         Self::Ocean,
+        Self::Glass,
     ];
 
     /// Human-readable preset name.
@@ -67,6 +76,7 @@ impl ThemePreset {
             Self::Dracula => "Dracula",
             Self::Solarized => "Solarized",
             Self::Ocean => "Ocean",
+            Self::Glass => "Glass",
         }
     }
 
@@ -374,6 +384,48 @@ impl ThemePreset {
                 input: rgb(0x0a2237),
                 ring: rgb(0x4db8ff),
             },
+            (Self::Glass, ThemeMode::Light) => ThemeColors {
+                background: Color::Reset,
+                foreground: rgb(0x1c3348),
+                card: rgb(0xe9f1f8),
+                card_foreground: rgb(0x14293c),
+                popover: Color::Reset,
+                popover_foreground: rgb(0x14293c),
+                primary: rgb(0x0b6cae),
+                primary_foreground: rgb(0xf2faff),
+                secondary: rgb(0x0d7d72),
+                secondary_foreground: rgb(0xf1fffd),
+                muted: rgb(0xdfeaf3),
+                muted_foreground: rgb(0x3f5c73),
+                accent: rgb(0x6a3fc0),
+                accent_foreground: rgb(0xfaf6ff),
+                destructive: rgb(0xc22b3d),
+                destructive_foreground: rgb(0xfff5f6),
+                border: rgb(0x7fa2bd),
+                input: rgb(0xf4f9fd),
+                ring: rgb(0x0b6cae),
+            },
+            (Self::Glass, ThemeMode::Dark) => ThemeColors {
+                background: Color::Reset,
+                foreground: rgb(0xcfe0ef),
+                card: rgb(0x101c29),
+                card_foreground: rgb(0xdcebf8),
+                popover: Color::Reset,
+                popover_foreground: rgb(0xdcebf8),
+                primary: rgb(0x6cc6ff),
+                primary_foreground: rgb(0x04121e),
+                secondary: rgb(0x79e0c6),
+                secondary_foreground: rgb(0x03201a),
+                muted: rgb(0x17263a),
+                muted_foreground: rgb(0x9fb6ca),
+                accent: rgb(0xb79cff),
+                accent_foreground: rgb(0x130a26),
+                destructive: rgb(0xff8fa3),
+                destructive_foreground: rgb(0x26060d),
+                border: rgb(0x415d76),
+                input: rgb(0x0c1724),
+                ring: rgb(0x6cc6ff),
+            },
             (Self::Ansi, _) => unreachable!(),
         };
 
@@ -385,7 +437,8 @@ impl ThemePreset {
             }
             Self::Mono => theme.typography.heading.attr.underlined /= true,
             Self::Dracula => theme.borders.kind = BorderKind::Rounded,
-            Self::Nord | Self::Latte | Self::Solarized | Self::Ocean | Self::Ansi => {}
+            Self::Nord | Self::Latte | Self::Solarized | Self::Ocean | Self::Glass | Self::Ansi => {
+            }
         })
     }
 }
@@ -616,6 +669,8 @@ pub struct Theme {
     pub borders: ThemeBorders,
     /// Scrollbar colors derived from `colors`.
     pub scrollbar: ScrollbarStyle,
+    /// Progress-bar glyphs and colors derived from `colors`.
+    pub progress: ProgressBarStyle,
 }
 
 /// Derives every token from a palette exactly once. After `from_palette` each
@@ -630,17 +685,19 @@ pub struct ThemeBuilder {
     spacing: ThemeSpacing,
     borders: ThemeBorders,
     scrollbar: ScrollbarStyle,
+    progress: ProgressBarStyle,
 }
 
 impl ThemeBuilder {
-    /// Starts from `colors` and derives typography, borders and scrollbar from
-    /// it; spacing starts at its default.
+    /// Starts from `colors` and derives typography, borders, scrollbar, and
+    /// progress from it; spacing starts at its default.
     pub fn from_palette(mode: ThemeMode, colors: ThemeColors) -> Self {
         Self {
             mode,
             typography: ThemeTypography::from_colors(&colors),
             borders: ThemeBorders::from_colors(&colors),
             scrollbar: scrollbar_style(&colors),
+            progress: progress_style(&colors),
             spacing: ThemeSpacing::default(),
             colors,
         }
@@ -665,6 +722,12 @@ impl ThemeBuilder {
         self
     }
 
+    /// Replaces the resolved progress-bar token with a deliberate override.
+    pub fn progress(mut self, progress: ProgressBarStyle) -> Self {
+        self.progress = progress;
+        self
+    }
+
     /// Replaces the resolved spacing token with a deliberate override.
     pub fn spacing(mut self, spacing: ThemeSpacing) -> Self {
         self.spacing = spacing;
@@ -680,6 +743,7 @@ impl ThemeBuilder {
             self.spacing,
             self.borders,
             self.scrollbar,
+            self.progress,
         )
     }
 }
@@ -742,6 +806,7 @@ impl Theme {
         spacing: ThemeSpacing,
         borders: ThemeBorders,
         scrollbar: ScrollbarStyle,
+        progress: ProgressBarStyle,
     ) -> Self {
         Self {
             mode,
@@ -750,6 +815,7 @@ impl Theme {
             spacing,
             borders,
             scrollbar,
+            progress,
         }
     }
 
@@ -869,6 +935,13 @@ fn scrollbar_style(colors: &ThemeColors) -> ScrollbarStyle {
     scrollbar.track.foreground /= colors.muted_foreground;
     scrollbar.thumb.foreground /= colors.primary;
     scrollbar
+}
+
+fn progress_style(colors: &ThemeColors) -> ProgressBarStyle {
+    let mut progress = ProgressBarStyle::default();
+    progress.filled_style.foreground /= colors.primary;
+    progress.empty_style.foreground /= colors.muted_foreground;
+    progress
 }
 
 static THEME_CONTEXT: OnceLock<ContextKey<Theme>> = OnceLock::new();

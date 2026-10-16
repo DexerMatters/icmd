@@ -37,10 +37,11 @@ pub use events::{
 };
 pub use lifetime::AppHandle;
 pub use props::{
-    Align, Attributes, AxisPosition, BorderKind, BorderStyle, Dimension, DomProps, Edges, Fill,
-    FillError, Justify, Layout, Overflow, Percent, PercentBasis, Point, Props, ScrollAxes,
-    ScrollDelta, ScrollOffset, ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Style,
-    StylePatch, TextStyle, Visibility, style, style_patch,
+    Align, Attributes, AxisPosition, BackgroundBlend, BorderKind, BorderStyle, Dimension, DomProps,
+    Edges, Fill, FillError, Glyph, GlyphRamp, Justify, Layout, Overflow, Percent, PercentBasis,
+    Point, ProgressBarStyle, Props, ScrollAxes, ScrollDelta, ScrollOffset, ScrollbarGlyph,
+    ScrollbarStyle, ScrollbarVisibility, Style, StylePatch, TextStyle, Visibility, style,
+    style_patch, transparent,
 };
 pub use text::{Span, Text, TextAlign, TextOverflow, TextWrap};
 #[doc(hidden)]

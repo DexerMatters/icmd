@@ -872,8 +872,8 @@ pub(super) fn layout_and_styling(cx: &mut ComponentContext, props: &Props<Chapte
                 ui! { {docs::specimen(&theme, "the four border kinds", border_gallery(&theme))} },
                 ui! { {docs::specimen(&theme, "padding, fill, inherited text", surface_specimen(&theme))} },
             )}
-            {docs::notice(&theme, "Border edges are per side, so a divider is just a box with one edge drawn. Text styling is inherited: setting `style.text.foreground` on a surface colors every descendant that does not override it, which keeps a card readable without repeating colors.")}
-            {docs::callout(&theme, CalloutKind::Production, "Style chrome from theme tokens — `theme.borders.kind`, `theme.borders.foreground`, and `theme.spacing` — rather than literal glyphs and colors. A theme swap then restyles the whole application, and the eight presets keep working.")}
+            {docs::notice(&theme, "Border edges are per side, so a divider is just a box with one edge drawn. Text styling is inherited: setting `style.text.foreground` on a surface colors every descendant that does not override it, which keeps a card readable without repeating colors. A surface can also opt out of the palette with `transparent()` and `Style::background_blend`; section 8.7 covers the two composites.")}
+            {docs::callout(&theme, CalloutKind::Production, "Style chrome from theme tokens — `theme.borders.kind`, `theme.borders.foreground`, and `theme.spacing` — rather than literal glyphs and colors. A theme swap then restyles the whole application, and the nine presets keep working.")}
             {docs::api_strip(&theme, &[
                 ApiRow { name: "Edges", purpose: "four per-side values, top right bottom left", defaults: "all zero", events: "none" },
                 ApiRow { name: "BorderKind", purpose: "line character set", defaults: "BorderKind::Single", events: "none" },

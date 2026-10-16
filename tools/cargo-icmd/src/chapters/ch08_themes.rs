@@ -10,8 +10,9 @@ use icmd::theme::{
     contrast_ratio,
 };
 use icmd::{
-    Align, BorderKind, Component, ComponentContext, Dimension, Edges, Layout, Node, Props, Span,
-    Text, TextWrap, card, muted, row, theme_provider, ui, view,
+    Align, BackgroundBlend, BorderKind, ButtonVariant, Component, ComponentContext, Dimension,
+    Edges, Layout, Node, Props, Span, Text, TextWrap, button, card, muted, row, theme_provider,
+    transparent, ui, view,
 };
 
 use super::{ChapterProps, document, masthead, section};
@@ -528,6 +529,73 @@ fn customized_demo(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     }
 }
 
+/// A transparent panel over a painted surface, toggling the blend mode.
+fn blend_demo(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
+    let theme = cx.use_theme();
+    let (blend, set_blend) = cx.use_state(|| BackgroundBlend::Cover);
+    let surface = theme.colors.primary;
+    let surface_foreground = theme.colors.primary_foreground;
+    let panel_foreground = match blend {
+        BackgroundBlend::Cover => theme.colors.foreground,
+        BackgroundBlend::Blend => surface_foreground,
+    };
+    let caption = match blend {
+        BackgroundBlend::Cover => "Cover paints the terminal default over the layer below",
+        BackgroundBlend::Blend => "Blend adds nothing, so the painted layer below shows through",
+    };
+    let choose_cover = set_blend.clone();
+    let choose_blend = set_blend.clone();
+    let variant = move |mode: BackgroundBlend| {
+        if blend == mode {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Secondary
+        }
+    };
+    ui! {
+        <view style={|style| {
+            style.layout /= Layout::Vertical;
+            style.width /= Dimension::Max;
+            style.gap /= 1;
+        }}>
+            <row style={|style| { style.width /= Dimension::Max; style.gap /= 1; }}>
+                <button
+                    variant={variant(BackgroundBlend::Cover)}
+                    on_press={move |_| choose_cover.set(BackgroundBlend::Cover)}
+                >"Cover"</button>
+                <button
+                    variant={variant(BackgroundBlend::Blend)}
+                    on_press={move |_| choose_blend.set(BackgroundBlend::Blend)}
+                >"Blend"</button>
+            </row>
+            <view style={move |style| {
+                style.layout /= Layout::Vertical;
+                style.width /= Dimension::Max;
+                style.gap /= 1;
+                style.padding /= Edges::all(1);
+                style.background /= surface;
+                style.text.foreground /= surface_foreground;
+            }}>
+                {Text::new("a painted surface on the layer below").foreground(surface_foreground).bold()}
+                <view style={move |style| {
+                    style.layout /= Layout::Vertical;
+                    style.width /= Dimension::Max;
+                    style.gap /= 0;
+                    style.padding /= Edges::all(1);
+                    style.background /= transparent();
+                    style.background_blend /= blend;
+                    style.text.foreground /= panel_foreground;
+                    style.border.kind /= BorderKind::Rounded;
+                    style.border.foreground /= surface_foreground;
+                }}>
+                    {Text::new("transparent panel").foreground(panel_foreground).bold()}
+                    {Text::new(caption).foreground(panel_foreground).wrap(TextWrap::Soft)}
+                </view>
+            </view>
+        </view>
+    }
+}
+
 /// Chapter 08.
 pub(super) fn themes(cx: &mut ComponentContext, props: &Props<ChapterProps>) -> Node {
     let theme = cx.use_theme();
@@ -562,14 +630,15 @@ pub(super) fn themes(cx: &mut ComponentContext, props: &Props<ChapterProps>) -> 
         1,
         &sections[1],
         ui! {
-            {docs::body("Eight presets, each a complete literal in both modes. Every chip below is painted with the palette it names, so switching the guide's own theme in the header is the same operation applied to the whole document.")}
-            {docs::specimen(&theme, "eight presets × light and dark", ui! {
+            {docs::body("Nine presets, each a complete literal in both modes. Every chip below is painted with the palette it names, so switching the guide's own theme in the header is the same operation applied to the whole document.")}
+            {docs::specimen(&theme, "nine presets × light and dark", ui! {
                 {preset_grid(if data.wide() { 4 } else { 2 }, if data.wide() { 22 } else { 24 })}
             })}
             {docs::body("Theme choice lives in the shell, so it survives chapter changes and never touches disk. Use the ` preset` and mode buttons in the header: they cycle every `ThemePreset::ALL` value and toggle `ThemeMode`, and the whole guide — chrome, code, and every demonstration — follows.")}
+            {docs::notice(&theme, "`Glass` is the transparent preset: its page and overlays paint the terminal's own default, so its chip shows whatever your terminal already has behind the guide. It reads best when the terminal background matches the selected mode, which is what section 8.7 explains.")}
             {docs::notice(&theme, "Because a preset replaces all nineteen roles, adding a role to `ThemeColors` is a compile error in every preset rather than a silently missing color.")}
             {docs::api_strip(&theme, &[
-                ApiRow { name: "ThemePreset", purpose: "named palettes", defaults: "ThemePreset::ALL lists all eight", events: "none" },
+                ApiRow { name: "ThemePreset", purpose: "named palettes", defaults: "ThemePreset::ALL lists all nine", events: "none" },
                 ApiRow { name: "ThemePreset::theme", purpose: "build a preset for a mode", defaults: "requires an explicit ThemeMode", events: "none" },
                 ApiRow { name: "ThemeMode", purpose: "light or dark", defaults: "ThemeMode::Light", events: "none" },
             ])}
@@ -582,7 +651,7 @@ pub(super) fn themes(cx: &mut ComponentContext, props: &Props<ChapterProps>) -> 
         2,
         &sections[2],
         ui! {
-            {docs::body("Palette roles are only half a theme. Typography, spacing, borders, and scrollbars are derived from those roles once, at construction, and are then independent resolved values.")}
+            {docs::body("Palette roles are only half a theme. Typography, spacing, borders, scrollbars, and progress bars are derived from those roles once, at construction, and are then independent resolved values.")}
             {docs::two_column(
                 &theme,
                 data.wide(),
@@ -594,12 +663,13 @@ pub(super) fn themes(cx: &mut ComponentContext, props: &Props<ChapterProps>) -> 
                     {docs::specimen(&theme, "borders and scrollbars", ui! { {border_scrollbar_specimen(&theme)} })}
                 },
             )}
-            {docs::notice(&theme, "Widgets consume these tokens, which is why a card, an input, and an alert share one border treatment and one scrollbar treatment without any of them restating it.")}
+            {docs::notice(&theme, "Widgets consume these tokens, which is why a card, an input, an alert, and a progress bar share one border, one scrollbar, and one progress treatment without any of them restating it.")}
             {docs::api_strip(&theme, &[
                 ApiRow { name: "ThemeTypography", purpose: "body, heading, label, muted, code", defaults: "derived from the palette", events: "none" },
                 ApiRow { name: "ThemeSpacing", purpose: "xs through xl, in cells", defaults: "0, 1, 1, 2, 3", events: "none" },
                 ApiRow { name: "ThemeBorders", purpose: "kind, edges, foreground, background", defaults: "rounded, all edges", events: "none" },
                 ApiRow { name: "ScrollbarStyle", purpose: "track and thumb glyphs plus styles", defaults: "vertical and horizontal pairs", events: "none" },
+                ApiRow { name: "ProgressBarStyle", purpose: "filled, empty, and partial glyphs plus styles", defaults: "palette colors with an eighth-block ramp", events: "none" },
             ])}
         },
     );
@@ -678,6 +748,32 @@ pub(super) fn themes(cx: &mut ComponentContext, props: &Props<ChapterProps>) -> 
         },
     );
 
+    let transparency = section(
+        &theme,
+        data,
+        6,
+        &sections[6],
+        ui! {
+            {docs::body("A terminal cell always has a background; there is no alpha channel. `transparent()` is therefore not \"unpainted\": it is the terminal's own default color, SGR 39 for text and 49 for a background. Assign it to `style.background` or `style.text.foreground` to opt a surface out of the palette.")}
+            {docs::body("`Style::background_blend` decides what that default does to the layers beneath. `Cover`, the default, paints the terminal default over them, cutting a hole through whatever was there. `Blend` contributes nothing to the composite, so the surface below keeps its own style and the transparent box reads as part of it. An opaque background always covers, whichever mode is set. The shipped `Glass` preset is built this way: its page and overlays are transparent, while its cards keep an opaque frosted tint so text still has a surface to read on.")}
+            {docs::live_example(
+                &theme,
+                "one panel, two composites",
+                "Switch the blend mode and watch the panel's interior: Cover reveals the terminal default, Blend reveals the painted surface underneath.",
+                ui! { {blend_demo.apply(())} },
+                None,
+            )}
+            {docs::source_block(&theme, "transparent plus a blend mode", snippets::TRANSPARENT_SURFACE)}
+            {docs::notice(&theme, "Leaving `style.background` unset is not the same as making it transparent. Unset inherits the nearest ancestor's backdrop; `transparent()` is an explicit value that stops that inheritance, so it works inside a card that already paints a background.")}
+            {docs::watch_for(&theme, "A transparent foreground is the terminal's default text color, not an invisible glyph, and `Cover` reveals the terminal itself, which the theme cannot control. Pair either with a surface that keeps the text readable.")}
+            {docs::api_strip(&theme, &[
+                ApiRow { name: "transparent", purpose: "the terminal's default color for any color slot", defaults: "Color::Reset, encoded as SGR 39/49", events: "none" },
+                ApiRow { name: "Style::background_blend", purpose: "how a background composites with the layers below", defaults: "BackgroundBlend::Cover", events: "none" },
+                ApiRow { name: "BackgroundBlend", purpose: "Cover cuts through; Blend leaves the lower layer", defaults: "Cover", events: "none" },
+            ])}
+        },
+    );
+
     let background = theme.colors.background;
     document(
         data,
@@ -695,6 +791,7 @@ pub(super) fn themes(cx: &mut ComponentContext, props: &Props<ChapterProps>) -> 
                 {customize}
                 {providers}
                 {contrast}
+                {transparency}
                 {docs::chapter_end(&theme, meta.number, meta.title)}
             </view>
         },

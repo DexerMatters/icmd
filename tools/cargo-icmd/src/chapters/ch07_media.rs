@@ -717,7 +717,7 @@ pub(super) fn scroll_selection_media(
                     style.width /= Dimension::Max;
                     style.gap /= 1;
                 }}>
-                    {route_card(&theme, data, 7, "◆", "08 · Themes", "The nineteen roles, eight presets, derivation, and contrast.")}
+                    {route_card(&theme, data, 7, "◆", "08 · Themes", "The nineteen roles, nine presets, derivation, and contrast.")}
                 </view>
                 {docs::chapter_end(&theme, meta.number, meta.title)}
             </view>

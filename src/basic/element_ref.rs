@@ -13,7 +13,8 @@ use std::{
 use crossterm::style::{Attributes as TerminalAttributes, Color};
 
 use crate::{
-    Align, BorderKind, Edges, Fill, Justify, Layout, Overflow, ScrollAxes, ScrollOffset, Visibility,
+    Align, BackgroundBlend, BorderKind, Edges, Fill, Justify, Layout, Overflow, ScrollAxes,
+    ScrollOffset, Visibility,
 };
 
 /// A rectangle in viewport-relative terminal-cell coordinates.
@@ -154,8 +155,11 @@ pub struct ResolvedElementStyle {
     pub visibility: Visibility,
     /// Effective paint-order offset.
     pub z_index: i32,
-    /// Background colour, if set.
+    /// Background colour as declared, if set. A terminal-default background
+    /// combined with [`BackgroundBlend::Blend`] paints nothing.
     pub background: Option<Color>,
+    /// How the background composites with the layers below.
+    pub background_blend: BackgroundBlend,
     /// Background fill, if set.
     pub fill: Option<Fill>,
     /// Effective border styling.

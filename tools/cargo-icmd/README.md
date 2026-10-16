@@ -105,6 +105,20 @@ The published crate ships its own documentation assets:
   compiled by this crate's tests, so visible code cannot drift from the
   framework's public API.
 
+## Releasing
+
+The tool depends on an exact `icmd` version, so publish the framework first and
+this tool second:
+
+```console
+cargo publish -p icmd
+cargo publish -p cargo-icmd
+```
+
+`cargo package -p cargo-icmd` resolves `icmd` from the registry, so it only
+verifies after the matching framework release is live. `cargo package -p
+cargo-icmd --list` validates the package contents before then.
+
 ## License
 
 MIT OR Apache-2.0, matching the framework.

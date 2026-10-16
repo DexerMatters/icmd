@@ -18,6 +18,11 @@ what actually changed.
   textareas share one engine, hit tested against the committed frame.
 - **Lifecycle you can see.** Ordered `boot`, `mount`, `ready`, `unmount`, and
   `exit` phases, component effects, and a session handle for graceful exit.
+- **Surfaces that see through.** `transparent()` makes any color slot the
+  terminal's own default, and `background_blend` chooses whether that surface
+  cuts through the layers below or blends into them.
+- **A theme for every terminal.** Nine complete presets in light and dark,
+  including `Glass`, whose page and overlays are transparent over frosted panes.
 - **Native images, optional.** The default build is pure Rust; one opt-in
   feature adds Chafa-backed Kitty, Sixel, and iTerm2 output, and symbol rendering
   is always available.
@@ -105,6 +110,33 @@ fn measured_panel(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
 }
 ```
 
+## Transparent surfaces
+
+A terminal cell has no alpha channel, so `transparent()` is the terminal's own
+default color rather than an absence of paint. Assign it to a background or a
+foreground, then choose how it composites: `BackgroundBlend::Cover` paints the
+terminal default over the layers below, while `BackgroundBlend::Blend`
+contributes nothing and leaves the lower layer visible.
+
+```rust
+use icmd::{BackgroundBlend, Style, transparent, ui, view};
+
+let panel = ui! {
+    <view style={|style: &mut Style| {
+        style.background /= transparent();
+        style.background_blend /= BackgroundBlend::Blend;
+    }}>
+        "the layer below shows through"
+    </view>
+};
+```
+
+Leaving a background unset is different: it inherits the nearest ancestor's
+backdrop, while `transparent()` is an explicit value that stops that
+inheritance. The bundled `ThemePreset::Glass` builds a whole look on the idea —
+its page and overlays are transparent while its cards stay opaque, so text keeps
+a surface to read on.
+
 ## Documentation: the interactive field guide
 
 `cargo icmd docs` opens a ten-chapter field guide to the framework, built with
@@ -158,6 +190,10 @@ fn app(_cx: &mut ComponentContext, _props: &Props<()>) -> Node {
     ui! { <markdown text="# Hello\n\nThis is **selectable** Markdown." /> }
 }
 ```
+
+## Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the release history.
 
 ## License
 
