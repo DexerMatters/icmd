@@ -237,12 +237,23 @@ impl EventDispatcher {
     /// Dispatches a mouse event: capture listeners run root-to-target before the
     /// target/bubble phase and built-in actions, and stopping them suppresses both.
     pub(super) fn dispatch_mouse(&self, event: MouseEvent) -> DispatchOutcome {
+        let app_capture_outcome = self.dispatch_app_pointer_capture(event);
+        if app_capture_outcome.propagation_stopped {
+            return app_capture_outcome;
+        }
         let capture_outcome = self.dispatch_pointer_capture(event);
         if capture_outcome.propagation_stopped {
-            return capture_outcome;
+            return DispatchOutcome {
+                delivered: capture_outcome.delivered + app_capture_outcome.delivered,
+                default_prevented: capture_outcome.default_prevented
+                    || app_capture_outcome.default_prevented,
+                ..capture_outcome
+            };
         }
         let mut pointer_deliveries = Vec::new();
+        let mut app_pointer_deliveries = Vec::new();
         let mut wheel_deliveries = Vec::new();
+        let mut app_wheel_deliveries = Vec::new();
         let mut scroll_deliveries = Vec::new();
         let mut focus_target = None;
         let mut scroll_changed = false;
@@ -260,13 +271,13 @@ impl EventDispatcher {
             let normal_target = state.hit_target(position);
 
             if let Some((delta_x, delta_y)) = wheel_delta(event.kind) {
+                let wheel = WheelEvent {
+                    position,
+                    delta_x,
+                    delta_y,
+                    modifiers: event.modifiers,
+                };
                 if let Some(target) = normal_target {
-                    let wheel = WheelEvent {
-                        position,
-                        delta_x,
-                        delta_y,
-                        modifiers: event.modifiers,
-                    };
                     for listener in state.route_wheel(target) {
                         wheel_deliveries.push((listener, wheel));
                     }
@@ -278,6 +289,9 @@ impl EventDispatcher {
                         ScrollInput::Wheel,
                         &mut scroll_deliveries,
                     );
+                }
+                for listener in app_wheel_listeners(&state) {
+                    app_wheel_deliveries.push((listener, wheel));
                 }
             } else {
                 let (kind, changed_button) = mouse_details(event);
@@ -292,6 +306,17 @@ impl EventDispatcher {
                         state.buttons |= changed_button.bit();
                     }
                     _ => {}
+                }
+
+                let app_pointer = PointerEvent::new(
+                    kind,
+                    position,
+                    changed_button,
+                    state.buttons,
+                    event.modifiers,
+                );
+                for listener in app_pointer_listeners(&state) {
+                    app_pointer_deliveries.push((listener, app_pointer));
                 }
 
                 let capture = state.captured;
@@ -594,8 +619,27 @@ impl EventDispatcher {
                 }
             }
         }
+        if !crate::basic::events::propagation_stopped() {
+            for (listener, event) in app_pointer_deliveries {
+                listener.call(event);
+                count += 1;
+                if crate::basic::events::propagation_stopped() {
+                    break;
+                }
+            }
+        }
+        if !crate::basic::events::propagation_stopped() {
+            for (listener, event) in app_wheel_deliveries {
+                listener.call(event);
+                count += 1;
+                if crate::basic::events::propagation_stopped() {
+                    break;
+                }
+            }
+        }
         let stopped = crate::basic::events::propagation_stopped();
-        let prevented = crate::basic::events::default_prevented();
+        let prevented =
+            crate::basic::events::default_prevented() || app_capture_outcome.default_prevented;
         drop(dispatch);
 
         if prevented && let Some(before) = wheel_offsets_before {
@@ -611,10 +655,46 @@ impl EventDispatcher {
             count += self.change_focus(target).1;
         }
         DispatchOutcome {
-            delivered: count + capture_outcome.delivered,
+            delivered: count + capture_outcome.delivered + app_capture_outcome.delivered,
             propagation_stopped: stopped,
             default_prevented: prevented || capture_outcome.default_prevented,
             redraw_requested: scroll_changed && !prevented,
+        }
+    }
+
+    /// Runs application-global pointer capture listeners before the ordinary
+    /// capture route. Wheel events belong to `app_wheel`, not this hook.
+    pub(super) fn dispatch_app_pointer_capture(&self, event: MouseEvent) -> DispatchOutcome {
+        if wheel_delta(event.kind).is_some() {
+            return DispatchOutcome::default();
+        }
+        let position = ScreenPosition::new(event.row as i32, event.column as i32);
+        let (kind, changed_button) = mouse_details(event);
+        let (callbacks, buttons) = {
+            let state = self.state.read().expect("event registry poisoned");
+            (app_pointer_capture_listeners(&state), state.buttons)
+        };
+        if callbacks.is_empty() {
+            return DispatchOutcome::default();
+        }
+        let dispatch = crate::basic::events::begin_dispatch();
+        let pointer = PointerEvent::new(kind, position, changed_button, buttons, event.modifiers);
+        let mut delivered = 0;
+        for listener in callbacks {
+            listener.call(pointer);
+            delivered += 1;
+            if crate::basic::events::propagation_stopped() {
+                break;
+            }
+        }
+        let stopped = crate::basic::events::propagation_stopped();
+        let prevented = crate::basic::events::default_prevented();
+        drop(dispatch);
+        DispatchOutcome {
+            delivered,
+            propagation_stopped: stopped,
+            default_prevented: prevented,
+            redraw_requested: false,
         }
     }
 
@@ -635,6 +715,9 @@ impl EventDispatcher {
                     PointerEventKind::Click => {
                         state.route_capture(target, |handlers| listener(&handlers.click_capture))
                     }
+                    PointerEventKind::Cancel => state.route_capture(target, |handlers| {
+                        listener(&handlers.pointer_cancel_capture)
+                    }),
                     _ => Vec::new(),
                 };
             let wheel = if wheel_delta(event.kind).is_some() {
@@ -1134,6 +1217,8 @@ impl EventDispatcher {
 
     pub(super) fn dispatch_terminal_focus(&self, event: FocusEvent) -> usize {
         let mut pointer_deliveries = Vec::new();
+        let mut cancel_capture = Vec::new();
+        let mut cancel_pointer = None;
         if event == FocusEvent::Lost {
             let mut state = self.state.write().expect("event registry poisoned");
             if let Some(capture) = state.captured.take() {
@@ -1144,6 +1229,10 @@ impl EventDispatcher {
                     0,
                     KeyModifiers::empty(),
                 );
+                cancel_capture = state.route_capture(capture.target, |handlers| {
+                    listener(&handlers.pointer_cancel_capture)
+                });
+                cancel_pointer = Some(pointer);
                 queue_pointer(
                     &state,
                     capture.target,
@@ -1176,6 +1265,23 @@ impl EventDispatcher {
             FocusEvent::Gained => TerminalFocusEvent::Gained,
             FocusEvent::Lost => TerminalFocusEvent::Lost,
         };
+        let mut cancel_stopped = false;
+        if let Some(pointer) = cancel_pointer
+            && !cancel_capture.is_empty()
+        {
+            let dispatch = crate::basic::events::begin_dispatch();
+            for listener in cancel_capture {
+                listener.call(pointer);
+                if crate::basic::events::propagation_stopped() {
+                    break;
+                }
+            }
+            cancel_stopped = crate::basic::events::propagation_stopped();
+            drop(dispatch);
+        }
+        if cancel_stopped {
+            pointer_deliveries.clear();
+        }
         let count = pointer_deliveries.len() + callbacks.len();
         for (listener, pointer) in pointer_deliveries {
             listener.call(pointer);

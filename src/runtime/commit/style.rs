@@ -47,6 +47,7 @@ impl ComputedStyle {
                 .unwrap_or_default(),
             visibility: slot(&style.visibility).unwrap_or_default(),
             z_index: slot(&style.z_index).unwrap_or_default(),
+            pointer_events: slot(&style.pointer_events).unwrap_or_default(),
             background: slot(&style.background),
             background_blend: slot(&style.background_blend).unwrap_or_default(),
             fill: slot(&style.fill),
@@ -77,6 +78,7 @@ pub(super) fn scroll_spec<'a>(config: Option<&'a ScrollConfig>) -> Option<Scroll
         always_vertical: matches!(config.scrollbar_visibility, ScrollbarVisibility::Always)
             && config.vertical,
         draw_scrollbar: config.scrollbar_visibility != ScrollbarVisibility::Hidden,
+        overlay: config.scrollbar_visibility == ScrollbarVisibility::Overlay,
         wheel_step: config.wheel_step,
         wheel: config.enable_wheel,
         enable_mouse: config.enable_mouse,

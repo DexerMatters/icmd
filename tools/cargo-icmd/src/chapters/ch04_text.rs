@@ -265,7 +265,7 @@ fn selection_demo(cx: &mut ComponentContext, _props: &Props<()>) -> Node {
 /// One rich Markdown sample that exercises every block the parser supports.
 const MARKDOWN_SAMPLE: &str = r#"# Release checklist
 
-Ship **icmd 0.3.0** only when every gate below is _green_.
+Ship **icmd 0.4.0** only when every gate below is _green_.
 
 > [!NOTE]
 > Alert syntax rides on the same GFM extension set your repository already renders.
@@ -416,6 +416,8 @@ pub(super) fn text_and_documents(cx: &mut ComponentContext, props: &Props<Chapte
                 ApiRow { name: "TextOverflow", purpose: "Clip or Ellipsis on the last row", defaults: "TextOverflow::Clip", events: "none" },
                 ApiRow { name: "Text::wrap", purpose: "choose the reflow policy", defaults: "NoWrap", events: "none" },
                 ApiRow { name: "Text::overflow", purpose: "choose the truncation policy", defaults: "Clip", events: "none" },
+                ApiRow { name: "fit / fit_right", purpose: "elide a string to a cell budget", defaults: "head + ellipsis / ellipsis + tail", events: "none" },
+                ApiRow { name: "display_width", purpose: "measure a string in terminal cells", defaults: "merged emoji policy", events: "none" },
             ])}
         },
     );

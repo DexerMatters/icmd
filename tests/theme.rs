@@ -622,3 +622,23 @@ fn glass_keeps_its_page_transparent_and_its_panes_opaque() {
         }
     }
 }
+
+#[test]
+fn semantic_roles_derive_from_palette_and_can_be_overridden() {
+    use icmd::theme::{ThemeColors, ThemeMode, ThemeRoles};
+    let theme = icmd::theme::Theme::new(ThemeMode::Dark, ThemeColors::dark());
+    assert_eq!(theme.roles.selection, theme.colors.primary);
+    assert_eq!(
+        theme.roles.selection_foreground,
+        theme.colors.primary_foreground
+    );
+    assert_eq!(theme.roles.overlay, theme.colors.popover);
+
+    let roles = ThemeRoles {
+        selection: crossterm::style::Color::Magenta,
+        ..theme.roles
+    };
+    let overridden = Theme::from_palette(ThemeMode::Dark, ThemeColors::dark())
+        .customize(|theme| theme.roles = roles);
+    assert_eq!(overridden.roles.selection, crossterm::style::Color::Magenta);
+}

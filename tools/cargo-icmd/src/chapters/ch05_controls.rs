@@ -672,10 +672,13 @@ pub(super) fn controls_and_events(cx: &mut ComponentContext, props: &Props<Chapt
                 ui! { {input_demo.apply(())} },
                 Some(ui! { {docs::hint(&theme, "pick one owner", "set value or default_value, not both, and let on_change carry the committed string")} }),
             )}
-            {docs::callout(&theme, CalloutKind::Info, "`on_change` fires for each committed value change, and `on_submit` fires once per Enter in a single-line input. Both carry a `TextValueEvent` whose `value` is the editor's value at that moment; a controlled owner simply writes it back.")}
+            {docs::callout(&theme, CalloutKind::Info, "`on_change` fires for each committed value change, and `on_submit` fires once per Enter in a single-line input. Both carry a `TextValueEvent` whose `value` is the editor's value at that moment; a controlled owner simply writes it back. While the owner catches up the editor keeps an optimistic draft: an echo accepts it, an earlier emission is catching up, a repeated old value is stale, and a distinct new value replaces it.")}
             {docs::api_strip(&theme, &[
                 ApiRow { name: "input", purpose: "single-line text editing", defaults: "26x2 host, uncontrolled", events: "on_change, on_submit, on_clipboard" },
-                ApiRow { name: "InputProps", purpose: "value, default_value, placeholder, max_length", defaults: "all unset", events: "on_change, on_submit" },
+                ApiRow { name: "InputProps", purpose: "value, default_value, placeholder, max_length, selection", defaults: "all unset", events: "on_change, on_submit, on_selection_change" },
+                ApiRow { name: "dialog / portal", purpose: "focus-owning overlay painted at the root", defaults: "closed portal at level 1000", events: "on_close" },
+                ApiRow { name: "popover / menu", purpose: "anchored overlay and keyboard menu", defaults: "below-start placement, dismiss outside", events: "on_close, on_select" },
+                ApiRow { name: "frame / pane / split", purpose: "titled panes with weighted splitters", defaults: "equal weights, draggable 1-cell splitter", events: "on_weights_change" },
                 ApiRow { name: "TextValueEvent", purpose: "the editor's value at change or submit", defaults: "—", events: "none" },
                 ApiRow { name: "read_only", purpose: "selectable and copyable, not editable", defaults: "false", events: "none" },
                 ApiRow { name: "disabled", purpose: "no editing and no focus", defaults: "false", events: "none" },

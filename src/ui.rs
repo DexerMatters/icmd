@@ -174,6 +174,16 @@ macro_rules! ui {
     (@set_attr $props:ident $key:ident on_key_down { $value:expr }) => { $props.dom.events.key_down /= $value; };
     (@set_attr $props:ident $key:ident on_key_up { $value:expr }) => { $props.dom.events.key_up /= $value; };
     (@set_attr $props:ident $key:ident on_keyboard_event { $value:expr }) => { $props.dom.events.keyboard_event /= $value; };
+    (@set_attr $props:ident $key:ident on_pointer_down_capture { $value:expr }) => { $props.dom.events.pointer_down_capture /= $value; };
+    (@set_attr $props:ident $key:ident on_pointer_up_capture { $value:expr }) => { $props.dom.events.pointer_up_capture /= $value; };
+    (@set_attr $props:ident $key:ident on_pointer_cancel_capture { $value:expr }) => { $props.dom.events.pointer_cancel_capture /= $value; };
+    (@set_attr $props:ident $key:ident on_click_capture { $value:expr }) => { $props.dom.events.click_capture /= $value; };
+    (@set_attr $props:ident $key:ident on_key_down_capture { $value:expr }) => { $props.dom.events.key_down_capture /= $value; };
+    (@set_attr $props:ident $key:ident on_key_up_capture { $value:expr }) => { $props.dom.events.key_up_capture /= $value; };
+    (@set_attr $props:ident $key:ident on_wheel_capture { $value:expr }) => { $props.dom.events.wheel_capture /= $value; };
+    (@set_attr $props:ident $key:ident on_app_pointer { $value:expr }) => { $props.dom.events.app_pointer /= $value; };
+    (@set_attr $props:ident $key:ident on_app_pointer_capture { $value:expr }) => { $props.dom.events.app_pointer_capture /= $value; };
+    (@set_attr $props:ident $key:ident on_app_wheel { $value:expr }) => { $props.dom.events.app_wheel /= $value; };
     (@set_attr $props:ident $key:ident on_app_key { $value:expr }) => { $props.dom.events.app_key /= $value; };
     (@set_attr $props:ident $key:ident on_resize_event { $value:expr }) => { $props.dom.events.resize_event /= $value; };
     (@set_attr $props:ident $key:ident on_focus_event { $value:expr }) => { $props.dom.events.focus_event /= $value; };

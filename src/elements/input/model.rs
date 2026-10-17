@@ -240,12 +240,12 @@ pub struct EditModel {
     initialized: bool,
     /// The controlled draft awaiting the owner's echo.
     draft: Option<EmittedDraft>,
-    /// Every value emitted since the current draft opened, oldest first. An
-    /// asynchronous owner can answer with an earlier link of this chain while
-    /// it is still catching up; that is not a rejection, and the model keeps
-    /// its optimistic value and caret until the owner republishes the latest
-    /// one.
-    pending_emissions: Vec<String>,
+    /// Values the owner has rendered and values this editor has emitted,
+    /// oldest first, bounded by [`MAX_KNOWN_VALUES`]. An owner that answers
+    /// with an earlier link of this chain is still catching up; that is not a
+    /// rejection, and the model keeps its optimistic value and caret until the
+    /// owner republishes the latest one.
+    known_values: Vec<String>,
     /// Emoji-merging mode used as the unit measure.
     emoji_merging: EmojiMerging,
     /// The document every selection operation is expressed against. It is kept
@@ -256,10 +256,10 @@ pub struct EditModel {
     document_merging: EmojiMerging,
 }
 
-/// The owner can be several renders behind a fast typist, so the chain keeps
+/// The owner can be several renders behind a fast typist, so the history keeps
 /// enough links to cover a long burst before it degrades to the owner's value.
 /// It is bounded, because a runaway chain must not retain memory.
-const MAX_PENDING_EMISSIONS: usize = 64;
+const MAX_KNOWN_VALUES: usize = 64;
 
 impl EditModel {
     /// Current value.
@@ -317,14 +317,22 @@ impl EditModel {
     /// Reconcile the owner's value with the model and adopt the layout's
     /// emoji-merging mode; returns whether anything observable changed.
     ///
-    /// Acceptance is exactly "the owner republished what we emitted", and then
-    /// the selection that produced the draft is kept. An owner that is still
-    /// catching up answers with an earlier link of the emitted chain: that is
-    /// not a rejection, so the optimistic value, caret, and draft are kept
-    /// until the owner republishes the latest emission. Any other value is a
-    /// rejection or an external replacement, and the live selection is clamped
-    /// instead. Switching to uncontrolled retains the last authoritative
-    /// rendered value rather than a speculative draft.
+    /// While a draft is open, the editor reads the controlled value in four
+    /// documented cases:
+    ///
+    /// 1. **Accepted**: the owner republishes the draft value. The caret that
+    ///    produced the draft is kept and the draft closes.
+    /// 2. **Catching up**: the owner republishes an earlier emission. The
+    ///    optimistic value, caret, and draft are kept.
+    /// 3. **Stale**: the owner repeats a value it already rendered, which is
+    ///    what a frame composed before the edit looks like. The draft is kept;
+    ///    this is not a rejection.
+    /// 4. **External replacement**: the owner publishes a value outside the
+    ///    recent history. The text is replaced and the live caret is clamped.
+    ///
+    /// A rejection is therefore expressed by publishing a distinct new value,
+    /// not by re-rendering the old one. Switching to uncontrolled retains the
+    /// last authoritative rendered value rather than a speculative draft.
     pub fn render(
         &mut self,
         value: Option<&str>,
@@ -348,7 +356,10 @@ impl EditModel {
                 ValueOwnership::Uncontrolled
             };
             self.draft = None;
-            self.pending_emissions.clear();
+            self.known_values.clear();
+            if controlled.is_some() {
+                self.known_values.push(initial.clone());
+            }
             self.set_value(initial);
             return Outcome::Changed;
         }
@@ -363,23 +374,40 @@ impl EditModel {
                 let accepted = draft
                     .as_ref()
                     .is_some_and(|draft| draft.value == controlled);
-                let catching_up = !accepted
+                /*
+                 * A value this editor has already emitted, or one the owner
+                 * already rendered, is not a new owner decision: a frame that
+                 * started before the edit must not revert the optimistic text.
+                 */
+                let known = !accepted
                     && draft.is_some()
                     && self
-                        .pending_emissions
+                        .known_values
                         .iter()
-                        .any(|emitted| emitted.as_str() == controlled.as_str());
-                if catching_up {
+                        .any(|value| value.as_str() == controlled.as_str());
+                if accepted {
+                    let caret = draft.expect("accepted implies a draft").caret;
+                    self.set_value(controlled.clone());
+                    self.caret = self.snap_caret(caret);
+                    self.authoritative = controlled.clone();
+                    self.known_values.clear();
+                    self.known_values.push(controlled);
+                } else if known {
+                    self.remember_value(&controlled);
                     self.draft = draft;
                 } else {
-                    let caret = match (accepted, draft) {
-                        (true, Some(draft)) => draft.caret,
-                        _ => self.caret,
-                    };
-                    self.set_value(controlled);
-                    self.caret = self.snap_caret(caret);
-                    self.authoritative = self.value.clone();
-                    self.pending_emissions.clear();
+                    /*
+                     * A genuinely new owner value replaces the field. To
+                     * reject a draft, the owner publishes a distinct value;
+                     * re-rendering the old value is indistinguishable from a
+                     * stale frame and deliberately does not reject.
+                     */
+                    self.set_value(controlled.clone());
+                    self.caret = self.snap_caret(self.caret);
+                    self.authoritative = controlled.clone();
+                    self.draft = None;
+                    self.known_values.clear();
+                    self.known_values.push(controlled);
                 }
                 self.ownership = ValueOwnership::Controlled;
             }
@@ -389,7 +417,7 @@ impl EditModel {
                 }
                 self.ownership = ValueOwnership::Uncontrolled;
                 self.draft = None;
-                self.pending_emissions.clear();
+                self.known_values.clear();
                 self.authoritative = self.value.clone();
                 self.caret = self.snap_caret(self.caret);
             }
@@ -404,6 +432,12 @@ impl EditModel {
         } else {
             Outcome::Changed
         }
+    }
+
+    /// Replace the caret with a caller-supplied selection, clamped to the
+    /// document. Used by the controlled `selection` prop.
+    pub fn set_selection(&mut self, anchor: usize, cursor: usize) {
+        self.caret = Caret::between(self.clamp(anchor), self.clamp(cursor));
     }
 
     /// Clamp a caret into the current document.
@@ -721,12 +755,25 @@ impl EditModel {
             value: self.value.clone(),
             caret: self.caret,
         });
-        if self.pending_emissions.last() != Some(&self.value) {
-            if self.pending_emissions.len() >= MAX_PENDING_EMISSIONS {
-                self.pending_emissions.remove(0);
-            }
-            self.pending_emissions.push(self.value.clone());
+        let value = self.value.clone();
+        self.remember_value(&value);
+    }
+
+    /// Records a value in the bounded reconciliation history, dropping the
+    /// oldest link once the budget is reached and suppressing immediate
+    /// duplicates.
+    fn remember_value(&mut self, value: &str) {
+        if self
+            .known_values
+            .last()
+            .is_some_and(|known| known.as_str() == value)
+        {
+            return;
         }
+        if self.known_values.len() >= MAX_KNOWN_VALUES {
+            self.known_values.remove(0);
+        }
+        self.known_values.push(value.to_owned());
     }
 }
 

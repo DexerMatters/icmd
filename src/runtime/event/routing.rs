@@ -207,7 +207,10 @@ impl EventState {
     pub(super) fn hit_target(&self, position: ScreenPosition) -> Option<DomId> {
         self.regions
             .iter()
-            .filter(|region| region.rect.contains(position.line, position.column))
+            .filter(|region| {
+                region.pointer_events == crate::PointerEvents::Auto
+                    && region.rect.contains(position.line, position.column)
+            })
             .max_by_key(|region| (region.level, region.order))
             .map(|region| region.id)
     }
@@ -376,4 +379,35 @@ impl EventState {
         }
         callbacks
     }
+}
+
+/// Collects application-global pointer capture listeners in reverse paint
+/// order, so the topmost overlay observes the event first.
+pub(super) fn app_pointer_capture_listeners(
+    state: &EventState,
+) -> Vec<EventListener<PointerEvent>> {
+    state
+        .regions
+        .iter()
+        .rev()
+        .filter_map(|region| listener(&region.handlers.app_pointer_capture))
+        .collect()
+}
+
+/// Collects application-global pointer bubble listeners in paint order.
+pub(super) fn app_pointer_listeners(state: &EventState) -> Vec<EventListener<PointerEvent>> {
+    state
+        .regions
+        .iter()
+        .filter_map(|region| listener(&region.handlers.app_pointer))
+        .collect()
+}
+
+/// Collects application-global wheel listeners in paint order.
+pub(super) fn app_wheel_listeners(state: &EventState) -> Vec<EventListener<WheelEvent>> {
+    state
+        .regions
+        .iter()
+        .filter_map(|region| listener(&region.handlers.app_wheel))
+        .collect()
 }

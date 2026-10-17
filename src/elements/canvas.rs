@@ -64,6 +64,8 @@ pub struct CanvasContext {
     foreground: Color,
     background: Color,
     attributes: Attributes,
+    /// Braille dot masks, one byte per cell.
+    dots: Vec<u8>,
 }
 
 impl CanvasContext {
@@ -86,6 +88,7 @@ impl CanvasContext {
             foreground: theme.colors.foreground,
             background: theme.colors.background,
             attributes: Attributes::default(),
+            dots: vec![0; usize::from(width) * usize::from(height)],
         })
     }
 
@@ -147,6 +150,7 @@ impl CanvasContext {
         if cell.width() == 2 && x as usize + 1 >= self.width() {
             return Ok(());
         }
+        self.clear_dots(x, y, cell.width() as i32);
         self.image.patch_cells(&[CellEdit {
             position: ImagePosition::new(y as usize, x as usize),
             cell,
@@ -191,10 +195,134 @@ impl CanvasContext {
         Ok(())
     }
 
+    /// The painted cell at `(x, y)`, or `None` outside the canvas.
+    ///
+    /// A wide glyph reports its lead cell; its continuation has no symbol of
+    /// its own.
+    pub fn cell(&self, x: i32, y: i32) -> Option<&Cell> {
+        if x < 0 || y < 0 || x as usize >= self.width() || y as usize >= self.height() {
+            return None;
+        }
+        match self.image.cell_at(y as usize, x as usize) {
+            crate::data::CellSlot::Lead(cell) => Some(cell),
+            crate::data::CellSlot::Continuation(_) => None,
+        }
+    }
+
+    /// Canvas width in braille dots: two dots per cell column.
+    pub fn dot_width(&self) -> usize {
+        self.width().saturating_mul(2)
+    }
+
+    /// Canvas height in braille dots: four dots per cell row.
+    pub fn dot_height(&self) -> usize {
+        self.height().saturating_mul(4)
+    }
+
+    /// Sets one braille dot at `(x, y)` in the 2x4 dot grid of a cell.
+    ///
+    /// Out-of-bounds dots are ignored. A dot composes with the cell's other
+    /// dots and uses the current foreground, background, and attributes.
+    pub fn set_dot(&mut self, x: i32, y: i32) -> Result<(), CanvasError> {
+        let Some((cell_x, cell_y, bit)) = self.dot_position(x, y) else {
+            return Ok(());
+        };
+        let index = cell_y * self.width() + cell_x;
+        let mask = self.dots[index] | bit;
+        self.dots[index] = mask;
+        self.paint_braille(cell_x as i32, cell_y as i32, mask)
+    }
+
+    /// Clears one braille dot.
+    pub fn clear_dot(&mut self, x: i32, y: i32) -> Result<(), CanvasError> {
+        let Some((cell_x, cell_y, bit)) = self.dot_position(x, y) else {
+            return Ok(());
+        };
+        let index = cell_y * self.width() + cell_x;
+        let mask = self.dots[index] & !bit;
+        self.dots[index] = mask;
+        self.paint_braille(cell_x as i32, cell_y as i32, mask)
+    }
+
+    /// Sets several dots at once.
+    pub fn set_dots(&mut self, dots: &[(i32, i32)]) -> Result<(), CanvasError> {
+        for &(x, y) in dots {
+            self.set_dot(x, y)?;
+        }
+        Ok(())
+    }
+
+    /// Sets a vertical braille run in one cell column from `y0` to `y1`,
+    /// inclusive in either order.
+    pub fn set_run(&mut self, x: i32, y0: i32, y1: i32) -> Result<(), CanvasError> {
+        let (start, end) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+        let mut y = start;
+        while y <= end {
+            self.set_dot(x, y)?;
+            y = y.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn dot_position(&self, x: i32, y: i32) -> Option<(usize, usize, u8)> {
+        if x < 0 || y < 0 {
+            return None;
+        }
+        let (x, y) = (x as usize, y as usize);
+        if x >= self.dot_width() || y >= self.dot_height() {
+            return None;
+        }
+        let cell_x = x / 2;
+        let cell_y = y / 4;
+        let right = (x % 2) as u8;
+        let vertical = (y % 4) as u8;
+        let bit = match (right, vertical) {
+            (0, 0) => 0x01,
+            (0, 1) => 0x02,
+            (0, 2) => 0x04,
+            (0, 3) => 0x40,
+            (1, 0) => 0x08,
+            (1, 1) => 0x10,
+            (1, 2) => 0x20,
+            (1, 3) => 0x80,
+            _ => return None,
+        };
+        Some((cell_x, cell_y, bit))
+    }
+
+    fn paint_braille(&mut self, x: i32, y: i32, mask: u8) -> Result<(), CanvasError> {
+        let symbol = if mask == 0 {
+            " ".to_string()
+        } else {
+            char::from_u32(0x2800 + u32::from(mask))
+                .expect("braille bitmask is a valid code point")
+                .to_string()
+        };
+        let cell = Cell::new(symbol, self.foreground, self.background, self.attributes)?;
+        self.image.patch_cells(&[CellEdit {
+            position: ImagePosition::new(y as usize, x as usize),
+            cell,
+        }])?;
+        Ok(())
+    }
+
+    fn clear_dots(&mut self, x: i32, y: i32, width: i32) {
+        if x < 0 || y < 0 || x as usize >= self.width() || y as usize >= self.height() {
+            return;
+        }
+        for column in x..x.saturating_add(width.max(1)) {
+            if column >= 0 && (column as usize) < self.width() {
+                let index = y as usize * self.width() + column as usize;
+                self.dots[index] = 0;
+            }
+        }
+    }
+
     /// Reset every cell to a blank cell in the current style.
     pub fn clear(&mut self) -> Result<(), CanvasError> {
         let blank = Cell::styled(self.foreground, self.background, self.attributes, " ")?;
         self.image = Image::new(self.width(), self.height(), blank)?;
+        self.dots.fill(0);
         Ok(())
     }
 
@@ -380,6 +508,7 @@ impl CanvasContext {
                         position: ImagePosition::new(target_y as usize, target_x as usize),
                         cell: cell.clone(),
                     });
+                    self.clear_dots(target_x, target_y, cell.width() as i32);
                 }
             }
         }

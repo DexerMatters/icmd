@@ -642,7 +642,7 @@ pub(super) fn components_and_state(cx: &mut ComponentContext, props: &Props<Chap
         4,
         &sections[4],
         ui! {
-            {docs::body("Three hooks hold values across renders, and they answer different questions. `use_ref` is a persistent cell for anything that must survive a render without causing one. `use_state_ref` is the same storage with an encapsulated lock, for shared mutation. `use_element_ref` attaches to a host element and publishes its committed geometry back to you.")}
+            {docs::body("Three hooks hold values across renders, and they answer different questions. `use_ref` is a persistent cell for anything that must survive a render without causing one. `use_live_state` (also spelled `use_state_ref`) is shared, encapsulated state whose writes are visible immediately and wake the owner, so an event handler can mutate and read it back without a caller-managed redraw tick; `update_quiet` batches. `use_element_ref` attaches to a host element and publishes its committed geometry back to you.")}
             {docs::live_example(
                 &theme,
                 "refs and committed geometry",
@@ -651,10 +651,13 @@ pub(super) fn components_and_state(cx: &mut ComponentContext, props: &Props<Chap
                 None,
             )}
             {docs::source_block(&theme, "a geometry readout", snippets::GEOMETRY_READOUT)}
-            {docs::callout(&theme, CalloutKind::Info, "Reading a ref during render does not schedule a render, and writing one outside render does not wake the runtime either. Geometry is published after commit, which is why a snapshot is evidence about the last frame rather than an input to the next layout.")}
+            {docs::callout(&theme, CalloutKind::Info, "`use_state` returns a snapshot from this render and queues its setter for the next pass. A live state (`use_live_state`/`use_state_ref`) writes through immediately and wakes its owner; a plain `use_ref` never wakes. Geometry is published after commit, which is why a snapshot is evidence about the last frame rather than an input to the next layout.")}
             {docs::api_strip(&theme, &[
                 ApiRow { name: "use_ref", purpose: "persistent cell with no render scheduling", defaults: "initial closure runs once", events: "none" },
-                ApiRow { name: "use_state_ref", purpose: "shared mutable value behind a lock", defaults: "read, update, try_update", events: "none" },
+                ApiRow { name: "use_live_state", purpose: "live shared value; writes wake the owner", defaults: "read, set, update, update_quiet", events: "none" },
+                ApiRow { name: "use_state_ref", purpose: "older name for live shared state", defaults: "same as use_live_state", events: "none" },
+                ApiRow { name: "use_handle", purpose: "session handle: request_frame, focus, viewport", defaults: "inert before a session attaches", events: "request_exit" },
+                ApiRow { name: "use_frame_clock", purpose: "callback after each presented frame", defaults: "active 60 fps clock", events: "returns FrameClock" },
                 ApiRow { name: "use_element_ref", purpose: "attach to a host and receive snapshots", defaults: "unattached until commit", events: "on_element_change" },
                 ApiRow { name: "ElementRef", purpose: "stable handle to committed element state", defaults: "current() is None before commit", events: "none" },
                 ApiRow { name: "ElementSnapshot", purpose: "rectangles, resolved style, scroll state", defaults: "replaced only when it changes", events: "none" },

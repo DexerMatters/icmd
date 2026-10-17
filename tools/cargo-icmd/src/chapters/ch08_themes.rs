@@ -618,6 +618,8 @@ pub(super) fn themes(cx: &mut ComponentContext, props: &Props<ChapterProps>) -> 
             {docs::watch_for(&theme, "Reaching for a raw terminal color breaks every guarantee the theme makes: it ignores contrast, the light/dark switch, and the header controls.")}
             {docs::api_strip(&theme, &[
                 ApiRow { name: "ThemeColors", purpose: "the nineteen base roles", defaults: "every preset supplies all nineteen", events: "none" },
+                ApiRow { name: "ThemeRoles", purpose: "selection, row-alt, header, chip-on, overlay", defaults: "derived from colors", events: "none" },
+                ApiRow { name: "transparent / Reset", purpose: "no paint vs the terminal default", defaults: "Reset paints; transparent blends", events: "none" },
                 ApiRow { name: "Theme", purpose: "colors plus derived tokens", defaults: "Theme::ansi(ThemeMode::Light)", events: "none" },
                 ApiRow { name: "use_theme", purpose: "read the resolved theme from context", defaults: "the provider's value or Theme::default()", events: "none" },
             ])}

@@ -22,6 +22,13 @@ use super::{
 
 /// A stable, cloneable node identity used to match nodes across renders.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Identity for a sibling node during reconciliation.
+///
+/// The key is its exact string content. Keys are matched only among siblings,
+/// must be unique in one child list (a duplicate is a lowering error), and
+/// preserve hook state when their child moves. A changed key unmounts the old
+/// subtree and mounts a new one, so prefer a stable logical id such as
+/// `format!("tab-{id}")` over a position when the collection can reorder.
 pub struct Key(Arc<str>);
 
 impl Key {

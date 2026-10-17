@@ -45,18 +45,20 @@ mod ui;
 
 pub use app::{RenderError, RuntimeConfig, render, render_with};
 pub use lifecycle::{AppLifecycle, AppPhase, AppSession, ExitReason};
-pub use theme::{ThemeBuilder, ThemeProviderProps, theme_context, theme_provider};
+pub use theme::{ThemeBuilder, ThemeProviderProps, ThemeRoles, theme_context, theme_provider};
 
 pub use elements::{
     AlertProps, AlertVariant, BadgeProps, BadgeVariant, ButtonProps, ButtonVariant, CanvasContext,
-    CanvasDraw, CanvasError, CanvasProps, CheckboxProps, ImageProps, InputProps, LinkProps,
-    ProgressBarDragEvent, ProgressBarProps, RadioProps, RawInputAppearance, RawInputMode,
-    RawInputProps, ScrollAreaProps, SelectionAreaProps, SkeletonProps, SpinnerProps, SwitchProps,
-    TextClipboardAction, TextClipboardEvent, TextSelectionEvent, TextValueEvent, TextareaProps,
-    alert, badge, blockquote, button, canvas, card, center, checkbox, code, column, container,
-    divider, footer, heading, input, kbd, label, link, muted, paragraph, progress_bar, radio,
-    raw_input, row, scroll_area, section, selection_area, skeleton, spacer, spinner, switch,
-    textarea,
+    CanvasDraw, CanvasError, CanvasProps, CheckboxProps, DialogProps, FrameProps, ImageProps,
+    InputProps, LinkProps, MenuItem, MenuProps, PaneProps, PopoverPlacement, PopoverProps,
+    PortalProps, ProgressBarDragEvent, ProgressBarProps, RadioProps, RawInputAppearance,
+    RawInputMode, RawInputProps, ScrollAreaProps, ScrollController, SelectionAreaProps,
+    SkeletonProps, SpinnerProps, SplitProps, SplitResizeEvent, SwitchProps, TextClipboardAction,
+    TextClipboardEvent, TextSelectionChange, TextSelectionEvent, TextSelectionState,
+    TextValueEvent, TextareaProps, alert, badge, blockquote, button, canvas, card, center,
+    checkbox, code, column, container, dialog, divider, footer, frame, heading, input, kbd, label,
+    link, menu, muted, pane, paragraph, popover, portal, progress_bar, radio, raw_input, row,
+    scroll_area, section, selection_area, skeleton, spacer, spinner, split, switch, textarea,
 };
 #[cfg(feature = "markdown")]
 pub use elements::{MarkdownProps, markdown};
@@ -64,15 +66,16 @@ pub use elements::{MarkdownProps, markdown};
 pub use basic::{
     Align, AppHandle, Attr, Attributes, AxisPosition, BackgroundBlend, BorderKind, BorderStyle,
     Component, ComponentContext, ContextKey, Dimension, DomId, DomNode, DomProps, Edges,
-    EffectResult, ElementRect, ElementRef, ElementScrollState, ElementSnapshot, EventHandlers,
-    EventListener, Fill, FillError, FocusEvent, Forward, Glyph, GlyphRamp, Justify, Key,
-    KeyboardEvent, Layout, Node, Overflow, PasteEvent, Percent, PercentBasis, Point, PointerButton,
-    PointerEvent, PointerEventKind, PointerId, PointerType, ProgressBarStyle, Props,
-    PropsTransform, Ref, ResizeEvent, ResolvedBorderStyle, ResolvedElementStyle, ResolvedTextStyle,
-    ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph, ScrollbarStyle,
-    ScrollbarVisibility, Span, StateError, StateRef, StateSetter, Style, StylePatch,
-    TerminalFocusEvent, Text, TextAlign, TextOverflow, TextStyle, TextWrap, Visibility, WheelEvent,
-    create_context, empty, fragment, style, style_patch, text, transparent, view,
+    EffectResult, ElementObserver, ElementRect, ElementRef, ElementScrollState, ElementSnapshot,
+    EventHandlers, EventListener, Fill, FillError, FocusEvent, Forward, FrameClock, Glyph,
+    GlyphRamp, Justify, Key, KeyboardEvent, Layout, Node, Overflow, PasteEvent, Percent,
+    PercentBasis, Point, PointerButton, PointerEvent, PointerEventKind, PointerEvents, PointerId,
+    PointerType, ProgressBarStyle, Props, PropsTransform, Ref, ResizeEvent, ResolvedBorderStyle,
+    ResolvedElementStyle, ResolvedTextStyle, ScrollAxes, ScrollDelta, ScrollEvent, ScrollOffset,
+    ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Span, StateError, StateRef, StateSetter,
+    Style, StylePatch, TerminalFocusEvent, Text, TextAlign, TextOverflow, TextStyle, TextWrap,
+    Visibility, WheelEvent, create_context, display_width, display_width_with, empty, fit,
+    fit_right, fragment, style, style_patch, text, transparent, view,
 };
 pub use data::{
     Cell, CellEdit, CellError, EmojiMerging, Frame, Image, ImageError, ImageId, ImagePosition,
@@ -91,15 +94,17 @@ pub use raster::{
 pub mod prelude {
     pub use crate::{
         AppHandle, AppLifecycle, AppPhase, Attr, BackgroundBlend, Component, ComponentContext,
-        Dimension, DomProps, Edges, ElementRect, ElementRef, ElementScrollState, ElementSnapshot,
-        EmojiMerging, ExitReason, Glyph, GlyphRamp, ImageLoading, ImageSource, InputProps, Layout,
-        Node, ProgressBarStyle, Props, RawInputAppearance, RawInputMode, RawInputProps, Ref,
-        ResolvedBorderStyle, ResolvedElementStyle, ResolvedTextStyle, ScrollAreaProps, ScrollAxes,
+        Dimension, DomProps, Edges, ElementObserver, ElementRect, ElementRef, ElementScrollState,
+        ElementSnapshot, EmojiMerging, ExitReason, FrameClock, Glyph, GlyphRamp, ImageLoading,
+        ImageSource, InputProps, Layout, Node, PointerEvents, ProgressBarStyle, Props,
+        RawInputAppearance, RawInputMode, RawInputProps, Ref, ResolvedBorderStyle,
+        ResolvedElementStyle, ResolvedTextStyle, ScrollAreaProps, ScrollAxes, ScrollController,
         ScrollDelta, ScrollEvent, ScrollOffset, ScrollbarGlyph, ScrollbarStyle,
         ScrollbarVisibility, Style, StylePatch, TextClipboardAction, TextClipboardEvent,
-        TextValueEvent, TextWrap, TextareaProps, ThemeProviderProps, column, heading, input,
-        progress_bar, raw_input, row, scroll_area, style, style_patch, text, textarea,
-        theme_context, theme_provider, transparent, ui, view,
+        TextSelectionChange, TextSelectionState, TextValueEvent, TextWrap, TextareaProps,
+        ThemeProviderProps, column, dialog, display_width, fit, fit_right, frame, heading, input,
+        menu, pane, popover, portal, progress_bar, raw_input, row, scroll_area, split, style,
+        style_patch, text, textarea, theme_context, theme_provider, transparent, ui, view,
     };
     #[cfg(feature = "markdown")]
     pub use crate::{MarkdownProps, markdown};
@@ -113,20 +118,22 @@ pub mod widgets {
     pub use crate::{MarkdownProps, markdown};
     pub use crate::{
         alert, badge, blockquote, button, canvas, card, center, checkbox, code, column, container,
-        divider, empty, footer, fragment, heading, input, kbd, label, link, muted, paragraph,
-        progress_bar, radio, raw_input, row, scroll_area, section, selection_area, skeleton,
-        spacer, spinner, switch, text, textarea, view,
+        dialog, divider, empty, footer, fragment, frame, heading, input, kbd, label, link, menu,
+        muted, pane, paragraph, popover, portal, progress_bar, radio, raw_input, row, scroll_area,
+        section, selection_area, skeleton, spacer, spinner, split, switch, text, textarea, view,
     };
 }
+
+pub mod testing;
 
 /// Live event types, plus the raw terminal events an application can read.
 pub mod events {
     pub use crate::basic::{
-        EventHandlers, EventListener, EventPhase, FocusEvent, KeyboardEvent, PasteEvent,
-        PointerButton, PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent,
-        ScrollEvent, TerminalFocusEvent, WheelEvent,
+        EventHandlers, EventListener, EventPhase, FocusError, FocusEvent, FocusOutcome,
+        KeyboardEvent, PasteEvent, PointerButton, PointerEvent, PointerEventKind, PointerId,
+        PointerType, ResizeEvent, ScrollEvent, TerminalFocusEvent, WheelEvent,
     };
-    pub use crate::runtime::{DispatchOutcome, FocusError, FocusOutcome};
+    pub use crate::runtime::DispatchOutcome;
     pub use crossterm::event::{KeyEvent, MouseEvent};
 }
 
@@ -136,8 +143,9 @@ pub mod events {
 /// its own pipeline or frame.
 pub mod advanced {
     pub use crate::basic::DomNode;
+    pub use crate::basic::lifetime::FocusControl;
     pub use crate::data::{
-        Cell, CellEdit, CellError, Frame, ImageId, Operation, Rect, ScreenPosition, Size,
+        Cell, CellEdit, CellError, CellSlot, Frame, ImageId, Operation, Rect, ScreenPosition, Size,
     };
     pub use crate::frame_builder::{
         BuildError, CellSurfaceHandle, FrameBuilder, RasterSurfaceHandle, SurfaceHandle,

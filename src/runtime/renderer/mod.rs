@@ -507,6 +507,15 @@ impl Renderer {
         self.viewport
     }
 
+    /// The cells of the most recently composed frame.
+    ///
+    /// This is a testing surface; production code consumes the encoded diff
+    /// instead.
+    #[doc(hidden)]
+    pub fn presented_cells(&self) -> &[crate::data::CellSlot] {
+        &self.last
+    }
+
     fn raster_node(
         &self,
         raster: RasterPlacement,

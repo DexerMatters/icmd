@@ -27,22 +27,25 @@ pub use context::{
 };
 pub use dom::{DomId, DomNode};
 pub use element_ref::{
-    ElementRect, ElementRef, ElementScrollState, ElementSnapshot, ResolvedBorderStyle,
-    ResolvedElementStyle, ResolvedTextStyle,
+    ElementObserver, ElementRect, ElementRef, ElementScrollState, ElementSnapshot,
+    ResolvedBorderStyle, ResolvedElementStyle, ResolvedTextStyle,
 };
 pub use events::{
-    EventHandlers, EventListener, EventPhase, FocusEvent, KeyboardEvent, PasteEvent, PointerButton,
-    PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent, ScrollEvent,
-    TerminalFocusEvent, WheelEvent,
+    EventHandlers, EventListener, EventPhase, FocusError, FocusEvent, FocusOutcome, KeyboardEvent,
+    PasteEvent, PointerButton, PointerEvent, PointerEventKind, PointerId, PointerType, ResizeEvent,
+    ScrollEvent, TerminalFocusEvent, WheelEvent,
 };
-pub use lifetime::AppHandle;
+pub use lifetime::{AppHandle, FrameClock};
 pub use props::{
     Align, Attributes, AxisPosition, BackgroundBlend, BorderKind, BorderStyle, Dimension, DomProps,
     Edges, Fill, FillError, Glyph, GlyphRamp, Justify, Layout, Overflow, Percent, PercentBasis,
-    Point, ProgressBarStyle, Props, ScrollAxes, ScrollDelta, ScrollOffset, ScrollbarGlyph,
-    ScrollbarStyle, ScrollbarVisibility, Style, StylePatch, TextStyle, Visibility, style,
-    style_patch, transparent,
+    Point, PointerEvents, ProgressBarStyle, Props, ScrollAxes, ScrollDelta, ScrollOffset,
+    ScrollbarGlyph, ScrollbarStyle, ScrollbarVisibility, Style, StylePatch, TextStyle, Visibility,
+    style, style_patch, transparent,
 };
-pub use text::{Span, Text, TextAlign, TextOverflow, TextWrap};
+pub use text::{
+    Span, Text, TextAlign, TextOverflow, TextWrap, display_width, display_width_with, fit,
+    fit_right,
+};
 #[doc(hidden)]
 pub use text_layout::{TextLayoutForTest, indexed_layout_for_test};

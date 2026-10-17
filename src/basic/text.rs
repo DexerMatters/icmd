@@ -2,12 +2,111 @@
 //! Owns the `Text` node payload and `Span`, plus the `TextWrap`, `TextAlign`,
 //! and `TextOverflow` keyword enums.
 
-use std::{fmt, sync::Arc};
+use std::{borrow::Cow, fmt, sync::Arc};
 
 use crossterm::style::Color;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::editor_surface::{EditorSurface, LayoutProbe};
 use super::props::{Style, TextStyle};
+
+/// The display width of `text` in terminal cells, using the default merged
+/// emoji policy.
+///
+/// Newlines and tabs are layout directives rather than painted cells and count
+/// as zero here; control graphemes count as zero as well.
+pub fn display_width(text: &str) -> usize {
+    display_width_with(text, crate::EmojiMerging::Merge)
+}
+
+/// The display width of `text` under an explicit emoji-merging policy.
+pub fn display_width_with(text: &str, merging: crate::EmojiMerging) -> usize {
+    if merging.merges() {
+        return text
+            .graphemes(true)
+            .filter(|grapheme| {
+                *grapheme != "\n" && *grapheme != "\t" && !grapheme.chars().any(char::is_control)
+            })
+            .map(UnicodeWidthStr::width)
+            .sum();
+    }
+    crate::data::display_units(text, merging)
+        .into_iter()
+        .map(|range| UnicodeWidthStr::width(&text[range]))
+        .sum()
+}
+
+/// Truncates `text` to at most `width` cells, keeping the head and adding an
+/// ellipsis when anything was dropped.
+///
+/// The returned borrowed slice is unchanged when it already fits. A wide
+/// grapheme that would cross the budget is dropped rather than split.
+pub fn fit(text: &str, width: usize) -> Cow<'_, str> {
+    let budget = width;
+    if display_width(text) <= budget {
+        return Cow::Borrowed(text);
+    }
+    if budget == 0 {
+        return Cow::Borrowed("");
+    }
+    if budget == 1 {
+        return Cow::Borrowed("…");
+    }
+    let mut used = 0usize;
+    let mut end = 0usize;
+    for (index, grapheme) in text.grapheme_indices(true) {
+        let cell_width = grapheme_width(grapheme);
+        if used.saturating_add(cell_width) > budget.saturating_sub(1) {
+            break;
+        }
+        used = used.saturating_add(cell_width);
+        end = index + grapheme.len();
+    }
+    let mut out = String::with_capacity(end + 3);
+    out.push_str(&text[..end]);
+    out.push('…');
+    Cow::Owned(out)
+}
+
+/// Truncates `text` from the start, keeping the tail and prefixing an ellipsis.
+///
+/// This is the right-aligned counterpart to [`fit`], useful for numeric or
+/// path columns.
+pub fn fit_right(text: &str, width: usize) -> Cow<'_, str> {
+    let budget = width;
+    if display_width(text) <= budget {
+        return Cow::Borrowed(text);
+    }
+    if budget == 0 {
+        return Cow::Borrowed("");
+    }
+    if budget == 1 {
+        return Cow::Borrowed("…");
+    }
+    let mut used = 0usize;
+    let mut start = text.len();
+    for (index, grapheme) in text.grapheme_indices(true).rev() {
+        let cell_width = grapheme_width(grapheme);
+        if used.saturating_add(cell_width) > budget.saturating_sub(1) {
+            break;
+        }
+        used = used.saturating_add(cell_width);
+        start = index;
+    }
+    let mut out = String::with_capacity(text.len().saturating_sub(start) + 3);
+    out.push('…');
+    out.push_str(&text[start..]);
+    Cow::Owned(out)
+}
+
+fn grapheme_width(grapheme: &str) -> usize {
+    if grapheme == "\n" || grapheme == "\t" || grapheme.chars().any(char::is_control) {
+        0
+    } else {
+        UnicodeWidthStr::width(grapheme)
+    }
+}
 
 /// How overflowing text is wrapped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

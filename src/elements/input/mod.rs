@@ -39,11 +39,70 @@ pub struct TextClipboardEvent {
     pub text: String,
 }
 
+/// A caret or selection state in document byte offsets.
+///
+/// `anchor` is the fixed end and `cursor` the active end; equal values are a
+/// collapsed caret. Offsets are byte offsets into the normalized value and are
+/// clamped to a grapheme boundary by the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct TextSelectionState {
+    /// Fixed end of the selection.
+    pub anchor: usize,
+    /// Active end of the selection.
+    pub cursor: usize,
+}
+
+impl TextSelectionState {
+    /// A collapsed selection at `offset`.
+    pub const fn at(offset: usize) -> Self {
+        Self {
+            anchor: offset,
+            cursor: offset,
+        }
+    }
+
+    /// A selection with distinct ends.
+    pub const fn between(anchor: usize, cursor: usize) -> Self {
+        Self { anchor, cursor }
+    }
+
+    /// Whether both ends sit on the same offset.
+    pub const fn is_collapsed(self) -> bool {
+        self.anchor == self.cursor
+    }
+
+    /// The two ends ordered as `(start, end)`.
+    pub fn range(self) -> (usize, usize) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+}
+
+/// A caret or selection change reported by a text control.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSelectionChange {
+    /// Selection after the change.
+    pub selection: TextSelectionState,
+    /// The control's full text after the change.
+    pub text: String,
+}
+
 /// Configuration for [`input`].
 #[derive(Clone, Default)]
 pub struct InputProps {
     /// Controlled value; when set, the control renders it and requests changes
     /// instead of mutating itself.
+    ///
+    /// While a draft is open, an echo of the draft accepts it and keeps the
+    /// draft caret; an earlier emission is treated as the owner catching up;
+    /// a repeated value already rendered is a stale frame and keeps the draft;
+    /// any value outside that recent history replaces the text and clamps the
+    /// caret. A rejection is therefore a distinct new value, not a repaint of
+    /// the old one. Use `use_live_state` when the owner must update
+    /// synchronously.
     pub value: Attr<String>,
     /// Initial value for an uncontrolled control.
     pub default_value: Attr<String>,
@@ -64,6 +123,11 @@ pub struct InputProps {
     pub on_submit: Attr<EventListener<TextValueEvent>>,
     /// Listener for copy and cut operations answered by the control.
     pub on_clipboard: Attr<EventListener<TextClipboardEvent>>,
+    /// Controlled caret or selection. When set, it is authoritative after
+    /// every render; leave it unset to let the editor own the caret.
+    pub selection: Attr<TextSelectionState>,
+    /// Listener invoked whenever the editor changes the caret or selection.
+    pub on_selection_change: Attr<EventListener<TextSelectionChange>>,
 }
 
 impl std::fmt::Debug for InputProps {
@@ -104,6 +168,11 @@ pub struct TextareaProps {
     pub on_change: Attr<EventListener<TextValueEvent>>,
     /// Listener for copy and cut operations answered by the control.
     pub on_clipboard: Attr<EventListener<TextClipboardEvent>>,
+    /// Controlled caret or selection. When set, it is authoritative after
+    /// every render; leave it unset to let the editor own the caret.
+    pub selection: Attr<TextSelectionState>,
+    /// Listener invoked whenever the editor changes the caret or selection.
+    pub on_selection_change: Attr<EventListener<TextSelectionChange>>,
 }
 
 impl std::fmt::Debug for TextareaProps {
@@ -142,6 +211,10 @@ struct EditorHost {
     on_change: Attr<EventListener<TextValueEvent>>,
     /// Clipboard listener forwarded to the raw input.
     on_clipboard: Attr<EventListener<TextClipboardEvent>>,
+    /// Controlled selection forwarded to the raw input.
+    selection: Attr<TextSelectionState>,
+    /// Selection-change listener forwarded to the raw input.
+    on_selection_change: Attr<EventListener<TextSelectionChange>>,
 }
 
 /// Per-control policy that selects the raw input mode and its extra wiring.
@@ -197,6 +270,8 @@ fn editor_host(
         on_change: host.on_change,
         on_submit,
         on_clipboard: host.on_clipboard,
+        selection: host.selection,
+        on_selection_change: host.on_selection_change,
     };
     let mut props = Props::new(raw);
     props.dom = dom;
@@ -218,6 +293,8 @@ pub fn input(cx: &mut ComponentContext, props: &Props<InputProps>) -> Node {
             autofocus: props.autofocus,
             on_change: props.on_change.clone(),
             on_clipboard: props.on_clipboard.clone(),
+            selection: props.selection,
+            on_selection_change: props.on_selection_change.clone(),
         },
         EditorMode::SingleLine {
             on_submit: props.on_submit.clone(),
@@ -240,6 +317,8 @@ pub fn textarea(cx: &mut ComponentContext, props: &Props<TextareaProps>) -> Node
             autofocus: props.autofocus,
             on_change: props.on_change.clone(),
             on_clipboard: props.on_clipboard.clone(),
+            selection: props.selection,
+            on_selection_change: props.on_selection_change.clone(),
         },
         EditorMode::Multiline { wrap: props.wrap },
     )

@@ -14,7 +14,7 @@ use std::{
 
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::{ScreenPosition, Size};
+use crate::{DomId, ScreenPosition, Size};
 
 use super::{
     common::Attr,
@@ -352,6 +352,39 @@ pub struct ScrollEvent {
     pub delta: ScrollDelta,
 }
 
+/// Result of an accepted focus request: the number of focus listeners that
+/// observed the transition and the region that now owns focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusOutcome {
+    /// Count of focus listeners that observed the transition.
+    pub delivered: usize,
+    /// DOM id of the region that now owns focus.
+    pub focused: DomId,
+}
+
+/// Reason a programmatic focus request was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusError {
+    /// No published region carries the requested DOM id.
+    UnknownTarget(DomId),
+    /// The region with this DOM id exists but is not focusable.
+    NotFocusable(DomId),
+    /// The region with this DOM id already owns focus.
+    AlreadyFocused(DomId),
+}
+
+impl std::fmt::Display for FocusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownTarget(id) => write!(f, "no region with id {id}"),
+            Self::NotFocusable(id) => write!(f, "region {id} is not focusable"),
+            Self::AlreadyFocused(id) => write!(f, "region {id} already owns focus"),
+        }
+    }
+}
+
+impl std::error::Error for FocusError {}
+
 /// A key press, repeat, or release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyboardEvent {
@@ -496,6 +529,8 @@ pub struct EventHandlers {
     pub pointer_down_capture: Attr<EventListener<PointerEvent>>,
     /// Capture-phase pointer release.
     pub pointer_up_capture: Attr<EventListener<PointerEvent>>,
+    /// Capture-phase pointer cancellation.
+    pub pointer_cancel_capture: Attr<EventListener<PointerEvent>>,
     /// Capture-phase click.
     pub click_capture: Attr<EventListener<PointerEvent>>,
     /// Capture-phase key press.
@@ -537,6 +572,17 @@ pub struct EventHandlers {
     /// Targeted, bubbling keyboard hook. It only receives a key when this region
     /// is on the focused target's route.
     pub keyboard_event: Attr<EventListener<KeyboardEvent>>,
+    /// Application-global pointer hook. It receives a pointer event that no
+    /// target or ancestor consumed, regardless of where the pointer hit, which
+    /// is what a menu needs to dismiss itself on an outside press.
+    pub app_pointer: Attr<EventListener<PointerEvent>>,
+    /// Application-global capture-phase pointer hook. It runs before the
+    /// ordinary capture route, in reverse paint order, so the topmost overlay
+    /// can claim a press before the widget under it.
+    pub app_pointer_capture: Attr<EventListener<PointerEvent>>,
+    /// Application-global wheel hook. It receives an unconsumed wheel event,
+    /// regardless of where the pointer hit.
+    pub app_wheel: Attr<EventListener<WheelEvent>>,
     /// Application-global keyboard hook. Unlike [`EventHandlers::keyboard_event`]
     /// it is not a focused target: it receives a key that no focused widget
     /// consumed, which is what application shortcuts need. It is a press hook:
@@ -566,6 +612,7 @@ impl EventHandlers {
         merge!(
             pointer_down_capture,
             pointer_up_capture,
+            pointer_cancel_capture,
             click_capture,
             key_down_capture,
             key_up_capture,
@@ -587,6 +634,9 @@ impl EventHandlers {
             key_up,
             keyboard_event,
             app_key,
+            app_pointer,
+            app_pointer_capture,
+            app_wheel,
             resize_event,
             focus_event,
             terminal_focus,

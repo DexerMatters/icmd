@@ -377,6 +377,10 @@ impl Commit {
                             .unwrap_or(u32::MAX),
                         content_height: u32::try_from(scroll_layout.extent.1.max(0))
                             .unwrap_or(u32::MAX),
+                        viewport_width: u32::try_from(content.width.max(0)).unwrap_or(u32::MAX),
+                        viewport_height: u32::try_from(content.height.max(0)).unwrap_or(u32::MAX),
+                        scrollbar_width: u32::from(scroll_layout.bar_vertical),
+                        scrollbar_height: u32::from(scroll_layout.bar_horizontal),
                     });
                     let snapshot = ElementSnapshot::new(
                         *id,
@@ -397,6 +401,17 @@ impl Commit {
                 }
                 let vertical_metrics = scroll_layout.vertical_metrics(offset);
                 let horizontal_metrics = scroll_layout.horizontal_metrics(offset);
+                let overlay = spec.as_ref().is_some_and(|spec| spec.overlay);
+                let bar_column = if overlay {
+                    content.right().saturating_sub(1)
+                } else {
+                    content.right()
+                };
+                let bar_line = if overlay {
+                    content.bottom().saturating_sub(1)
+                } else {
+                    content.bottom()
+                };
                 let scroll_region = spec.as_ref().map(|spec| ScrollRegion {
                     max_x,
                     max_y,
@@ -408,12 +423,10 @@ impl Commit {
                     enable_mouse: spec.enable_mouse,
                     enable_keyboard: spec.enable_keyboard,
                     controlled: spec.controlled,
-                    vertical_bar: vertical_metrics.map(|metrics| {
-                        scrollbar_region(content.line, content.right(), metrics, true)
-                    }),
-                    horizontal_bar: horizontal_metrics.map(|metrics| {
-                        scrollbar_region(content.bottom(), content.column, metrics, false)
-                    }),
+                    vertical_bar: vertical_metrics
+                        .map(|metrics| scrollbar_region(content.line, bar_column, metrics, true)),
+                    horizontal_bar: horizontal_metrics
+                        .map(|metrics| scrollbar_region(bar_line, content.column, metrics, false)),
                 });
 
                 if style.visibility == crate::Visibility::Visible
@@ -438,6 +451,7 @@ impl Commit {
                         origin: ScreenPosition::new(origin_line, origin_column),
                         level: paint_level,
                         order: *event_order,
+                        pointer_events: style.pointer_events,
                         handlers: props.events.clone(),
                         scroll: scroll_region,
                     });
@@ -506,6 +520,7 @@ impl Commit {
                         scene,
                         *id,
                         content,
+                        spec.overlay,
                         vertical_metrics,
                         horizontal_metrics,
                         spec.scrollbar,
@@ -665,6 +680,7 @@ impl Commit {
         scene: &mut HashMap<PaintKey, PaintFragment>,
         node: DomId,
         content: RectI,
+        overlay: bool,
         vertical_metrics: Option<ScrollbarMetrics>,
         horizontal_metrics: Option<ScrollbarMetrics>,
         scrollbar: &ScrollbarStyle,
@@ -675,6 +691,16 @@ impl Commit {
         order: &mut u64,
     ) {
         let background = backdrop.unwrap_or(Color::Reset);
+        let bar_column = if overlay {
+            content.right().saturating_sub(1)
+        } else {
+            content.right()
+        };
+        let bar_line = if overlay {
+            content.bottom().saturating_sub(1)
+        } else {
+            content.bottom()
+        };
         if let Some(metrics) = vertical_metrics {
             if let Some(image) = scrollbar_image(
                 metrics,
@@ -692,7 +718,7 @@ impl Commit {
                         role: PaintRole::ScrollbarVertical,
                     },
                     image,
-                    RectI::new(content.line, content.right(), 1, content.height),
+                    RectI::new(content.line, bar_column, 1, content.height),
                     level.saturating_add(1),
                     *order,
                     clip,
@@ -717,7 +743,7 @@ impl Commit {
                         role: PaintRole::ScrollbarHorizontal,
                     },
                     image,
-                    RectI::new(content.bottom(), content.column, content.width, 1),
+                    RectI::new(bar_line, content.column, content.width, 1),
                     level.saturating_add(1),
                     *order,
                     clip,
@@ -736,7 +762,7 @@ impl Commit {
                         role: PaintRole::ScrollbarCorner,
                     },
                     image,
-                    RectI::new(content.bottom(), content.right(), 1, 1),
+                    RectI::new(bar_line, bar_column, 1, 1),
                     level.saturating_add(1),
                     *order,
                     clip,

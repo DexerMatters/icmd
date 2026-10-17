@@ -621,26 +621,40 @@ fn controlled_rejection_clamps_the_selection_into_the_owner_value() {
 }
 
 #[test]
-fn controlled_rejection_is_deterministic_per_render() {
-    // The owner ignores every change, so each render republishes "a". The
-    // first keystroke produces "ab"; the next render rejects it back to "a"
-    // and clamps the caret to the end of "a". The following keystroke must
-    // therefore produce "ac", not resurrect the rejected "ab".
+fn a_repeated_owner_value_is_stale_and_keeps_the_draft() {
+    // A frame composed before the edit can carry the old authoritative value.
+    // Re-reading "a" while the draft is "ab" is indistinguishable from a
+    // rejection, so the editor treats it as stale and keeps the optimistic
+    // text and caret.
     let mut model = controlled("a", false);
     let mut emitted = Vec::new();
     for ch in ["b", "c"] {
         if let Some(value) = insert(&mut model, ch, false).value {
             emitted.push(value);
         }
-        // The owner rejects: it republishes its own authoritative value.
         model.render(Some("a"), None, false, EmojiMerging::Merge);
-        assert_eq!(model.value(), "a", "rejection must restore the owner value");
+        assert_eq!(
+            model.value(),
+            if emitted.len() == 1 { "ab" } else { "abc" },
+            "a repeated owner value must not revert the draft"
+        );
     }
     assert_eq!(
         emitted,
-        vec!["ab".to_string(), "ac".to_string()],
-        "a rejected draft must not survive into the next keystroke"
+        vec!["ab".to_string(), "abc".to_string()],
+        "each keystroke must extend the optimistic draft"
     );
+}
+
+#[test]
+fn a_distinct_owner_value_rejects_and_editing_continues_from_it() {
+    let mut model = controlled("a", false);
+    assert_eq!(insert(&mut model, "b", false).value.as_deref(), Some("ab"));
+    // A distinct owner value is an explicit replacement, not a stale frame.
+    model.render(Some("x"), None, false, EmojiMerging::Merge);
+    assert_eq!(model.value(), "x");
+    assert_eq!(model.caret().cursor, 1);
+    assert_eq!(insert(&mut model, "c", false).value.as_deref(), Some("xc"));
 }
 
 #[test]

@@ -19,38 +19,7 @@ use crate::{
 use super::commit::ViewportSetter;
 use super::commit::layout::ScrollbarMetrics;
 
-/// Result of an accepted focus request: the number of focus listeners that
-/// observed the transition and the region that now owns focus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FocusOutcome {
-    /// Count of focus listeners that observed the transition.
-    pub delivered: usize,
-    /// DOM id of the region that now owns focus.
-    pub focused: DomId,
-}
-
-/// Reason a programmatic focus request was rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusError {
-    /// No published region carries the requested DOM id.
-    UnknownTarget(DomId),
-    /// The region with this DOM id exists but is not focusable.
-    NotFocusable(DomId),
-    /// The region with this DOM id already owns focus.
-    AlreadyFocused(DomId),
-}
-
-impl std::fmt::Display for FocusError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownTarget(id) => write!(f, "no region with id {id}"),
-            Self::NotFocusable(id) => write!(f, "region {id} is not focusable"),
-            Self::AlreadyFocused(id) => write!(f, "region {id} already owns focus"),
-        }
-    }
-}
-
-impl std::error::Error for FocusError {}
+pub use crate::basic::events::{FocusError, FocusOutcome};
 
 /// Observable result of one dispatch, replacing a bare delivery count with
 /// explicit propagation, default-action, and redraw signals a caller can act on.
@@ -113,6 +82,7 @@ pub(crate) struct EventRegion {
     pub(crate) origin: ScreenPosition,
     pub(crate) level: i32,
     pub(crate) order: u64,
+    pub(crate) pointer_events: crate::PointerEvents,
     pub(crate) handlers: EventHandlers,
     pub(crate) scroll: Option<ScrollRegion>,
 }
@@ -281,6 +251,16 @@ impl EventDispatcher {
         self.scroll_offsets.clone()
     }
 
+    /// The viewport size the commit stage last committed.
+    pub fn viewport(&self) -> Size {
+        self.viewport.viewport()
+    }
+
+    /// Requests one repaint of the current DOM without rerendering components.
+    pub fn request_redraw(&self) {
+        self.viewport.request_redraw();
+    }
+
     /// Publishes the committed frame's regions and resolves the focus requests
     /// the paint pass issued.
     ///
@@ -415,6 +395,32 @@ impl EventDispatcher {
         if let Some(listener) = gained_focus {
             listener.call(FocusEvent::Gained);
         }
+    }
+}
+
+impl crate::basic::lifetime::FocusControl for EventDispatcher {
+    fn viewport(&self) -> Size {
+        self.viewport.viewport()
+    }
+
+    fn request_redraw(&self) {
+        self.viewport.request_redraw();
+    }
+
+    fn focus(&self, id: DomId) -> bool {
+        self.focus(id)
+    }
+
+    fn try_focus(&self, id: DomId) -> Result<FocusOutcome, FocusError> {
+        self.try_focus(id)
+    }
+
+    fn focused(&self) -> Option<DomId> {
+        self.focused()
+    }
+
+    fn blur(&self) -> bool {
+        self.blur()
     }
 }
 

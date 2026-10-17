@@ -524,6 +524,9 @@ pub(super) fn api_map(cx: &mut ComponentContext, props: &Props<ChapterProps>) ->
                 ApiRow { name: "icmd::widgets", purpose: "every built-in widget constructor", defaults: "one flat namespace", events: "none" },
                 ApiRow { name: "icmd::events", purpose: "live event types plus raw terminal events", defaults: "none", events: "all families" },
                 ApiRow { name: "icmd::advanced", purpose: "pipeline protocol and runtime ownership", defaults: "for custom pipelines only", events: "none" },
+                ApiRow { name: "icmd::testing", purpose: "headless harness, painted screen, gestures", defaults: "Harness::new(viewport)", events: "press, click, drag, wheel, tick" },
+                ApiRow { name: "FrameClock", purpose: "post-frame callback with pause/resume", defaults: "active, 16 ms interval", events: "pause, resume, interval" },
+                ApiRow { name: "ScrollController", purpose: "live scroll offset and reveal helpers", defaults: "use_scroll_controller", events: "scroll_to, reveal" },
             ])}
         },
     );

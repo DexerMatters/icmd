@@ -7,7 +7,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt, mem,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -15,7 +18,7 @@ use slotmap::SlotMap;
 
 use super::limits::{ConfigError, ResourceLimits};
 use super::pipeline::RuntimeError;
-use crate::basic::hooks::{FiberId, HookSlot, UpdateQueue};
+use crate::basic::hooks::{FiberId, HookSlot, StateUpdate, UpdateQueue};
 use crate::basic::{
     AppHandle, DomId, DomNode, DomProps, Key, Node,
     common::{NodeKind, RenderFn},
@@ -157,6 +160,9 @@ pub struct Lower {
     updates: UpdateQueue,
     wake_tx: Sender<()>,
     wake_rx: Receiver<()>,
+    /// Set by `AppHandle::request_frame`; the next wake rerenders every
+    /// mounted component instead of only the dirty ones.
+    rerender_all: Arc<AtomicBool>,
     /// Fibers whose effects are pending, recorded post-order so
     /// `commit_effects` runs mount and update bodies child-first.
     effect_fibers: Vec<FiberId>,
@@ -222,6 +228,7 @@ impl Lower {
             updates: Arc::new(Mutex::new(VecDeque::new())),
             wake_tx,
             wake_rx,
+            rerender_all: Arc::new(AtomicBool::new(false)),
             effect_fibers: Vec::new(),
             handle: AppHandle::default(),
         }
@@ -231,6 +238,10 @@ impl Lower {
     /// `cx.use_handle()`, so a pipeline owning its own loop can watch the same
     /// handle and stop when the application requests an exit.
     pub fn with_handle(mut self, handle: AppHandle) -> Self {
+        handle.attach_frame_waker(crate::basic::lifetime::FrameWaker {
+            wake: self.wake_tx.clone(),
+            rerender_all: self.rerender_all.clone(),
+        });
         self.handle = handle;
         self
     }
@@ -254,6 +265,7 @@ impl Lower {
             detail: error.to_string(),
         })?;
         let _ = self.apply_updates();
+        self.rerender_all.store(false, Ordering::SeqCst);
         validate_tree(&node, &self.limits)?;
         self.pending_error = None;
         self.mounted = true;
@@ -263,6 +275,16 @@ impl Lower {
         }
         self.commit_effects();
         Ok(self.root_dom())
+    }
+
+    /// Every mounted component fiber, used by an explicit full rerender.
+    fn all_component_fibers(&self) -> Vec<FiberId> {
+        self.fibers
+            .iter()
+            .filter_map(|(fiber, value)| {
+                matches!(value.kind, FiberKind::Function { .. }).then_some(fiber)
+            })
+            .collect()
     }
 
     fn rerender(&mut self, dirty: Vec<FiberId>) -> Result<DomNode, LowerError> {
@@ -311,7 +333,9 @@ impl Lower {
             .first()
             .copied()
             .expect("root node was not mounted");
-        let mut roots = self.build_dom(root);
+        let mut portals = Vec::new();
+        let mut roots = self.build_dom(root, &mut portals);
+        roots.extend(portals);
         match roots.len() {
             1 => roots.pop().expect("root DOM node disappeared"),
             _ => DomNode::Element {
@@ -322,27 +346,35 @@ impl Lower {
         }
     }
 
-    fn build_dom(&self, fiber: FiberId) -> Vec<DomNode> {
+    fn build_dom(&self, fiber: FiberId, portals: &mut Vec<DomNode>) -> Vec<DomNode> {
         let current = &self.fibers[fiber];
         match &current.kind {
-            FiberKind::Element { id, props } => vec![DomNode::Element {
-                id: *id,
-                props: (**props).clone(),
-                children: current
-                    .children
-                    .iter()
-                    .flat_map(|child| self.build_dom(*child))
-                    .collect(),
-            }],
+            FiberKind::Element { id, props } => {
+                let node = DomNode::Element {
+                    id: *id,
+                    props: (**props).clone(),
+                    children: current
+                        .children
+                        .iter()
+                        .flat_map(|child| self.build_dom(*child, portals))
+                        .collect(),
+                };
+                if props.portal {
+                    portals.push(node);
+                    Vec::new()
+                } else {
+                    vec![node]
+                }
+            }
             FiberKind::Function { .. } => current
                 .children
                 .iter()
-                .flat_map(|child| self.build_dom(*child))
+                .flat_map(|child| self.build_dom(*child, portals))
                 .collect(),
             FiberKind::Provider { .. } => current
                 .children
                 .iter()
-                .flat_map(|child| self.build_dom(*child))
+                .flat_map(|child| self.build_dom(*child, portals))
                 .collect(),
             FiberKind::Image { id, image } => vec![DomNode::Image {
                 id: *id,
@@ -359,7 +391,7 @@ impl Lower {
             FiberKind::Fragment => current
                 .children
                 .iter()
-                .flat_map(|child| self.build_dom(*child))
+                .flat_map(|child| self.build_dom(*child, portals))
                 .collect(),
             FiberKind::Root => Vec::new(),
         }
@@ -373,14 +405,23 @@ impl Lower {
         };
         let mut applied = Vec::new();
         for update in updates {
-            let Some(fiber) = self.fibers.get_mut(update.fiber) else {
-                continue;
-            };
-            let Some(HookSlot::State(state)) = fiber.hooks.get_mut(update.hook) else {
-                continue;
-            };
-            (update.apply)(state.as_mut());
-            applied.push(update.fiber);
+            match update {
+                StateUpdate::Apply { fiber, hook, apply } => {
+                    let Some(fiber_ref) = self.fibers.get_mut(fiber) else {
+                        continue;
+                    };
+                    let Some(HookSlot::State(state)) = fiber_ref.hooks.get_mut(hook) else {
+                        continue;
+                    };
+                    apply(state.as_mut());
+                    applied.push(fiber);
+                }
+                StateUpdate::Touch { fiber } => {
+                    if self.fibers.get(fiber).is_some() {
+                        applied.push(fiber);
+                    }
+                }
+            }
         }
         applied
     }
@@ -758,7 +799,11 @@ impl super::pipeline::PipelineComponent for Lower {
                     }
                 }
                 recv(wake) -> _ => {
-                    let dirty = self.apply_updates();
+                    let rerender_all = self.rerender_all.swap(false, Ordering::SeqCst);
+                    let mut dirty = self.apply_updates();
+                    if rerender_all && self.mounted {
+                        dirty.extend(self.all_component_fibers());
+                    }
                     if !dirty.is_empty() && self.mounted {
                         match self.rerender(dirty) {
                             Ok(dom) => {

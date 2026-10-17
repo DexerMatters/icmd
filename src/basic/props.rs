@@ -17,7 +17,10 @@ use crate::{Node, data::MAX_GLYPH_BYTES};
 use super::{
     common::Attr,
     element_ref::{ElementRef, ElementSnapshot},
-    events::{EventHandlers, EventListener},
+    events::{
+        EventHandlers, EventListener, FocusEvent, KeyboardEvent, PasteEvent, PointerEvent,
+        ResizeEvent, ScrollEvent, TerminalFocusEvent, WheelEvent,
+    },
     text::Text,
 };
 
@@ -89,6 +92,18 @@ impl Percent {
     }
 }
 
+/// Whether a painted box participates in pointer hit testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PointerEvents {
+    /// The box is a hit target and can take focus on press.
+    #[default]
+    Auto,
+    /// The box paints and lays out normally but is invisible to the pointer;
+    /// its children can still be targets. Used by portal hosts and scrim-free
+    /// overlay layers.
+    None,
+}
+
 /// A size request along one axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Dimension {
@@ -99,8 +114,13 @@ pub enum Dimension {
     Cells(u16),
     /// Fraction of the available space or viewport.
     Percent(Percent),
-    /// Expand to fill the remaining space.
+    /// Expand to fill the remaining space, splitting it equally with other
+    /// `Max` and `Grow` siblings.
     Max,
+    /// Take a weighted share of the remaining main-axis space. `Max` behaves
+    /// like `Grow(1)`; weight zero receives no share. `Grow` stays sensitive
+    /// to the parent's main axis and follows `Max` on the cross axis.
+    Grow(u16),
 }
 
 /// A position request along one axis.
@@ -203,6 +223,9 @@ pub enum ScrollbarVisibility {
     Always,
     /// Never show.
     Hidden,
+    /// Draw the bar over the content's last row/column without reserving
+    /// layout space.
+    Overlay,
 }
 
 /// A scroll position, in terminal cells.
@@ -821,8 +844,21 @@ pub struct Style {
     /// Whether the box occupies layout space and paints.
     pub visibility: Attr<Visibility>,
     /// Paint order offset; higher values paint later.
+    ///
+    /// The effective level is the parent's level plus this value. Paint and hit
+    /// testing sort by `(level, order)`, where `order` is pre-order paint
+    /// order. Portals are hoisted to the root and default to level 1000, so an
+    /// overlay outranks ordinary content but later portals still stack above
+    /// earlier ones at the same level.
     pub z_index: Attr<i32>,
+    /// Whether the box participates in pointer hit testing; defaults to
+    /// [`PointerEvents::Auto`].
+    pub pointer_events: Attr<PointerEvents>,
     /// Background color.
+    ///
+    /// `Color::Reset` paints the terminal's own default background; it is an
+    /// opaque color choice, not transparency. Use [`transparent`] with
+    /// [`BackgroundBlend::Blend`] when lower layers must show through.
     pub background: Attr<Color>,
     /// How the background composites with the layers below; defaults to
     /// [`BackgroundBlend::Cover`].
@@ -830,6 +866,10 @@ pub struct Style {
     /// Glyph used to fill background cells.
     pub fill: Attr<Fill>,
     /// Border configuration.
+    ///
+    /// The border is the outer box edge; padding is applied inside it. Content
+    /// geometry is the border box minus border insets and then padding, in that
+    /// order.
     pub border: BorderStyle,
     /// Text styling.
     pub text: TextStyle,
@@ -892,7 +932,59 @@ impl TextStyle {
     }
 }
 
+/// Generates one chainable setter per style field.
+macro_rules! style_setters {
+    ($($name:ident: $ty:ty),* $(,)?) => {
+        $(
+            /// Sets this style field and returns the style.
+            pub fn $name(mut self, value: $ty) -> Self {
+                self.$name = Attr::Set(value);
+                self
+            }
+        )*
+    };
+}
+
 impl Style {
+    /// A style with every field unset.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    style_setters! {
+        layout: Layout,
+        width: Dimension,
+        height: Dimension,
+        line: AxisPosition,
+        column: AxisPosition,
+        margin: Edges<u16>,
+        padding: Edges<u16>,
+        gap: u16,
+        justify: Justify,
+        align: Align,
+        overflow: Overflow,
+        overflow_x: Overflow,
+        overflow_y: Overflow,
+        visibility: Visibility,
+        z_index: i32,
+        pointer_events: PointerEvents,
+        background: Color,
+        background_blend: BackgroundBlend,
+        fill: Fill,
+    }
+
+    /// Replaces the border token.
+    pub fn border(mut self, value: BorderStyle) -> Self {
+        self.border = value;
+        self
+    }
+
+    /// Replaces the text token.
+    pub fn text(mut self, value: TextStyle) -> Self {
+        self.text = value;
+        self
+    }
+
     /// Applies `patch` to this style in place.
     pub fn patch(&mut self, patch: &StylePatch) {
         patch(self);
@@ -1070,6 +1162,9 @@ pub struct DomProps {
     pub element_ref: Attr<ElementRef>,
     /// Listener invoked after this host's committed snapshot changes.
     pub element_change: Attr<EventListener<Option<ElementSnapshot>>>,
+    /// Internal portal marker: the lowerer hoists this subtree to the paint
+    /// root. Set by the `portal` component, never merged from callers.
+    pub(crate) portal: bool,
     pub(crate) scroll: Option<Box<ScrollConfig>>,
     /// Present only on a selectable region's host node; the paint pass carries it
     /// down the subtree, so the text leaves below become selectable.
@@ -1089,6 +1184,19 @@ pub(crate) struct ScrollConfig {
     pub(crate) scrollbar: ScrollbarStyle,
 }
 
+/// Generates one chainable `DomProps` setter per event-handler slot.
+macro_rules! event_setters {
+    ($($name:ident: $event:ty),* $(,)?) => {
+        $(
+            /// Replaces this event listener slot.
+            pub fn $name(mut self, listener: EventListener<$event>) -> Self {
+                self.events.$name = Attr::Set(listener);
+                self
+            }
+        )*
+    };
+}
+
 /// Construction goes through builders because `DomProps` holds a private field.
 impl DomProps {
     /// Returns these props with the node style replaced.
@@ -1101,6 +1209,49 @@ impl DomProps {
     pub fn with_events(mut self, events: EventHandlers) -> Self {
         self.events = events;
         self
+    }
+
+    /// Returns these props with one event listener slot replaced.
+    ///
+    /// These setters let generated code and plain function components attach a
+    /// listener without spelling `Attr::Set(EventListener::new(..))`.
+    pub fn event_handlers(mut self, apply: impl FnOnce(&mut EventHandlers)) -> Self {
+        apply(&mut self.events);
+        self
+    }
+
+    event_setters! {
+        pointer_down_capture: PointerEvent,
+        pointer_up_capture: PointerEvent,
+        pointer_cancel_capture: PointerEvent,
+        click_capture: PointerEvent,
+        key_down_capture: KeyboardEvent,
+        key_up_capture: KeyboardEvent,
+        wheel_capture: WheelEvent,
+        pointer_down: PointerEvent,
+        pointer_up: PointerEvent,
+        pointer_move: PointerEvent,
+        pointer_cancel: PointerEvent,
+        pointer_over: PointerEvent,
+        pointer_out: PointerEvent,
+        pointer_enter: PointerEvent,
+        pointer_leave: PointerEvent,
+        got_pointer_capture: PointerEvent,
+        lost_pointer_capture: PointerEvent,
+        click: PointerEvent,
+        wheel: WheelEvent,
+        scroll: ScrollEvent,
+        key_down: KeyboardEvent,
+        key_up: KeyboardEvent,
+        keyboard_event: KeyboardEvent,
+        app_key: KeyboardEvent,
+        app_pointer: PointerEvent,
+        app_pointer_capture: PointerEvent,
+        app_wheel: WheelEvent,
+        resize_event: ResizeEvent,
+        focus_event: FocusEvent,
+        terminal_focus: TerminalFocusEvent,
+        paste_event: PasteEvent,
     }
 
     /// Returns these props with focusability set explicitly.

@@ -17,7 +17,6 @@ pub(crate) type Cleanup = Box<dyn FnOnce() + Send>;
 pub(crate) type EffectCallback = Box<dyn FnOnce() -> Option<Cleanup> + Send>;
 pub(crate) type StateUpdateCallback = Box<dyn FnOnce(&mut (dyn Any + Send)) + Send>;
 pub(crate) type UpdateQueue = Arc<Mutex<VecDeque<StateUpdate>>>;
-
 pub(crate) enum HookSlot {
     State(Box<dyn Any + Send>),
     Ref(Box<dyn Any + Send>),
@@ -44,8 +43,14 @@ impl HookSlot {
     }
 }
 
-pub(crate) struct StateUpdate {
-    pub fiber: FiberId,
-    pub hook: usize,
-    pub apply: StateUpdateCallback,
+pub(crate) enum StateUpdate {
+    /// Apply a closure to one hook slot.
+    Apply {
+        fiber: FiberId,
+        hook: usize,
+        apply: StateUpdateCallback,
+    },
+    /// Mark one fiber dirty without changing a hook slot. Live shared state
+    /// uses this so a component reading the shared value rerenders.
+    Touch { fiber: FiberId },
 }

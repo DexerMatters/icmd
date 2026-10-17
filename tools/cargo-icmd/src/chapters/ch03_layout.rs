@@ -847,12 +847,13 @@ pub(super) fn layout_and_styling(cx: &mut ComponentContext, props: &Props<Chapte
         ui! {
             {docs::body("A size request is a promise about one axis. `Auto` asks for the content's own size, `Cells(n)` asks for a fixed number of columns or rows, `Percent(p)` asks for a fraction, and `Max` takes whatever is left after the others. Rows and columns resolve left to right, which is why a fixed request is more predictable than a chain of percentages.")}
             {docs::specimen(&theme, "fixed rail, percentage column, filling column", ui! { {sizing_demo.apply(())} })}
-            {docs::notice(&theme, "`Percent::available` is measured after fixed siblings, margins, and gaps, so percentages divide the space that is actually left. `Percent::viewport` is measured against the whole terminal instead; reserve it for overlays and full-height panels that must relate to the screen rather than to their parent.")}
+            {docs::notice(&theme, "`Percent::available` is measured after fixed siblings, margins, and gaps, so percentages divide the space that is actually left. `Percent::viewport` is measured against the whole terminal instead; reserve it for overlays and full-height panels that must relate to the screen rather than to their parent. For proportional panes, `Dimension::Grow(weight)` splits the remaining space by weight and keeps the ratio through a resize.")}
             {docs::api_strip(&theme, &[
                 ApiRow { name: "Dimension::Auto", purpose: "size to content", defaults: "the default request", events: "none" },
                 ApiRow { name: "Dimension::Cells", purpose: "fixed cells on one axis", defaults: "—", events: "none" },
                 ApiRow { name: "Dimension::Percent", purpose: "fraction of available space or viewport", defaults: "—", events: "none" },
                 ApiRow { name: "Dimension::Max", purpose: "take the remaining space", defaults: "shared equally when several", events: "none" },
+                ApiRow { name: "Dimension::Grow", purpose: "take a weighted share of remaining space", defaults: "Max is Grow(1); weight 0 gets none", events: "none" },
                 ApiRow { name: "Percent::available", purpose: "percentage of the remaining space", defaults: "PercentBasis::Available", events: "none" },
                 ApiRow { name: "Percent::viewport", purpose: "percentage of the terminal", defaults: "PercentBasis::Viewport", events: "none" },
             ])}

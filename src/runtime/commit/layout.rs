@@ -98,11 +98,13 @@ impl Commit {
         let width = match style.width {
             Dimension::Cells(v) => v as i32,
             Dimension::Percent(p) => p.resolve(self.viewport.width as i32).max(0),
+            Dimension::Grow(_) => self.viewport.width as i32,
             _ => self.viewport.width as i32,
         };
         let height = match style.height {
             Dimension::Cells(v) => v as i32,
             Dimension::Percent(p) => p.resolve(self.viewport.height as i32).max(0),
+            Dimension::Grow(_) => self.viewport.height as i32,
             _ => self.viewport.height as i32,
         };
         RectI::new(0, 0, width, height)
@@ -317,13 +319,13 @@ impl Commit {
                 break;
             }
             seen[state] = true;
+            let reserve_vertical = bar_vertical && base.width > 0 && !spec.overlay;
+            let reserve_horizontal = bar_horizontal && base.height > 0 && !spec.overlay;
             let content = RectI::new(
                 base.line,
                 base.column,
-                base.width
-                    .saturating_sub(i32::from(bar_vertical && base.width > 0)),
-                base.height
-                    .saturating_sub(i32::from(bar_horizontal && base.height > 0)),
+                base.width.saturating_sub(i32::from(reserve_vertical)),
+                base.height.saturating_sub(i32::from(reserve_horizontal)),
             );
             let (next_children, width, height) =
                 self.child_layouts(children, content, style, (horizontal_axis, vertical_axis));
@@ -375,6 +377,10 @@ impl Commit {
         }
     }
 
+    /// Lays out `children` and appends portal subtrees out of flow.
+    ///
+    /// Portals are hoisted to the synthetic root, where they occupy the full
+    /// content rectangle instead of competing with the application's layout.
     pub(super) fn child_layouts<'a>(
         &self,
         children: &'a [DomNode],
@@ -385,10 +391,38 @@ impl Commit {
         if children.is_empty() {
             return (Vec::new(), 0, 0);
         }
+        let mut flow = Vec::with_capacity(children.len());
+        let mut portals = Vec::new();
+        for child in children {
+            if matches!(child, DomNode::Element { props, .. } if props.portal) {
+                if Self::visibility_of(child) != Visibility::Hidden {
+                    portals.push(child);
+                }
+            } else {
+                flow.push(child);
+            }
+        }
+        let (mut out, width, height) = self.child_layouts_flow(&flow, content, style, scroll_axes);
+        for child in portals {
+            out.push((child, content));
+        }
+        (out, width, height)
+    }
+
+    fn child_layouts_flow<'a>(
+        &self,
+        children: &[&'a DomNode],
+        content: RectI,
+        style: &ComputedStyle,
+        scroll_axes: (bool, bool),
+    ) -> (Vec<(&'a DomNode, RectI)>, i32, i32) {
+        if children.is_empty() {
+            return (Vec::new(), 0, 0);
+        }
         if style.layout == Layout::Absolute {
             let out: Vec<_> = children
                 .iter()
-                .filter_map(|child| {
+                .filter_map(|&child| {
                     if Self::visibility_of(child) == Visibility::Hidden {
                         return None;
                     }
@@ -478,10 +512,11 @@ impl Commit {
             self.viewport.width as i32
         };
         let mut entries = Vec::with_capacity(children.len());
-        let mut max_count = 0usize;
+        let mut grow_weight = 0i64;
+        let mut grow_count = 0usize;
         let mut percent_total = 0i64;
         let mut percent_allocated = 0i64;
-        for child in children {
+        for &child in children {
             if Self::visibility_of(child) == Visibility::Hidden {
                 continue;
             }
@@ -531,8 +566,13 @@ impl Commit {
             } else {
                 Some(available_cross)
             };
-            let main = if main_dimension == Dimension::Max && !main_scrolls {
-                max_count = max_count.saturating_add(1);
+            let grows = matches!(main_dimension, Dimension::Max | Dimension::Grow(_));
+            let main = if grows && !main_scrolls {
+                grow_weight = grow_weight.saturating_add(match main_dimension {
+                    Dimension::Grow(weight) => i64::from(weight),
+                    _ => 1,
+                });
+                grow_count = grow_count.saturating_add(1);
                 0
             } else {
                 resolve_dimension(
@@ -593,23 +633,38 @@ impl Commit {
             (style.gap as i32).saturating_mul(entries.len().saturating_sub(1) as i32),
         );
         let remaining = (available_main - used).max(0);
-        let max_share = if max_count > 0 {
-            remaining / max_count as i32
-        } else {
-            0
-        };
-        let mut remainder = if max_count > 0 {
-            remaining % max_count as i32
-        } else {
-            0
-        };
-        let mut cursor = if max_count == 0 {
+        let mut grow_shares = vec![0i32; entries.len()];
+        if grow_weight > 0 && remaining > 0 {
+            let mut assigned = 0i64;
+            let mut remainders = Vec::with_capacity(grow_count);
+            for (index, entry) in entries.iter().enumerate() {
+                let weight = match entry.2 {
+                    Dimension::Grow(weight) => i64::from(weight),
+                    Dimension::Max => 1,
+                    _ => 0,
+                };
+                if weight == 0 {
+                    continue;
+                }
+                let scaled = i64::from(remaining).saturating_mul(weight);
+                let share = scaled / grow_weight;
+                grow_shares[index] = share as i32;
+                assigned = assigned.saturating_add(share);
+                remainders.push((scaled % grow_weight, index));
+            }
+            let leftover = i64::from(remaining).saturating_sub(assigned).max(0);
+            remainders.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            for (_, index) in remainders.into_iter().take(leftover as usize) {
+                grow_shares[index] = grow_shares[index].saturating_add(1);
+            }
+        }
+        let mut cursor = if grow_count == 0 {
             justify_offset(style.justify, remaining)
         } else {
             0
         };
         let space_between =
-            max_count == 0 && style.justify == Justify::SpaceBetween && entries.len() > 1;
+            grow_count == 0 && style.justify == Justify::SpaceBetween && entries.len() > 1;
         let extra_gap = if space_between {
             remaining / (entries.len() - 1) as i32
         } else {
@@ -635,9 +690,8 @@ impl Commit {
             } else {
                 scroll_axes.0
             };
-            if main_dimension == Dimension::Max && !main_scrolls {
-                main = max_share + (remainder > 0) as i32;
-                remainder -= (remainder > 0) as i32;
+            if !main_scrolls && matches!(main_dimension, Dimension::Max | Dimension::Grow(_)) {
+                main = grow_shares[index];
             }
             let cross_is_auto = cross_dimension == Dimension::Auto;
             if cross_is_auto && style.align == Align::Stretch && !cross_scrolls {

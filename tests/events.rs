@@ -926,3 +926,156 @@ fn focus_ownership_terminal_focus_and_global_keys_stay_distinct() {
     drop(input);
     let _ = runtime.shutdown(icmd::advanced::ShutdownPolicy::default());
 }
+
+#[test]
+fn application_pointer_hooks_observe_events_without_a_wrapper_node() {
+    let global = Arc::new(AtomicUsize::new(0));
+    let global_for_listener = global.clone();
+    let node = root
+        .style(|style| {
+            style.width /= Dimension::Max;
+            style.height /= Dimension::Max;
+        })
+        .events(move |events| {
+            events.app_pointer /= EventListener::new(move |_event| {
+                global_for_listener.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .apply(());
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(Size::new(20, 5));
+    let (input, output) = Runtime::new(Lower::default()).then(commit).start();
+    input.send(node).unwrap();
+    output.recv().unwrap();
+
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 2,
+        modifiers: KeyModifiers::empty(),
+    }));
+    // A press outside the app's own box must still reach a global observer.
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 50,
+        row: 50,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert_eq!(global.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn application_pointer_capture_runs_first_and_can_stop_the_target() {
+    let target_hits = Arc::new(AtomicUsize::new(0));
+    let target_for_listener = target_hits.clone();
+    let node = root
+        .style(|style| {
+            style.width /= Dimension::Max;
+            style.height /= Dimension::Max;
+        })
+        .events(move |events| {
+            events.pointer_down /= EventListener::new(move |_event| {
+                target_for_listener.fetch_add(1, Ordering::SeqCst);
+            });
+            events.app_pointer_capture /= EventListener::new(move |event: icmd::PointerEvent| {
+                event.stop_propagation();
+            });
+        })
+        .apply(());
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(Size::new(20, 5));
+    let (input, output) = Runtime::new(Lower::default()).then(commit).start();
+    input.send(node).unwrap();
+    output.recv().unwrap();
+
+    let outcome = dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(outcome.propagation_stopped);
+    assert_eq!(target_hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn pointer_cancel_capture_observes_terminal_focus_loss() {
+    let cancel_hits = Arc::new(AtomicUsize::new(0));
+    let cancel_for_listener = cancel_hits.clone();
+    let normal_cancel_hits = Arc::new(AtomicUsize::new(0));
+    let normal_for_listener = normal_cancel_hits.clone();
+    let node = root
+        .style(|style| {
+            style.width /= Dimension::Max;
+            style.height /= Dimension::Max;
+        })
+        .events(move |events| {
+            events.pointer_down /= EventListener::new(|_event| {});
+            events.pointer_cancel_capture /= EventListener::new(move |_event| {
+                cancel_for_listener.fetch_add(1, Ordering::SeqCst);
+            });
+            events.pointer_cancel /= EventListener::new(move |_event| {
+                normal_for_listener.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .apply(());
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(Size::new(20, 5));
+    let (input, output) = Runtime::new(Lower::default()).then(commit).start();
+    input.send(node).unwrap();
+    output.recv().unwrap();
+
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert!(dispatcher.pointer_capture().is_some());
+    dispatcher.dispatch(Event::FocusLost);
+    assert_eq!(cancel_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(normal_cancel_hits.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn capture_attributes_and_dom_setters_are_available() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_for_macro = hits.clone();
+    let node = ui! {
+        <view style={|style: &mut icmd::Style| {
+            style.width /= Dimension::Max;
+            style.height /= Dimension::Max;
+        }} on_pointer_down_capture={EventListener::new(move |_event: icmd::PointerEvent| {
+            hits_for_macro.fetch_add(1, Ordering::SeqCst);
+        })}>
+            "capture"
+        </view>
+    };
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(Size::new(20, 5));
+    let (input, output) = Runtime::new(Lower::default()).then(commit).start();
+    input.send(node).unwrap();
+    output.recv().unwrap();
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    let setter_hits = Arc::new(AtomicUsize::new(0));
+    let setter_for_listener = setter_hits.clone();
+    let dom = icmd::DomProps::default().pointer_down(EventListener::new(move |_event| {
+        setter_for_listener.fetch_add(1, Ordering::SeqCst);
+    }));
+    assert!(matches!(dom.events.pointer_down, icmd::Attr::Set(_)));
+    let node = icmd::Node::element(dom, [icmd::text("setter")]);
+    let (commit, _viewport, dispatcher) = Commit::new_with_events(Size::new(20, 5));
+    let (input, output) = Runtime::new(Lower::default()).then(commit).start();
+    input.send(node).unwrap();
+    output.recv().unwrap();
+    dispatcher.dispatch(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    }));
+    assert_eq!(setter_hits.load(Ordering::SeqCst), 1);
+}

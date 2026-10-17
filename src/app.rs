@@ -57,7 +57,9 @@ pub struct RuntimeConfig {
     /// Whether to ask a terminal that supports the kitty keyboard protocol to
     /// report modified keys unambiguously; without it a terminal collapses
     /// Ctrl+Shift+C into Ctrl+C, making the clipboard chords indistinguishable
-    /// from the exit key.
+    /// from the exit key. The same request asks for alternate keys, so a
+    /// shifted character arrives as the glyph the layout actually produces
+    /// instead of an unshifted code point plus a modifier bit.
     pub enhanced_keyboard: bool,
     /// Whether to mirror every copy and cut into the terminal's own clipboard
     /// with an OSC 52 write, so the terminal's paste shortcut sees text copied
@@ -225,6 +227,7 @@ impl TerminalSession {
                 PushKeyboardEnhancementFlags(
                     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                         | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                         | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
                 )
             )?;
@@ -545,6 +548,7 @@ pub fn run_session(
             emoji_merging: config.emoji_merging,
         },
     );
+    handle.attach_services(std::sync::Arc::new(dispatcher.clone()));
     let renderer = match Renderer::with_config(
         viewport,
         RendererConfig {
@@ -583,7 +587,17 @@ pub fn run_session(
                 runner.set_exit(ExitReason::Requested);
                 break 'render;
             }
-            match receive_frame(&output, render_wait) {
+            handle.tick_frame_clocks(Instant::now());
+            if handle.take_frame_clock_fault() {
+                outcome = Err(RenderError::ApplicationCallback("frame clock"));
+                break 'render;
+            }
+            let wait = handle
+                .next_frame_wait(Instant::now())
+                .map_or(render_wait, |wait| {
+                    render_wait.min(wait.max(Duration::from_millis(1)))
+                });
+            match receive_frame(&output, wait) {
                 Ok(Some(frame)) => {
                     if let Err(error) = write(&frame) {
                         outcome = Err(RenderError::Io(error));
@@ -636,7 +650,11 @@ pub fn run_session(
                 if matches!(&event, Event::Key(key) if is_exit_key(*key, config.exit_key)) {
                     break 'render;
                 }
+                let resized = matches!(&event, Event::Resize(_, _));
                 dispatcher.dispatch(event);
+                if resized {
+                    handle.request_frame();
+                }
                 if let Some(detail) = dispatcher.take_callback_fault() {
                     outcome = Err(RenderError::ApplicationCallback(detail));
                     break 'render;
@@ -651,7 +669,11 @@ pub fn run_session(
                 if matches!(&event, Event::Key(key) if is_exit_key(*key, config.exit_key)) {
                     break 'render;
                 }
+                let resized = matches!(&event, Event::Resize(_, _));
                 dispatcher.dispatch(event);
+                if resized {
+                    handle.request_frame();
+                }
                 if let Some(detail) = dispatcher.take_callback_fault() {
                     outcome = Err(RenderError::ApplicationCallback(detail));
                     break 'render;

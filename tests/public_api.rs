@@ -478,3 +478,64 @@ fn a_rejected_renderer_policy_keeps_its_typed_source() {
     assert!(error.source().is_none());
     assert!(error.to_string().contains("cell pixel width"));
 }
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn the_style_builder_chains_to_the_same_value_as_field_assignment() {
+    use crossterm::style::Color;
+    use icmd::{AxisPosition, BackgroundBlend, BorderKind, Edges, PointerEvents, TextStyle};
+
+    let built = icmd::Style::new()
+        .layout(Layout::Horizontal)
+        .width(Dimension::Cells(20))
+        .height(Dimension::Max)
+        .line(AxisPosition::Center)
+        .column(AxisPosition::End)
+        .margin(Edges::all(1))
+        .padding(Edges::symmetric(1, 2))
+        .gap(2)
+        .justify(Justify::Center)
+        .align(Align::Center)
+        .overflow(Overflow::Clip)
+        .overflow_x(Overflow::Visible)
+        .overflow_y(Overflow::Clip)
+        .visibility(icmd::Visibility::Hidden)
+        .z_index(3)
+        .pointer_events(PointerEvents::None)
+        .background(Color::Blue)
+        .background_blend(BackgroundBlend::Blend)
+        .fill(icmd::Fill::new("x").unwrap())
+        .border(BorderStyle {
+            kind: Attr::Set(BorderKind::Double),
+            ..BorderStyle::default()
+        })
+        .text(TextStyle::default().bold());
+
+    let mut manual = icmd::Style::default();
+    manual.layout = Attr::Set(Layout::Horizontal);
+    manual.width = Attr::Set(Dimension::Cells(20));
+    manual.height = Attr::Set(Dimension::Max);
+    manual.line = Attr::Set(AxisPosition::Center);
+    manual.column = Attr::Set(AxisPosition::End);
+    manual.margin = Attr::Set(Edges::all(1));
+    manual.padding = Attr::Set(Edges::symmetric(1, 2));
+    manual.gap = Attr::Set(2);
+    manual.justify = Attr::Set(Justify::Center);
+    manual.align = Attr::Set(Align::Center);
+    manual.overflow = Attr::Set(Overflow::Clip);
+    manual.overflow_x = Attr::Set(Overflow::Visible);
+    manual.overflow_y = Attr::Set(Overflow::Clip);
+    manual.visibility = Attr::Set(icmd::Visibility::Hidden);
+    manual.z_index = Attr::Set(3);
+    manual.pointer_events = Attr::Set(PointerEvents::None);
+    manual.background = Attr::Set(Color::Blue);
+    manual.background_blend = Attr::Set(BackgroundBlend::Blend);
+    manual.fill = Attr::Set(icmd::Fill::new("x").unwrap());
+    manual.border = BorderStyle {
+        kind: Attr::Set(BorderKind::Double),
+        ..BorderStyle::default()
+    };
+    manual.text = TextStyle::default().bold();
+
+    assert_eq!(built, manual);
+}

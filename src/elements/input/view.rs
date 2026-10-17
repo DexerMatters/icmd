@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEventState, KeyModifiers};
 
 use crate::basic::editor_surface::{EditorSurface, LayoutProbe};
 use crate::basic::selection::{
@@ -18,7 +18,10 @@ use crate::{
 };
 
 use super::model::{EditAction, EditIntent, EditModel, EditPolicy};
-use super::{TextClipboardAction, TextClipboardEvent, TextValueEvent};
+use super::{
+    TextClipboardAction, TextClipboardEvent, TextSelectionChange, TextSelectionState,
+    TextValueEvent,
+};
 
 /// Editing mode for [`raw_input`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -65,6 +68,11 @@ pub struct RawInputProps {
     pub mode: Attr<RawInputMode>,
     /// Controlled value; when set, the control renders it and requests changes
     /// instead of mutating itself.
+    ///
+    /// The editor keeps an optimistic draft while the owner catches up. An
+    /// echo of the draft accepts it; an earlier emission is catching up; a
+    /// repeated old value is a stale frame; a value outside the recent history
+    /// replaces the text. To reject a draft, publish a distinct value.
     pub value: Attr<String>,
     /// Initial value for an uncontrolled control.
     pub default_value: Attr<String>,
@@ -90,6 +98,11 @@ pub struct RawInputProps {
     pub on_submit: Attr<EventListener<TextValueEvent>>,
     /// Listener for copy and cut operations answered by the control.
     pub on_clipboard: Attr<EventListener<TextClipboardEvent>>,
+    /// Controlled caret or selection. When set, it is authoritative after
+    /// every render; leave it unset to let the editor own the caret.
+    pub selection: Attr<TextSelectionState>,
+    /// Listener invoked whenever the editor changes the caret or selection.
+    pub on_selection_change: Attr<EventListener<TextSelectionChange>>,
 }
 
 impl std::fmt::Debug for RawInputProps {
@@ -126,6 +139,8 @@ struct InputState {
     scroll_y: usize,
     /// Whether the next reconcile should scroll the caret into view.
     reveal_caret: bool,
+    /// The selection last reported through `on_selection_change`.
+    reported_selection: Option<(usize, usize)>,
 }
 
 /// Resolved per-frame configuration derived from props and the committed
@@ -232,6 +247,11 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
             config.multiline,
             config.policy.emoji_merging,
         );
+        if let Some(selection) = props.selection.as_ref() {
+            state
+                .model
+                .set_selection(selection.anchor, selection.cursor);
+        }
         if config.policy.disabled {
             state.dragging = false;
             state.reveal_caret = false;
@@ -286,6 +306,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
     let on_change = props.on_change.as_ref().cloned();
     let on_submit = props.on_submit.as_ref().cloned();
     let on_clipboard = props.on_clipboard.as_ref().cloned();
+    let on_selection_change = props.on_selection_change.as_ref().cloned();
 
     let key = {
         let state_ref = state_ref.clone();
@@ -295,6 +316,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let on_change = on_change.clone();
         let on_submit = on_submit.clone();
         let on_clipboard = on_clipboard.clone();
+        let on_selection_change = on_selection_change.clone();
         let caller = caller.key_down.as_ref().cloned();
         EventListener::compose(
             move |event: KeyboardEvent| {
@@ -308,6 +330,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 let mut value_event = None;
                 let mut clipboard_event = None;
                 let mut submit_event = None;
+                let selection_event: Option<TextSelectionChange>;
                 let mut caret_moved = false;
                 let clipboard = clipboard_intent(&event);
                 let copy_selection = clipboard == Some(ClipboardIntent::Copy);
@@ -390,6 +413,12 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                             text,
                         });
                     }
+                    selection_event = take_selection_change(&mut state, &on_selection_change);
+                }
+                if let Some(listener) = &on_selection_change
+                    && let Some(event) = selection_event
+                {
+                    listener.call(event);
                 }
                 if let Some(listener) = &on_clipboard
                     && let Some(event) = clipboard_event
@@ -420,6 +449,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let config = config.clone();
         let probe = probe.clone();
         let on_change = on_change.clone();
+        let on_selection_change = on_selection_change.clone();
         let caller = caller.paste_event.as_ref().cloned();
         EventListener::compose(
             move |event: PasteEvent| {
@@ -430,7 +460,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 if policy.disabled || policy.read_only {
                     return;
                 }
-                let (changed, value_event) = {
+                let (changed, value_event, selection_event) = {
                     let mut state = state_ref.lock().expect("input state poisoned");
                     let outcome = state
                         .model
@@ -438,13 +468,20 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                     if outcome.changed {
                         state.reveal_caret = true;
                     }
+                    let selection = take_selection_change(&mut state, &on_selection_change);
                     (
                         outcome.changed,
                         outcome.value.map(|value| TextValueEvent { value }),
+                        selection,
                     )
                 };
                 if changed {
                     redraw.update(|value| *value += 1);
+                }
+                if let Some(listener) = &on_selection_change
+                    && let Some(event) = selection_event
+                {
+                    listener.call(event);
                 }
                 if let Some(listener) = &on_change
                     && let Some(event) = value_event
@@ -461,6 +498,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let redraw = redraw.clone();
         let config = config.clone();
         let probe = probe.clone();
+        let on_selection_change = on_selection_change.clone();
         let caller = caller.pointer_down.as_ref().cloned();
         EventListener::compose(
             move |event: PointerEvent| {
@@ -472,7 +510,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                     return;
                 }
                 event.stop_propagation();
-                {
+                let selection_event = {
                     let mut state = state_ref.lock().expect("input state poisoned");
                     let offset = pointer_offset(&probe, &state, &config, event.local_position);
                     let extend = event.modifiers.contains(KeyModifiers::SHIFT);
@@ -483,6 +521,12 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                         state.pressed = offset;
                     }
                     state.dragging = true;
+                    take_selection_change(&mut state, &on_selection_change)
+                };
+                if let Some(listener) = &on_selection_change
+                    && let Some(event) = selection_event
+                {
+                    listener.call(event);
                 }
                 redraw.update(|value| *value += 1);
             },
@@ -495,6 +539,7 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
         let redraw = redraw.clone();
         let config = config.clone();
         let probe = probe.clone();
+        let on_selection_change = on_selection_change.clone();
         let caller = caller.pointer_move.as_ref().cloned();
         EventListener::compose(
             move |event: PointerEvent| {
@@ -513,7 +558,13 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
                 state.model.drag_selection(&committed, point, pressed);
                 let _ = policy;
                 state.reveal_caret = false;
+                let selection_event = take_selection_change(&mut state, &on_selection_change);
                 drop(state);
+                if let Some(listener) = &on_selection_change
+                    && let Some(event) = selection_event
+                {
+                    listener.call(event);
+                }
                 redraw.update(|value| *value += 1);
             },
             caller,
@@ -658,6 +709,29 @@ pub fn raw_input(cx: &mut ComponentContext, props: &Props<RawInputProps>) -> Nod
             </view>
         }
     }
+}
+
+/// Build a caret-change event when the current selection differs from the one
+/// last reported. The reported slot advances even without a listener, so
+/// attaching one later does not replay history.
+fn take_selection_change(
+    state: &mut InputState,
+    listener: &Option<EventListener<TextSelectionChange>>,
+) -> Option<TextSelectionChange> {
+    let caret = state.model.caret();
+    let current = (caret.anchor, caret.cursor);
+    if state.reported_selection == Some(current) {
+        return None;
+    }
+    state.reported_selection = Some(current);
+    listener.as_ref()?;
+    Some(TextSelectionChange {
+        selection: TextSelectionState {
+            anchor: caret.anchor,
+            cursor: caret.cursor,
+        },
+        text: state.model.value().to_string(),
+    })
 }
 
 /// Whether the control currently holds focus and is enabled.
@@ -876,10 +950,75 @@ fn key_action(event: &KeyboardEvent, config: &Config) -> Option<EditAction> {
                         | KeyModifiers::META,
                 ) =>
         {
-            Some(EditAction::Insert(ch.to_string()))
+            Some(EditAction::Insert(typed_text(event, ch)))
         }
         _ => None,
     }
+}
+
+/// Resolve the text a character key types.
+///
+/// A terminal that speaks the kitty keyboard protocol reports a text key as
+/// its unshifted code point plus modifier bits, so Shift and Caps Lock never
+/// appear in the character itself; a legacy terminal bakes both into the
+/// character and adds only the Shift bit. Both spellings resolve to the glyph
+/// the user pressed. Caps Lock uppercases letters and Shift toggles that, so
+/// the two cancel each other. When the terminal reports the shifted character
+/// through the alternate-key field, Shift has already been cleared and the
+/// uppercase character plus the lock state identify the same cancellation.
+fn typed_text(event: &KeyboardEvent, ch: char) -> String {
+    let shift = event.key.modifiers.contains(KeyModifiers::SHIFT);
+    if ch.is_alphabetic() {
+        let caps = event.key.state.contains(KeyEventState::CAPS_LOCK);
+        let uppercase = if caps {
+            !(shift || ch.is_uppercase())
+        } else {
+            shift || ch.is_uppercase()
+        };
+        return if uppercase {
+            ch.to_uppercase().collect()
+        } else {
+            ch.to_lowercase().collect()
+        };
+    }
+    if shift && let Some(shifted) = shifted_ascii_symbol(ch) {
+        return shifted.to_string();
+    }
+    ch.to_string()
+}
+
+/// The character Shift produces for an unshifted ASCII symbol.
+///
+/// A terminal that honours `REPORT_ALTERNATE_KEYS` reports the layout-correct
+/// shifted character itself, so this table is only the fallback for terminals
+/// that accept the protocol's escape codes but ignore that flag. It maps the
+/// standard US layout; for other layouts it is a best effort that still beats
+/// dropping the Shift bit.
+fn shifted_ascii_symbol(ch: char) -> Option<char> {
+    Some(match ch {
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        _ => return None,
+    })
 }
 
 /// Convert a pointer position into the document coordinates the selection

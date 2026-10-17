@@ -9,7 +9,8 @@ use std::{
 };
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use icmd::advanced::{Commit, EventDispatcher, Lower, Renderer, Runtime};
 use icmd::{
@@ -34,6 +35,15 @@ fn pipeline(
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))
+}
+
+fn key_with_state(code: KeyCode, modifiers: KeyModifiers, state: KeyEventState) -> Event {
+    Event::Key(KeyEvent::new_with_kind_and_state(
+        code,
+        modifiers,
+        KeyEventKind::Press,
+        state,
+    ))
 }
 
 /// Wait for the pipeline to settle, dispatch one event, and settle again.
@@ -142,6 +152,130 @@ fn raw_input_is_focusable_and_receives_keys() {
     assert!(
         values.iter().any(|value| value == "ab"),
         "focus must deliver keys: {values:?}"
+    );
+}
+
+#[test]
+fn kitty_protocol_keys_insert_the_shifted_or_caps_locked_character() {
+    // Under the kitty keyboard protocol a text key arrives as its unshifted
+    // code point plus modifier bits, so Shift and Caps Lock are no longer part
+    // of the character itself. The editor must resolve them to the glyph the
+    // user typed.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = sized_raw_input(RawInputProps {
+        on_change: Attr::Set(EventListener::new({
+            let values = values.clone();
+            move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+        })),
+        ..RawInputProps::default()
+    });
+    let viewport = Size::new(12, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    // Shift+a: the unshifted `a` plus the SHIFT bit.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key_with_state(
+            KeyCode::Char('a'),
+            KeyModifiers::SHIFT,
+            KeyEventState::empty(),
+        )),
+    );
+    // Caps Lock on, no Shift.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key_with_state(
+            KeyCode::Char('a'),
+            KeyModifiers::empty(),
+            KeyEventState::CAPS_LOCK,
+        )),
+    );
+    // Caps Lock and Shift cancel each other.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key_with_state(
+            KeyCode::Char('a'),
+            KeyModifiers::SHIFT,
+            KeyEventState::CAPS_LOCK,
+        )),
+    );
+    // With alternate-key reporting the terminal sends the shifted glyph and
+    // clears Shift, so an uppercase letter plus Caps Lock is the same chord.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key_with_state(
+            KeyCode::Char('A'),
+            KeyModifiers::empty(),
+            KeyEventState::CAPS_LOCK,
+        )),
+    );
+    // A legacy terminal sends the uppercase character and the Shift bit; it
+    // must not be shifted a second time.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('A'), KeyModifiers::SHIFT)),
+    );
+    // Case mapping is not limited to ASCII.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('ф'), KeyModifiers::SHIFT)),
+    );
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("AAaaAФ"),
+        "Shift, Caps Lock, and their cancellation must insert the typed glyph"
+    );
+}
+
+#[test]
+fn shifted_symbols_insert_the_glyph_when_alternate_keys_are_absent() {
+    // A terminal that accepts the protocol's escape codes but ignores the
+    // alternate-key flag reports Shift+1 as `1` plus SHIFT; the editor still
+    // has to insert the shifted symbol. Caps Lock does not touch symbols.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = sized_raw_input(RawInputProps {
+        on_change: Attr::Set(EventListener::new({
+            let values = values.clone();
+            move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+        })),
+        ..RawInputProps::default()
+    });
+    let viewport = Size::new(12, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 1)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('1'), KeyModifiers::SHIFT)),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key_with_state(
+            KeyCode::Char('2'),
+            KeyModifiers::empty(),
+            KeyEventState::CAPS_LOCK,
+        )),
+    );
+    // A terminal that already reported the shifted glyph must not shift it a
+    // second time.
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('!'), KeyModifiers::SHIFT)),
+    );
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("!2!"),
+        "Shifted symbols must match the terminal's own keyboard layout report"
     );
 }
 
@@ -441,8 +575,9 @@ fn a_custom_component_extends_raw_input_without_private_apis() {
 
 #[test]
 fn controlled_raw_input_accepts_and_rejects_deterministically() {
-    // The owner is authoritative at every render: an echo of the emitted value
-    // is acceptance; any other value replaces the field.
+    // The owner is authoritative when it moves: an echo of the emitted value
+    // is acceptance; a distinct value replaces the field. Re-rendering the old
+    // value is a stale frame, not a rejection.
     #[derive(Clone, Default)]
     struct OwnerProps {
         values: Arc<Mutex<Vec<String>>>,
@@ -460,6 +595,10 @@ fn controlled_raw_input_accepts_and_rejects_deterministically() {
                     values.lock().unwrap().push(event.value.clone());
                     if *accept.lock().unwrap() {
                         set_value.set(event.value);
+                    } else {
+                        // A rejection publishes a new owner value; repeating the
+                        // old one would be indistinguishable from a stale frame.
+                        set_value.set("x".to_string());
                     }
                 })),
                 ..RawInputProps::default()
@@ -516,9 +655,9 @@ fn controlled_raw_input_accepts_and_rejects_deterministically() {
     );
     assert_eq!(
         values.lock().unwrap().as_slice(),
-        &["ab".to_string(), "ac".to_string()],
-        "each render rejects back to the owner's value, so the second keystroke \
-         produces 'ac' rather than resurrecting 'ab'"
+        &["ab".to_string(), "xc".to_string()],
+        "a rejecting owner publishes a distinct value, so the next keystroke edits \
+         that value instead of resurrecting the rejected draft"
     );
 }
 
@@ -2403,4 +2542,113 @@ fn a_pointer_click_survives_a_resize_that_does_not_clamp() {
         last, "abcdef#ghijklmnop界",
         "the click must land on the cell the resized frame painted: {values:?}"
     );
+}
+
+#[test]
+fn selection_changes_are_reported_and_can_be_controlled() {
+    let changes = Arc::new(Mutex::new(Vec::new()));
+    let node = sized_raw_input(RawInputProps {
+        default_value: Attr::Set("abc".into()),
+        on_selection_change: Attr::Set(EventListener::new({
+            let changes = changes.clone();
+            move |event: icmd::TextSelectionChange| changes.lock().unwrap().push(event)
+        })),
+        ..RawInputProps::default()
+    });
+    let viewport = Size::new(12, 3);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 2)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::End, KeyModifiers::empty())),
+    );
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Left, KeyModifiers::SHIFT)),
+    );
+    let changes = changes.lock().unwrap().clone();
+    let last = changes.last().expect("a selection change is reported");
+    assert_eq!(last.selection, icmd::TextSelectionState::between(3, 2));
+    assert_eq!(last.text, "abc");
+
+    // A controlled selection is authoritative after each render.
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = sized_raw_input(RawInputProps {
+        default_value: Attr::Set("abc".into()),
+        selection: Attr::Set(icmd::TextSelectionState::at(999)),
+        on_change: Attr::Set(EventListener::new({
+            let values = values.clone();
+            move |event: TextValueEvent| values.lock().unwrap().push(event.value)
+        })),
+        ..RawInputProps::default()
+    });
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 2)));
+    interact(
+        &output,
+        &dispatcher,
+        Some(key(KeyCode::Char('X'), KeyModifiers::empty())),
+    );
+    assert_eq!(
+        values.lock().unwrap().last().map(String::as_str),
+        Some("abcX"),
+        "a selection past the end clamps to the value end"
+    );
+}
+
+#[test]
+fn rapid_typing_into_a_controlled_input_keeps_the_draft() {
+    #[derive(Clone, Default)]
+    struct OwnerProps {
+        values: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn owner(cx: &mut ComponentContext, props: &Props<OwnerProps>) -> Node {
+        let (value, set_value) = cx.use_state(String::new);
+        let values = props.values.clone();
+        icmd::input
+            .props(icmd::InputProps {
+                value: Attr::Set(value),
+                on_change: Attr::Set(EventListener::new(move |event: TextValueEvent| {
+                    values.lock().unwrap().push(event.value.clone());
+                    set_value.set(event.value);
+                })),
+                ..icmd::InputProps::default()
+            })
+            .node()
+    }
+
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let node = owner
+        .props(OwnerProps {
+            values: values.clone(),
+        })
+        .node();
+    let viewport = Size::new(20, 4);
+    let (sender, output, dispatcher) = pipeline(viewport);
+    sender.send(node).unwrap();
+    interact(&output, &dispatcher, Some(click(0, 2)));
+    // Dispatch a burst without draining frames between keys: the lowerer can
+    // serve a render with the pre-edit owner value while the event thread
+    // keeps extending the draft.
+    for ch in ['a', 'b', 'c', 'd', 'e'] {
+        dispatcher.dispatch(key(KeyCode::Char(ch), KeyModifiers::empty()));
+    }
+    while output.recv_timeout(Duration::from_millis(200)).is_ok() {}
+    let values = values.lock().unwrap().clone();
+    assert_eq!(
+        values.last().map(String::as_str),
+        Some("abcde"),
+        "rapid keystrokes must all survive: {values:?}"
+    );
+    for pair in values.windows(2) {
+        assert!(
+            pair[1].starts_with(&pair[0]),
+            "owner values must only grow: {values:?}"
+        );
+    }
 }

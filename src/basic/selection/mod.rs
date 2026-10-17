@@ -439,8 +439,8 @@ impl SelectionStyles {
     pub fn from_theme(theme: &Theme) -> Self {
         Self {
             active: TextStyle::default()
-                .foreground(theme.colors.primary_foreground)
-                .background(theme.colors.primary),
+                .foreground(theme.roles.selection_foreground)
+                .background(theme.roles.selection),
             inactive: TextStyle::default()
                 .foreground(theme.colors.muted_foreground)
                 .background(theme.colors.muted),

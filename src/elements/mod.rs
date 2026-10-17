@@ -53,11 +53,18 @@ pub use feedback::{
 pub use image::ImageProps;
 pub use input::{
     InputProps, RawInputAppearance, RawInputMode, RawInputProps, TextClipboardAction,
-    TextClipboardEvent, TextValueEvent, TextareaProps, input, normalize_for_test, raw_input,
-    textarea,
+    TextClipboardEvent, TextSelectionChange, TextSelectionState, TextValueEvent, TextareaProps,
+    input, normalize_for_test, raw_input, textarea,
 };
 pub use link::{LinkProps, link};
+pub(crate) mod chrome;
+pub use chrome::{FrameProps, PaneProps, SplitProps, SplitResizeEvent, frame, pane, split};
+pub(crate) mod overlays;
 #[cfg(feature = "markdown")]
 pub use markdown::{MarkdownProps, markdown};
-pub use scroll::{ScrollAreaProps, scroll_area};
+pub use overlays::{
+    DialogProps, MenuItem, MenuProps, PopoverPlacement, PopoverProps, PortalProps, dialog, menu,
+    popover, portal,
+};
+pub use scroll::{ScrollAreaProps, ScrollController, scroll_area};
 pub use selection_area::{SelectionAreaProps, TextSelectionEvent, selection_area};

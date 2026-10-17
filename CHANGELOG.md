@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the crate is pre-1.0, a minor release may add fields to public structs and
 so is a breaking change for exhaustive struct literals.
 
+## [0.4.0] - 2026-10-16
+
+### Added
+
+- `use_live_state` and live `use_state_ref`: shared state whose writes are
+  visible immediately and wake the owning component. `StateRef` is now
+  cloneable, exposes `set`, `update_quiet`/`try_update_quiet`, and reports
+  `same_allocation`.
+- `ElementRef::observe` and `ElementObserver`: a committed-snapshot
+  subscription used by anchored overlays and available to applications.
+- `TextSelectionState` and `TextSelectionChange`, plus `selection` and
+  `on_selection_change` on every text control.
+- Application-global pointer hooks: `app_pointer`, `app_pointer_capture`, and
+  `app_wheel`; `pointer_cancel_capture`; macro attributes for every capture
+  slot; chainable `DomProps` setters for every event slot.
+- `AppHandle::{request_frame, viewport, focus, try_focus, focused, blur}` and
+  `ComponentContext::{request_frame, use_viewport}`.
+- `PortalProps`/`portal`, `DialogProps`/`dialog`, `PopoverProps`/`popover`,
+  `PopoverPlacement`, `MenuProps`/`menu`, and `MenuItem`.
+- `PointerEvents` and `Style::pointer_events`, so a painted host can be
+  transparent to pointer hit testing.
+- `Dimension::Grow(u16)`: weighted main-axis distribution with largest-remainder
+  rounding; `Max` behaves as `Grow(1)`.
+- `FrameProps`/`frame`, `PaneProps`/`pane`, `SplitProps`/`split`, and
+  `SplitResizeEvent`: weighted panes with draggable and keyboard-adjustable
+  splitters.
+- `ThemeRoles` and `Theme::roles`: selection, row-alt, header, header-focus,
+  chip-on, and overlay role colors derived from the palette.
+- `ScrollController` and `ComponentContext::use_scroll_controller`, with
+  `scroll_to`, `scroll_by`, `scroll_to_row`, `reveal`, visible/content metrics,
+  and scrollbar size. `ScrollbarVisibility::Overlay` paints the bar without
+  reserving layout space.
+- `ElementScrollState` viewport and scrollbar metrics.
+- `display_width`, `display_width_with`, `fit`, and `fit_right`.
+- `ComponentContext::use_frame_clock`, `FrameClock`, and frame-clock scheduling
+  with pause/resume, intervals, and panic reporting.
+- `icmd::testing`: a headless `Harness` with mount/update, painted `Screen`,
+  key/mouse/wheel/drag gestures, resize, frame counting, focus, and frame-clock
+  ticking. `CellSlot` is exported through `advanced`.
+- Braille dot drawing on `CanvasContext`: `set_dot`, `clear_dot`, `set_dots`,
+  `set_run`, `dot_width`, `dot_height`, and `cell`.
+- `Style::new` and chainable setters for every style field.
+- Documented contracts for state snapshots, controlled-input reconciliation,
+  `Reset` vs `transparent()`, border/padding order, z-index and hit ordering,
+  `prevent_default`, overlay pointer ownership, and keyed identity.
+
+### Changed
+
+- `use_state_ref`-backed state now wakes the runtime; use
+  `StateRef::update_quiet` for the old quiet behavior.
+- Controlled text inputs no longer revert an optimistic draft when the owner
+  re-renders an old value. A rejection is a distinct new publisher value.
+- `Theme::from_parts` gained a `roles` argument; `ThemeBuilder` gained
+  `roles`.
+- New fields on `Style`, `DomProps`, `ScrollAreaProps`, `EventHandlers`, and the
+  text-control props; downstream exhaustive struct literals need `..Default`.
+- Portals are hoisted to an absolute root so an overlay and the application
+  root both occupy the full viewport.
+
+### Fixed
+
+- Text controls insert the character the user typed on terminals that speak the
+  kitty keyboard protocol. Shift and Caps Lock now produce uppercase letters
+  instead of the unshifted code point the terminal reports, they cancel each
+  other as usual, and Shift produces the keyboard layout's symbol. Legacy
+  terminals, which bake the shifted glyph into the character, keep working.
+- Fast typing against a controlled input no longer loses characters or stalls
+  the caret when a stale owner render arrives.
+- `pointer_cancel_capture` now observes terminal focus loss and can cancel the
+  rest of the pointer delivery.
+
+### Migration
+
+- Replace a parallel `Ref` plus redraw tick with `use_live_state`.
+- Use a distinct controlled value to reject a draft, or `use_live_state` for a
+  synchronous owner.
+- Replace hand-built overlay wrappers with `portal`/`dialog`/`popover`.
+- Replace pane cell arithmetic with `Grow`/`split`.
+- Import test helpers from `icmd::testing` instead of `__private`.
+
 ## [0.3.0] - 2026-10-16
 
 ### Added
@@ -64,5 +144,7 @@ so is a breaking change for exhaustive struct literals.
   Sixel, and iTerm2 output) and `markdown` (CommonMark as selectable
   components) features.
 
+[Unreleased]: https://github.com/DexerMatters/icmd/compare/v0.3.0...HEAD
+[0.4.0]: https://github.com/DexerMatters/icmd/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/DexerMatters/icmd/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/DexerMatters/icmd/releases/tag/v0.2.0

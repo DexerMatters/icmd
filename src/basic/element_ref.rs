@@ -71,6 +71,16 @@ pub struct ElementScrollState {
     pub content_width: u32,
     /// Logical content extent before viewport clipping and scrolling.
     pub content_height: u32,
+    /// Visible width of the scroll host after border, padding, and any
+    /// reserved scrollbar cells.
+    pub viewport_width: u32,
+    /// Visible height of the scroll host after border, padding, and any
+    /// reserved scrollbar cells.
+    pub viewport_height: u32,
+    /// Columns reserved or overlaid by the vertical scrollbar.
+    pub scrollbar_width: u32,
+    /// Rows reserved or overlaid by the horizontal scrollbar.
+    pub scrollbar_height: u32,
 }
 
 impl ElementScrollState {
@@ -249,10 +259,38 @@ impl ElementSnapshot {
     }
 }
 
+/// The snapshot and change observers behind one [`ElementRef`].
+#[derive(Default)]
+struct ElementRefState {
+    snapshot: Option<ElementSnapshot>,
+    observers: Vec<(u64, crate::EventListener<Option<ElementSnapshot>>)>,
+    next_observer: u64,
+}
+
 /// A stable handle to the latest committed state of one host element.
 #[derive(Clone, Default)]
 pub struct ElementRef {
-    state: Arc<Mutex<Option<ElementSnapshot>>>,
+    state: Arc<Mutex<ElementRefState>>,
+}
+
+/// Keeps one [`ElementRef`] observer registered until dropped.
+pub struct ElementObserver {
+    state: Arc<Mutex<ElementRefState>>,
+    id: u64,
+}
+
+impl fmt::Debug for ElementObserver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ElementObserver").finish_non_exhaustive()
+    }
+}
+
+impl Drop for ElementObserver {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.observers.retain(|(id, _)| *id != self.id);
+        }
+    }
 }
 
 impl fmt::Debug for ElementRef {
@@ -284,15 +322,50 @@ impl ElementRef {
     /// Returns the latest committed snapshot, or `None` before attachment and
     /// after the host is hidden or unmounted.
     pub fn current(&self) -> Option<ElementSnapshot> {
-        self.state.lock().expect("element ref poisoned").clone()
+        self.state
+            .lock()
+            .expect("element ref poisoned")
+            .snapshot
+            .clone()
+    }
+
+    /// Calls `listener` whenever this ref's committed snapshot changes.
+    ///
+    /// Dropping the returned guard unsubscribes. This is how an anchored
+    /// overlay learns that its anchor has been committed after its first
+    /// render, or that the anchor moved.
+    pub fn observe(
+        &self,
+        listener: impl FnMut(Option<ElementSnapshot>) + Send + 'static,
+    ) -> ElementObserver {
+        let listener = crate::EventListener::new(listener);
+        let mut state = self.state.lock().expect("element ref poisoned");
+        let id = state.next_observer;
+        state.next_observer = state.next_observer.wrapping_add(1);
+        state.observers.push((id, listener));
+        drop(state);
+        ElementObserver {
+            state: self.state.clone(),
+            id,
+        }
     }
 
     pub(crate) fn publish(&self, snapshot: Option<ElementSnapshot>) -> bool {
-        let mut current = self.state.lock().expect("element ref poisoned");
-        if *current == snapshot {
-            return false;
+        let observers = {
+            let mut state = self.state.lock().expect("element ref poisoned");
+            if state.snapshot == snapshot {
+                return false;
+            }
+            state.snapshot = snapshot.clone();
+            state
+                .observers
+                .iter()
+                .map(|(_, listener)| listener.clone())
+                .collect::<Vec<_>>()
+        };
+        for listener in observers {
+            listener.call(snapshot.clone());
         }
-        *current = snapshot;
         true
     }
 

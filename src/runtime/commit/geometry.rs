@@ -87,7 +87,7 @@ pub(super) fn resolve_dimension(
         Dimension::Percent(value) => {
             resolve_percent(value, available, viewport).unwrap_or(intrinsic)
         }
-        Dimension::Max => available.unwrap_or(intrinsic),
+        Dimension::Max | Dimension::Grow(_) => available.unwrap_or(intrinsic),
         Dimension::Auto => intrinsic.min(available.unwrap_or(intrinsic)),
     }
     .max(0)
@@ -103,7 +103,7 @@ pub(super) fn definite_dimension(
         Dimension::Percent(value) => {
             resolve_percent(value, available, viewport).map(|size| size.max(0))
         }
-        Dimension::Max => available.map(|size| size.max(0)),
+        Dimension::Max | Dimension::Grow(_) => available.map(|size| size.max(0)),
         Dimension::Auto => None,
     }
 }

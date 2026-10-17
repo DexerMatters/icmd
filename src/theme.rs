@@ -561,6 +561,64 @@ impl Default for ThemeColors {
     }
 }
 
+/// Semantic surface roles for application chrome that the base palette does
+/// not name directly.
+///
+/// These are derived once from [`ThemeColors`], so a preset keeps one palette
+/// while still providing selection, alternating rows, headers, on-chips, and
+/// overlay scrims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeRoles {
+    /// Active selection background.
+    pub selection: Color,
+    /// Text on an active selection.
+    pub selection_foreground: Color,
+    /// Alternating row surface.
+    pub row_alt: Color,
+    /// Header surface.
+    pub header: Color,
+    /// Text on a header.
+    pub header_foreground: Color,
+    /// Focused or active header.
+    pub header_focus: Color,
+    /// Text on a focused header.
+    pub header_focus_foreground: Color,
+    /// A control that is on, distinct from pressed.
+    pub chip_on: Color,
+    /// Text on an on-chip.
+    pub chip_on_foreground: Color,
+    /// Modal scrim or overlay wash.
+    pub overlay: Color,
+    /// Text on the overlay wash.
+    pub overlay_foreground: Color,
+}
+
+impl ThemeRoles {
+    /// Derives every role from a palette. The defaults deliberately reuse the
+    /// existing accent, card, and popover roles so presets need no new data.
+    pub fn from_colors(colors: &ThemeColors) -> Self {
+        Self {
+            selection: colors.primary,
+            selection_foreground: colors.primary_foreground,
+            row_alt: colors.card,
+            header: colors.card,
+            header_foreground: colors.card_foreground,
+            header_focus: colors.accent,
+            header_focus_foreground: colors.accent_foreground,
+            chip_on: colors.accent,
+            chip_on_foreground: colors.accent_foreground,
+            overlay: colors.popover,
+            overlay_foreground: colors.popover_foreground,
+        }
+    }
+}
+
+impl Default for ThemeRoles {
+    fn default() -> Self {
+        Self::from_colors(&ThemeColors::light())
+    }
+}
+
 /// Text styles for each role, all derived from the palette by default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemeTypography {
@@ -671,6 +729,8 @@ pub struct Theme {
     pub scrollbar: ScrollbarStyle,
     /// Progress-bar glyphs and colors derived from `colors`.
     pub progress: ProgressBarStyle,
+    /// Semantic surfaces for selection, headers, chips, and overlays.
+    pub roles: ThemeRoles,
 }
 
 /// Derives every token from a palette exactly once. After `from_palette` each
@@ -686,6 +746,7 @@ pub struct ThemeBuilder {
     borders: ThemeBorders,
     scrollbar: ScrollbarStyle,
     progress: ProgressBarStyle,
+    roles: ThemeRoles,
 }
 
 impl ThemeBuilder {
@@ -698,6 +759,7 @@ impl ThemeBuilder {
             borders: ThemeBorders::from_colors(&colors),
             scrollbar: scrollbar_style(&colors),
             progress: progress_style(&colors),
+            roles: ThemeRoles::from_colors(&colors),
             spacing: ThemeSpacing::default(),
             colors,
         }
@@ -728,6 +790,12 @@ impl ThemeBuilder {
         self
     }
 
+    /// Replaces the semantic role token with a deliberate override.
+    pub fn roles(mut self, roles: ThemeRoles) -> Self {
+        self.roles = roles;
+        self
+    }
+
     /// Replaces the resolved spacing token with a deliberate override.
     pub fn spacing(mut self, spacing: ThemeSpacing) -> Self {
         self.spacing = spacing;
@@ -744,6 +812,7 @@ impl ThemeBuilder {
             self.borders,
             self.scrollbar,
             self.progress,
+            self.roles,
         )
     }
 }
@@ -799,6 +868,7 @@ impl Theme {
     }
 
     /// Builds a theme from already-resolved parts without re-deriving them.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         mode: ThemeMode,
         colors: ThemeColors,
@@ -807,6 +877,7 @@ impl Theme {
         borders: ThemeBorders,
         scrollbar: ScrollbarStyle,
         progress: ProgressBarStyle,
+        roles: ThemeRoles,
     ) -> Self {
         Self {
             mode,
@@ -816,6 +887,7 @@ impl Theme {
             borders,
             scrollbar,
             progress,
+            roles,
         }
     }
 
